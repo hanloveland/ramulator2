@@ -1,3 +1,6 @@
+# Fork Ramulator 
+Fork Ramulator 2.0 to customize DRAM structure 
+
 # Ramulator V2.0a
 ## Introduction
 Ramulator 2.0 is a modern, modular, and extensible cycle-accurate DRAM simulator. It is the successor of Ramulator 1.0 [Kim+, CAL'16], achieving both fast simulation speed and ease of extension. The goal of Ramulator 2.0 is to enable rapid and agile implementation and evaluation of design changes in the memory controller and DRAM to meet the increasing research effort in improving the performance, security, and reliability of memory systems. Ramulator 2.0 abstracts and models key components in a DRAM-based memory system and their interactions into shared interfaces and independent implementations, enabling easy modification and extension of the modeled functions of the memory controller and DRAM. 
@@ -10,7 +13,7 @@ Currently, Ramulator 2.0 provides the DRAM models for the following standards:
 - GDDR6
 - HBM(2), HBM3
 
-Ramulator 2.0 also provides implementations for the following RowHammer mitigation techniques:
+<!-- Ramulator 2.0 also provides implementations for the following RowHammer mitigation techniques:
 - PARA [[Kim+, ISCA'14]](https://people.inf.ethz.ch/omutlu/pub/dram-row-hammer_isca14.pdf)
 - TWiCe [[Lee+, ISCA'19]](https://ieeexplore.ieee.org/document/8980327)
 - Graphene [[Park+, MICRO'20]](https://microarch.org/micro53/papers/738300a001.pdf)
@@ -18,7 +21,7 @@ Ramulator 2.0 also provides implementations for the following RowHammer mitigati
 - Hydra [[Qureshi+, ISCA'22]](https://memlab.ece.gatech.edu/papers/ISCA_2022_1.pdf)
 - Randomized Row Swap (RRS) [[Saileshwar+, ASPLOS'22]](https://gururaj-s.github.io/assets/pdf/ASPLOS22_Saileshwar.pdf)
 - AQUA [[Saxena+, MICRO'22]](https://memlab.ece.gatech.edu/papers/MICRO_2022_1.pdf)
-- An "Oracle" Refresh Mitigation [[Kim+, ISCA'20]](https://people.inf.ethz.ch/omutlu/pub/Revisiting-RowHammer_isca20-FINAL-DO-NOT_DISTRIBUTE.pdf)
+- An "Oracle" Refresh Mitigation [[Kim+, ISCA'20]](https://people.inf.ethz.ch/omutlu/pub/Revisiting-RowHammer_isca20-FINAL-DO-NOT_DISTRIBUTE.pdf) -->
 
 A quick glance at Ramulator 2.0's other key features:
 - Modular and extensible software architecture: Ramulator 2.0 provides an explicit separation of implementations from interfaces. Therefore new ideas can be implemented without intrusive changes.
