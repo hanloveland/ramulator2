@@ -49,6 +49,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     size_t s_read_latency = 0;
     float s_avg_read_latency = 0;
 
+    float s_bandwidth = 0;
+    float s_dq_bandwidth = 0;
+    float s_max_bandwidth = 0;
+    size_t s_num_issue_reads = 0;
+    size_t s_num_issue_writes = 0;
 
   public:
     void init() override {
@@ -108,6 +113,13 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       register_stat(s_read_latency).name("read_latency_{}", m_channel_id);
       register_stat(s_avg_read_latency).name("avg_read_latency_{}", m_channel_id);
+
+      register_stat(s_bandwidth).name("rw_bandwidth_{}", m_channel_id);
+      register_stat(s_num_issue_reads).name("num_issue_reads_{}", m_channel_id);
+      register_stat(s_num_issue_writes).name("num_issue_writes_{}", m_channel_id);
+      register_stat(s_dq_bandwidth).name("dq_bandwidth_{}", m_channel_id);
+      register_stat(s_max_bandwidth).name("max_bandwidth_{}", m_channel_id);
+
     };
 
     bool send(Request& req) override {
@@ -202,6 +214,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           update_request_stats(req_it);
         }
         m_dram->issue_command(req_it->command, req_it->addr_vec);
+
+        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
+        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
 
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {
@@ -405,6 +420,13 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       s_read_queue_len_avg = (float) s_read_queue_len / (float) m_clk;
       s_write_queue_len_avg = (float) s_write_queue_len / (float) m_clk;
       s_priority_queue_len_avg = (float) s_priority_queue_len / (float) m_clk;
+
+      // GB/s 
+      // Request Bandwidth, DQ Bandwidth, Max DQ Bandwidth
+      int tx_bytes = m_dram->m_internal_prefetch_size * m_dram->m_channel_width / 8;
+      s_bandwidth = ((float)((s_num_read_reqs + s_num_write_reqs) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E3;
+      s_dq_bandwidth = ((float)((s_num_issue_reads + s_num_issue_writes) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E3;
+      s_max_bandwidth = (float)(m_dram->m_channel_width / 8) * (float)m_dram->m_timing_vals("rate") / 1E3;      
 
       return;
     }
