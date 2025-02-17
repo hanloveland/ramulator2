@@ -44,9 +44,11 @@ class FRFCFS : public IScheduler, public Implementation {
       }
 
       for (auto& req : buffer) {
+        // Specifies a command (preq_cmd) for all requests in the buffer to be fulfilled 
         req.command = m_dram->get_preq_command(req.final_command, req.addr_vec);
       }
 
+      // Pick up the oldest of commands that are ready
       auto candidate = buffer.begin();
       for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
         candidate = compare(candidate, next);

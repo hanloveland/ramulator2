@@ -739,6 +739,7 @@ class DDR5 : public IDRAM, public Implementation {
     }
     
     void finalize() override {
+
       if (!m_drampower_enable)
         return;
 

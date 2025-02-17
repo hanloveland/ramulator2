@@ -27,6 +27,7 @@ class LinearMapperBase : public IAddrMapper {
       const auto& count = m_dram->m_organization.count;
       m_num_levels = count.size();
       m_addr_bits.resize(m_num_levels);
+      // Ch/Rank/BankGroup/Bank/Row/Col
       for (size_t level = 0; level < m_addr_bits.size(); level++) {
         m_addr_bits[level] = calc_log2(count[level]);
       }
@@ -65,6 +66,7 @@ class ChRaBaRoCo final : public LinearMapperBase, public Implementation {
       req.addr_vec.resize(m_num_levels, -1);
       Addr_t addr = req.addr >> m_tx_offset;
       for (int i = m_addr_bits.size() - 1; i >= 0; i--) {
+        // Address --> Ch/Ra/Ba/Ro/Co 
         req.addr_vec[i] = slice_lower_bits(addr, m_addr_bits[i]);
       }
     }
@@ -84,11 +86,15 @@ class RoBaRaCoCh final : public LinearMapperBase, public Implementation {
     void apply(Request& req) override {
       req.addr_vec.resize(m_num_levels, -1);
       Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
       req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> Col
       req.addr_vec[m_addr_bits.size() - 1] = slice_lower_bits(addr, m_addr_bits[m_addr_bits.size() - 1]);
+      // Row/Bk/Bg/Ra
       for (int i = 1; i <= m_row_bits_idx; i++) {
         req.addr_vec[i] = slice_lower_bits(addr, m_addr_bits[i]);
       }
+      // Address --> Ro/Bg/Bo/Ra/Co/Ch
     }
 };
 

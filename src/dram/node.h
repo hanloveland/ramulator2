@@ -190,6 +190,7 @@ struct DRAMNodeBase {
     int get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t m_clk) {
       int child_id = addr_vec[m_level + 1];
       if (m_spec->m_preqs[m_level][command]) {
+        // Find the command (preq_cmd) needed for that command using the lamda function. 
         int preq_cmd = m_spec->m_preqs[m_level][command](static_cast<NodeType*>(this), command, addr_vec, m_clk);
         if (preq_cmd != -1) {
           // stop recursion: there is a prerequisite at this level

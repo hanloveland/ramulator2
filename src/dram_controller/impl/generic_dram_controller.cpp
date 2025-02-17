@@ -142,9 +142,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       // Forward existing write requests to incoming read requests
       if (req.type_id == Request::Type::Read) {
+        // lamda function 
         auto compare_addr = [req](const Request& wreq) {
           return wreq.addr == req.addr;
         };
+        // if existing write request which is same address with read, send to pending request queue
         if (std::find_if(m_write_buffer.begin(), m_write_buffer.end(), compare_addr) != m_write_buffer.end()) {
           // The request will depart at the next cycle
           req.depart = m_clk + 1;
@@ -192,6 +194,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       // 1. Serve completed reads
       serve_completed_reads();
 
+      // Check tREF and Send REF by priority_send()
       m_refresh->tick();
 
       // 2. Try to find a request to serve.
@@ -356,6 +359,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     bool schedule_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
       bool request_found = false;
       // 2.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
+      // what is active_buffer? (opened row requesst?)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
         if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
           request_found = true;
