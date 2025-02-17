@@ -1,27 +1,32 @@
 Frontend:
-  impl: SimpleO3
-  clock_ratio: 8
-  num_expected_insts: 500000
-  traces: 
-    - example_inst.trace
+  impl: LoadStoreTrace
+  clock_ratio: 1
+  path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
 
   Translation:
-    impl: RandomTranslation
+    impl: NoTranslation
     max_addr: 2147483648
               
 
 MemorySystem:
   impl: GenericDRAM
-  clock_ratio: 3
+  clock_ratio: 1
 
   DRAM:
-    impl: DDR4
+    impl: DDR5
     org:
-      preset: DDR4_8Gb_x8
-      channel: 1
-      rank: 2
+      preset: DDR5_8Gb_x4
+      channel: 2
+      rank: 1
     timing:
-      preset: DDR4_2400R 
+      preset: DDR5_3200AN 
+    RFM:
+      BRC: 0  
+    drampower_enable: false
+    voltage:
+      preset: Default
+    current:
+      preset: Default
 
   Controller:
     impl: Generic
@@ -30,7 +35,7 @@ MemorySystem:
     RefreshManager:
       impl: AllBank
     RowPolicy:
-      impl: ClosedRowPolicy
+      impl: OpenRowPolicy
       cap: 4
     plugins:
 
