@@ -1,0 +1,44 @@
+Frontend:
+  impl: LoadStoreTrace
+  clock_ratio: 1
+  path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+              
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: DDR5-pCH
+    org:
+      preset: DDR5_8Gb_x4
+      channel: 2
+      pseudochannel : 4
+      rank: 4
+    timing:
+      preset: DDR5_3200AN 
+    RFM:
+      BRC: 0  
+    drampower_enable: false
+    voltage:
+      preset: Default
+    current:
+      preset: Default
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: DR5CHAllBank
+    RowPolicy:
+      impl: OpenRowPolicy
+      cap: 4
+    plugins:
+
+  AddrMapper:
+    impl: RoBaRaCoPcCh
