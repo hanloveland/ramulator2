@@ -91,6 +91,7 @@ void populate_timingcons(T* spec, std::vector<TimingConsInitializer> initializer
       int p_cmd = T::m_commands(p_cmd_str);
       for (auto f_cmd_str : ts.following) {
         int f_cmd = T::m_commands(f_cmd_str);
+        // std::cout<<ts.level<<" | "<<p_cmd_str<<" -> "<<f_cmd_str<<" : "<<ts.latency<<std::endl;
         spec->m_timing_cons[level][p_cmd].push_back({f_cmd, ts.latency, ts.window, ts.is_sibling});
       }
     }

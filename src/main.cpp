@@ -97,6 +97,7 @@ int main(int argc, char* argv[]) {
 
   int tick_mult = frontend_tick * mem_tick;
 
+  std::cout<<"Ramulator tick start!!"<<std::endl; 
   for (uint64_t i = 0;; i++) {
     if (((i % tick_mult) % mem_tick) == 0) {
       frontend->tick();

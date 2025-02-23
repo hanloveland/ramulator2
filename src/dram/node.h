@@ -68,6 +68,8 @@ struct DRAMNodeBase {
         }
       }
 
+      // auto current_level = T::m_levels(m_level);
+      // std::cout<<"DRAMNodeBase Gen.."<<current_level<<" -  ID "<<m_node_id<<std::endl;
       m_state = spec->m_init_states[m_level];
 
       // Recursively construct next levels
