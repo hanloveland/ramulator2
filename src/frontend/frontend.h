@@ -35,12 +35,15 @@ class IFrontEnd : public Clocked<IFrontEnd>, public TopLevel<IFrontEnd> {
       for (auto component : m_components) {
         component->finalize();
       }
-
-      YAML::Emitter emitter;
-      emitter << YAML::BeginMap;
-      m_impl->print_stats(emitter);
-      emitter << YAML::EndMap;
-      std::cout << emitter.c_str() << std::endl;
+      
+      if(m_impl->get_name() != "GEM5") {
+        std::cout<<" imple: "<<m_impl->get_name()<<std::endl;
+        YAML::Emitter emitter;
+        emitter << YAML::BeginMap;
+        m_impl->print_stats(emitter);
+        emitter << YAML::EndMap;
+        std::cout << emitter.c_str() << std::endl;
+      }
     };
 
     virtual int get_num_cores() { return 1; };

@@ -9,6 +9,8 @@
 #include "base/base.h"
 #include "frontend/frontend.h"
 
+#include <fstream>
+
 namespace Ramulator {
 
 class IMemorySystem : public TopLevel<IMemorySystem> {
@@ -19,6 +21,8 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
   protected:
     IFrontEnd* m_frontend;
     uint m_clock_ratio = 1;
+    std::string output_path = "ramulator2_simulation_result.yaml";
+    bool use_gem5_frontend = false;
 
   public:
     virtual void connect_frontend(IFrontEnd* frontend) { 
@@ -38,7 +42,13 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
       emitter << YAML::BeginMap;
       m_impl->print_stats(emitter);
       emitter << YAML::EndMap;
-      std::cout << emitter.c_str() << std::endl;
+      if(use_gem5_frontend) {
+        // Simulation Result Dump to file
+        std::ofstream fout(output_path);
+        fout << emitter.c_str();
+      } else {
+        std::cout << emitter.c_str() << std::endl;
+      }
     };
 
     /**
@@ -70,6 +80,14 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     // virtual const SpecDef& get_supported_requests() = 0;
 
     virtual float get_tCK() { return -1.0f; };
+
+    virtual void set_output_path(std::string output_path_) {
+      output_path = output_path_;
+    };
+
+    virtual void set_use_gem5_frontend() {
+      use_gem5_frontend = true;
+    };    
 };
 
 }        // namespace Ramulator

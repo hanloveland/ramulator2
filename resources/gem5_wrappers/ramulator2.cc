@@ -26,6 +26,7 @@ Ramulator2::Ramulator2(const Params &p) :
     AbstractMemory(p),
     port(name() + ".port", *this),
     config_path(p.config_path),
+    output_path(p.output_path),
     retryReq(false), retryResp(false), startTick(0),
     nbrOutstandingReads(0), nbrOutstandingWrites(0),
     sendResponseEvent([this]{ sendResponse(); }, name()),
@@ -56,6 +57,8 @@ Ramulator2::init()
 
     ramulator2_frontend->connect_memory_system(ramulator2_memorysystem);
     ramulator2_memorysystem->connect_frontend(ramulator2_frontend);
+    ramulator2_memorysystem->set_output_path(output_path);
+    ramulator2_memorysystem->set_use_gem5_frontend();
 
     // if (system()->cacheLineSize() != wrapper.burstSize())
     //     fatal("Ramulator2 burst size %d does not match cache line size %d\n",

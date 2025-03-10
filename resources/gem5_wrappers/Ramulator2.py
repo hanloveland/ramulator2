@@ -8,6 +8,7 @@ class Ramulator2(AbstractMemory):
   cxx_header = "mem/ramulator2.hh"
 
   port = ResponsePort("The port for receiving memory requests and sending responses")
-  config_path = Param.String("Path to the DRAMSys configuration")
+  config_path = Param.String("Path to the Ramulator2 configuration")
+  output_path = Param.String("Path to the Ramulator2 Output Files for Simulation Result")
 
   

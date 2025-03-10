@@ -52,6 +52,7 @@ class Ramulator2 : public AbstractMemory
     MemorySystemPort port;
 
     std::string config_path;
+    std::string output_path;
     Ramulator::IFrontEnd* ramulator2_frontend;
     Ramulator::IMemorySystem* ramulator2_memorysystem;
 
