@@ -23,6 +23,7 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     uint m_clock_ratio = 1;
     std::string output_path = "ramulator2_simulation_result.yaml";
     bool use_gem5_frontend = false;
+    int total_memory_capacity = 0;
 
   public:
     virtual void connect_frontend(IFrontEnd* frontend) { 
@@ -88,6 +89,12 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     virtual void set_use_gem5_frontend() {
       use_gem5_frontend = true;
     };    
+
+    virtual int check_dram_capcity(int dram_capacity) {
+      // Check DRAM Capacity is same with configuration 
+      if((total_memory_capacity != 0) && (dram_capacity == total_memory_capacity)) return 1;
+      else return 0;
+    }
 };
 
 }        // namespace Ramulator

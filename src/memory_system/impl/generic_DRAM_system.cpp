@@ -13,7 +13,7 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     Clk_t m_clk = 0;
     IDRAM*  m_dram;
     IAddrMapper*  m_addr_mapper;
-    std::vector<IDRAMController*> m_controllers;
+    std::vector<IDRAMController*> m_controllers;    
 
   public:
     int s_num_read_requests = 0;
@@ -23,14 +23,30 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
 
   public:
     void init() override { 
-      std::cout<<"DRAM-System Init()"<<std::endl;
+      Logger_t m_logger;
+
+      m_logger = Logging::create_logger("GenericDRAMSystem");
+      m_logger->info("DRAM_System init()");
+    
       // Create device (a top-level node wrapping all channel nodes)
       m_dram = create_child_ifce<IDRAM>();
       m_addr_mapper = create_child_ifce<IAddrMapper>();
 
       int num_channels = m_dram->get_level_size("channel");   
+      int num_ranks = m_dram->get_level_size("rank");   
 
-      std::cout<<"DRAM-System Create Memory Controller"<<std::endl;
+      // Calcuate Total Memory Capacity
+      int num_dram_die = num_channels * num_ranks * (m_dram->m_channel_width / m_dram->m_organization.dq);
+      total_memory_capacity = (num_dram_die * m_dram->m_organization.density / 1024)/ 8;
+      m_logger->info(" DRAM System Configuration");
+      m_logger->info("   - # of Channels          : {}",num_channels);
+      m_logger->info("   - # of Ranks             : {}",num_ranks);
+      m_logger->info("   - DQs per DRAM Die       : {}",m_dram->m_organization.dq);
+      m_logger->info("   - DQs per Channel        : {}",m_dram->m_channel_width);
+      m_logger->info("   - DRAM die density (Mb)  : {}",m_dram->m_organization.density);
+      m_logger->info("   - Total DRAM Dies        : {}",num_dram_die);
+      m_logger->info("   - Total DRAM Capacity(GB): {}",total_memory_capacity);
+
       // Create memory controllers
       for (int i = 0; i < num_channels; i++) {
         IDRAMController* controller = create_child_ifce<IDRAMController>();
