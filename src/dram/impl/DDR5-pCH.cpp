@@ -211,19 +211,13 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     void init() override {
       RAMULATOR_DECLARE_SPECS();
-      std::cout<<"DRAM Init()"<<std::endl;
       set_organization();
       set_timing_vals();
       set_actions(); 
-      std::cout<<"set_actions() Done"<<std::endl;
       set_preqs();
-      std::cout<<"set_preqs() Done"<<std::endl;
       set_rowhits();
-      std::cout<<"set_rowhits() Done"<<std::endl;
       set_rowopens();
-      std::cout<<"set_rowopens() Done"<<std::endl;
       set_powers();
-      std::cout<<"set_powers() Done"<<std::endl;
       
       create_nodes();
     };

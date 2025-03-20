@@ -55,6 +55,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     size_t s_num_issue_reads = 0;
     size_t s_num_issue_writes = 0;
 
+    std::vector<size_t> s_num_trans_per_pch;
+    std::vector<size_t> s_num_refresh_cc_per_pch;
+    size_t s_num_rw_switch = 0;
+
+    bool use_pseudo_ch = false;
+    int psuedo_ch_idx = 0;
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -76,6 +82,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       m_dram = memory_system->get_ifce<IDRAM>();
       m_bank_addr_idx = m_dram->m_levels("bank");
       m_priority_buffer.max_size = 512*3 + 32;
+
+      if(m_dram->get_level_size("pseudochannel") == -1) use_pseudo_ch = false;
+      else                                              use_pseudo_ch = true;
+
+      if(use_pseudo_ch) psuedo_ch_idx = m_dram->m_levels("pseudochannel");
 
       m_num_cores = frontend->get_num_cores();
 
@@ -120,6 +131,18 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       register_stat(s_dq_bandwidth).name("dq_bandwidth_{}", m_channel_id);
       register_stat(s_max_bandwidth).name("max_bandwidth_{}", m_channel_id);
 
+      int num_pseudochannel = m_dram->get_level_size("pseudochannel");  
+      if(num_pseudochannel != -1) {
+        s_num_trans_per_pch.resize(num_pseudochannel, 0);
+        s_num_refresh_cc_per_pch.resize(num_pseudochannel, 0);
+        for (size_t pch_id = 0; pch_id < num_pseudochannel; pch_id++) {
+          register_stat(s_num_trans_per_pch[pch_id]).name("s_num_trans_per_pch_{}_{}", m_channel_id,pch_id);        
+          register_stat(s_num_refresh_cc_per_pch[pch_id]).name("s_num_refresh_cc_per_pch_{}_{}", m_channel_id,pch_id);                  
+        }
+      }
+
+      register_stat(s_num_rw_switch).name("s_num_rw_switch_{}", m_channel_id);
+      
     };
 
     bool send(Request& req) override {
@@ -221,6 +244,25 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
         if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
 
+        if((req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) ||
+           (req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA"))) {
+          if(use_pseudo_ch) {        
+            // std::cout<<"pch_idx : "<<pch_idx<<std::endl;
+            auto& req_addr_vec = req_it->addr_vec;
+            int pch_addr = req_addr_vec[psuedo_ch_idx];
+            s_num_trans_per_pch[pch_addr]+=1;
+          }        
+        }
+
+        if(req_it->command == m_dram->m_commands("REFab")) {
+          if(use_pseudo_ch) {        
+            auto& req_addr_vec = req_it->addr_vec;
+            int nRFC_latency = m_dram->m_timing_vals("nRFC1");
+            int pch_addr = req_addr_vec[psuedo_ch_idx];
+            s_num_refresh_cc_per_pch[pch_addr]+=nRFC_latency;
+          }    
+        }
+              
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {
           if (req_it->type_id == Request::Type::Read) {
@@ -343,10 +385,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       if (!m_is_write_mode) {
         if ((m_write_buffer.size() > m_wr_high_watermark * m_write_buffer.max_size) || m_read_buffer.size() == 0) {
           m_is_write_mode = true;
+          s_num_rw_switch++;
         }
       } else {
         if ((m_write_buffer.size() < m_wr_low_watermark * m_write_buffer.max_size) && m_read_buffer.size() != 0) {
           m_is_write_mode = false;
+          s_num_rw_switch++;
         }
       }
     };
@@ -428,9 +472,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       // GB/s 
       // Request Bandwidth, DQ Bandwidth, Max DQ Bandwidth
       int tx_bytes = m_dram->m_internal_prefetch_size * m_dram->m_channel_width / 8;
-      s_bandwidth = ((float)((s_num_read_reqs + s_num_write_reqs) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E3;
-      s_dq_bandwidth = ((float)((s_num_issue_reads + s_num_issue_writes) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E3;
-      s_max_bandwidth = (float)(m_dram->m_channel_width / 8) * (float)m_dram->m_timing_vals("rate") / 1E3;      
+      s_bandwidth = ((float)((s_num_read_reqs + s_num_write_reqs) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024*1024*1012);
+      s_dq_bandwidth = ((float)((s_num_issue_reads + s_num_issue_writes) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024*1024*1012);
+      // rate unit is MT/s 
+      // 10^6 T/s --> /(2^30) GB/s
+      s_max_bandwidth = (float)(m_dram->m_channel_width / 8) * (float)m_dram->m_timing_vals("rate") * 1E6 / (1024*1024*1012);      
 
       return;
     }

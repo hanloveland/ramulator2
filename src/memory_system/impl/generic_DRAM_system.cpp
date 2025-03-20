@@ -34,12 +34,16 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
 
       int num_channels = m_dram->get_level_size("channel");   
       int num_ranks = m_dram->get_level_size("rank");   
+      int num_pseudochannel = m_dram->get_level_size("pseudochannel");   
 
+      if(num_pseudochannel == -1 ) num_pseudochannel = 1;
+      
       // Calcuate Total Memory Capacity
-      int num_dram_die = num_channels * num_ranks * (m_dram->m_channel_width / m_dram->m_organization.dq);
+      int num_dram_die = num_channels * num_pseudochannel * num_ranks * (m_dram->m_channel_width / m_dram->m_organization.dq);
       total_memory_capacity = (num_dram_die * m_dram->m_organization.density / 1024)/ 8;
       m_logger->info(" DRAM System Configuration");
       m_logger->info("   - # of Channels          : {}",num_channels);
+      m_logger->info("   - # of Pseudo Channels   : {}",num_pseudochannel);
       m_logger->info("   - # of Ranks             : {}",num_ranks);
       m_logger->info("   - DQs per DRAM Die       : {}",m_dram->m_organization.dq);
       m_logger->info("   - DQs per Channel        : {}",m_dram->m_channel_width);

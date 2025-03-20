@@ -125,6 +125,45 @@ class RoBaRaCoPcCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+//DDR5-pCH
+class RoCoBaRaPcCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoCoBaRaPcCh, "RoCoBaRaPcCh", "Applies a RoCoBaRaPcCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> pCh 
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> Rank (PCh has only 1 Rank)
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);
+      // Address --> BG
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);
+      // Address --> BK
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);
+      // Address --> COL
+      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
+      // Address --> ROW
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+
+      // // Address --> Col
+      // req.addr_vec[m_addr_bits.size() - 1] = slice_lower_bits(addr, m_addr_bits[m_addr_bits.size() - 1]);
+      // // Row/Bk/Bg/Ra
+      // for (int i = 2; i <= m_row_bits_idx; i++) {
+      //   req.addr_vec[i] = slice_lower_bits(addr, m_addr_bits[i]);
+      // }
+      // Address --> Ro/Bg/Bo/Ra/Co/Pc/Ch
+    }
+};
+
 
 class MOP4CLXOR final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, MOP4CLXOR, "MOP4CLXOR", "Applies a MOP4CLXOR mapping to the address.");
