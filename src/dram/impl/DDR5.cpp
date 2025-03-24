@@ -171,6 +171,23 @@ class DDR5 : public IDRAM, public Implementation {
       }
     );
 
+    // Not Used in DDR5 (only for compiling..)
+    inline static constexpr ImplDef m_f_states = {
+      "Opened", "Closed", "N/A"
+    };    
+
+    // Not Used in DDR5 (only for compiling..)
+    inline static const ImplLUT m_init_f_states = LUT (
+      m_levels, m_states, {
+        {"channel",         "N/A"}, 
+        {"rank",            "N/A"},
+        {"bankgroup",       "N/A"},
+        {"bank",            "Closed"},
+        {"row",             "Closed"},
+        {"column",          "N/A"},
+      }
+    );    
+
   public:
     struct Node : public DRAMNodeBase<DDR5> {
       Node(DDR5* dram, Node* parent, int level, int id) : DRAMNodeBase<DDR5>(dram, parent, level, id) {};
@@ -296,6 +313,10 @@ class DDR5 : public IDRAM, public Implementation {
       return m_channels[channel_id]->get_preq_command(command, addr_vec, m_clk);
     };
 
+    int get_preq_command_refresh_ch(int command, const AddrVec_t& addr_vec) override {
+      return -1;
+    };
+
     bool check_ready(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
       return m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
@@ -311,6 +332,58 @@ class DDR5 : public IDRAM, public Implementation {
       return m_channels[channel_id]->check_node_open(command, addr_vec, m_clk);
     };
 
+    bool check_dram_refrsehing() override {
+      return false;
+    };    
+
+    bool check_ch_refrsehing(const AddrVec_t& addr_vec) override {
+      return false;
+    };    
+
+    int get_db_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return 0;
+    }
+
+    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) override {
+    };  
+
+
+    void reset_need_be_open_per_bank(u_int32_t channel_id) override {
+     
+    };    
+
+    void set_need_be_open_per_bank(const AddrVec_t& addr_vec) override {
+    };
+
+    bool get_need_be_open_per_bank(const AddrVec_t& addr_vec) override {
+      return false;
+    };     
+
+    bool get_use_pch() override {
+      return false;
+    };
+
+    bool get_use_wr_prefetch() override {
+      return false;
+    };    
+
+    // Print Request 
+    void print_req(Request& req) {      
+      std::cout<<"Final["<<m_commands(req.final_command)<<"] Current ["<<m_commands(req.command)
+                         <<"CH["<<req.addr_vec[m_levels["channel"]]
+                         <<"]RK["<<req.addr_vec[m_levels["rank"]]
+                         <<"]BG["<<req.addr_vec[m_levels["bankgroup"]]
+                         <<"]BK["<<req.addr_vec[m_levels["bank"]]
+                         <<"]RO["<<req.addr_vec[m_levels["row"]]
+                         <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
+    };    
+
+    void set_enable_rd_prefetch(u_int32_t channel_id) {
+      // Nothing to do
+    };
+    void reset_enable_rd_prefetch(u_int32_t channel_id) {
+      // Nothing to do
+    };    
   private:
     void set_organization() {
       // Channel width

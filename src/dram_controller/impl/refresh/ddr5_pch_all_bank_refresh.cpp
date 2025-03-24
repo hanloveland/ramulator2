@@ -18,8 +18,10 @@ class DR5PCHAllBankRefresh : public IRefreshManager, public Implementation {
     int m_num_ranks = -1;
 
     int m_nrefi = -1;
+    int m_nrfc  = -1;
     int m_ref_req_id = -1;
     Clk_t m_next_refresh_cycle = -1;
+    Clk_t m_next_enable_rd_prefetch_cycle = -1;
 
   public:
     void init() override { 
@@ -34,22 +36,33 @@ class DR5PCHAllBankRefresh : public IRefreshManager, public Implementation {
       m_num_ranks = m_dram->get_level_size("rank");
 
       m_nrefi = m_dram->m_timing_vals("nREFI");
+      m_nrfc  = m_dram->m_timing_vals("nRFC1");
       m_ref_req_id = m_dram->m_requests("all-bank-refresh");
 
       m_next_refresh_cycle = m_nrefi;
+      m_next_enable_rd_prefetch_cycle = (m_next_refresh_cycle - m_nrfc);
     };
 
     void tick() {
       m_clk++;
-
+      
+      // 
+      if (m_clk == m_next_enable_rd_prefetch_cycle) {
+        m_dram->set_enable_rd_prefetch(m_ctrl->m_channel_id);
+      }
       if (m_clk == m_next_refresh_cycle) {
+        // std::cout<<"["<<m_clk<<"] Enque All-Back Refresh"<<std::endl;
+        m_dram->reset_enable_rd_prefetch(m_ctrl->m_channel_id);
         m_next_refresh_cycle += m_nrefi;
+        m_next_enable_rd_prefetch_cycle = (m_next_refresh_cycle - m_nrfc);
         for (int p = 0; p < m_num_pseudochannels; p++) {
           for (int r = 0; r < m_num_ranks; r++) {
             std::vector<int> addr_vec(m_dram_org_levels, -1);
             addr_vec[0] = m_ctrl->m_channel_id;
-            addr_vec[1] = p;
-            addr_vec[2] = r;
+            addr_vec[1] = p; // pseudo channel 
+            addr_vec[2] = 0; // narrow-I/O
+            addr_vec[3] = 0; // Wide-I/O 
+            addr_vec[4] = r; // Rank
             Request req(addr_vec, m_ref_req_id);
 
             bool is_success = m_ctrl->priority_send(req);

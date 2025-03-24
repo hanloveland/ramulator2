@@ -10,27 +10,30 @@ class DDR5PCH : public IDRAM, public Implementation {
 
 
   public:
+    // Add pCH-NI (narrow-I/O == Off-PCB I/O) and pCH-WI (Wide-I/O == On-PCB I/O)
+    // pCH-nI and PCH-wI must be 1
     inline static const std::map<std::string, Organization> org_presets = {
-      //   name         density   DQ   Ch pCH Ra Bg Ba   Ro     Co
-      {"DDR5_8Gb_x4",   {8<<10,   4,  {1, 1, 1, 8, 2, 1<<16, 1<<11}}},
-      {"DDR5_8Gb_x8",   {8<<10,   8,  {1, 1, 1, 8, 2, 1<<16, 1<<10}}},
-      {"DDR5_8Gb_x16",  {8<<10,   16, {1, 1, 1, 4, 2, 1<<16, 1<<10}}},
-      {"DDR5_16Gb_x4",  {16<<10,  4,  {1, 1, 1, 8, 4, 1<<16, 1<<11}}},
-      {"DDR5_16Gb_x8",  {16<<10,  8,  {1, 1, 1, 8, 4, 1<<16, 1<<10}}},
-      {"DDR5_16Gb_x16", {16<<10,  16, {1, 1, 1, 4, 4, 1<<16, 1<<10}}},
-      {"DDR5_32Gb_x4",  {32<<10,  4,  {1, 1, 1, 8, 4, 1<<17, 1<<11}}},
-      {"DDR5_32Gb_x8",  {32<<10,  8,  {1, 1, 1, 8, 4, 1<<17, 1<<10}}},
-      {"DDR5_32Gb_x16", {32<<10,  16, {1, 1, 1, 4, 4, 1<<17, 1<<10}}},
+      //   name         density   DQ   Ch pCH nI wI Ra Bg Ba   Ro     Co
+      {"DDR5_8Gb_x4",   {8<<10,   4,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<11}}},
+      {"DDR5_8Gb_x8",   {8<<10,   8,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<10}}},
+      {"DDR5_8Gb_x16",  {8<<10,   16, {1, 1,  1, 1, 1, 4, 2,   1<<16, 1<<10}}},
+      {"DDR5_16Gb_x4",  {16<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<11}}},
+      {"DDR5_16Gb_x8",  {16<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<10}}},
+      {"DDR5_16Gb_x16", {16<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<16, 1<<10}}},
+      {"DDR5_32Gb_x4",  {32<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<11}}},
+      {"DDR5_32Gb_x8",  {32<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<10}}},
+      {"DDR5_32Gb_x16", {32<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<17, 1<<10}}},
+
       // {"DDR5_64Gb_x4",  {64<<10,  4,  {1, 1, 8, 4, 1<<18, 1<<11}}},
       // {"DDR5_64Gb_x8",  {64<<10,  8,  {1, 1, 8, 4, 1<<18, 1<<10}}},
       // {"DDR5_64Gb_x16", {64<<10,  16, {1, 1, 4, 4, 1<<18, 1<<10}}},
     };
     // tCCD_S_WTR = CWL + BL/2 + max(4ntCK,2.5ns)
     inline static const std::map<std::string, std::vector<int>> timing_presets = {
-      //   name         rate   nBL  nCL nRCD   nRP  nRAS   nRC   nWR  nRTP nCWL nPPD nCCDS nCCDS_WR nCCDS_WTR      nCCDL nCCDL_WR  nCCDL_WTR   nRRDS nRRDL nFAW nRFC1 nRFC2 nRFCsb nREFI nREFSBRD nRFM1 nRFM2 nRFMsb nDRFMab nDRFMsb nCS, tCK_ps
-      {"DDR5_3200AN",  {3200,   8,  24,  24,   24,   52,   75,   48,   12,  22,  2,    8,     8,     22+(4*8)+4,    8,     16,    22+(4*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
-      {"DDR5_3200BN",  {3200,   8,  26,  26,   26,   52,   77,   48,   12,  24,  2,    8,     8,     24+(4*8)+4,    8,     16,    24+(4*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
-      {"DDR5_3200C",   {3200,   8,  28,  28,   28,   52,   79,   48,   12,  26,  2,    8,     8,     26+(4*8)+4,    8,     16,    26+(4*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      //   name         rate   nBL  nCL nRCD   nRP  nRAS   nRC   nWR  nRTP nCWL nPPD nCCDS nCCDS_WR nCCDS_WTR      nCCDS_WTR_WI nCCDL nCCDL_WR  nCCDL_WTR      nCCDL_WTR_WI nRRDS nRRDL nFAW nRFC1 nRFC2 nRFCsb nREFI nREFSBRD nRFM1 nRFM2 nRFMsb nDRFMab nDRFMsb nCS, tCK_ps
+      {"DDR5_3200AN",  {3200,   8,  24,  24,   24,   52,   75,   48,   12,  22,  2,    8,     8,     22+(4*8)+4,   22+(1*8)+4,  8,    16,       22+(4*8)+16,   22+(1*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      {"DDR5_3200BN",  {3200,   8,  26,  26,   26,   52,   77,   48,   12,  24,  2,    8,     8,     24+(4*8)+4,   24+(1*8)+4,  8,    16,       24+(4*8)+16,   24+(1*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
+      {"DDR5_3200C",   {3200,   8,  28,  28,   28,   52,   79,   48,   12,  26,  2,    8,     8,     26+(4*8)+4,   26+(1*8)+4,  8,    16,       26+(4*8)+16,   26+(1*8)+16,   8,   -1,   -1,  -1,   -1,   -1,    -1,     30,    -1,   -1,   -1,     -1,     -1,    2,   625}},
     };
 
     inline static const std::map<std::string, std::vector<double>> voltage_presets = {
@@ -48,28 +51,37 @@ class DDR5PCH : public IDRAM, public Implementation {
     const int m_internal_prefetch_size = 16;
 
     inline static constexpr ImplDef m_levels = {
-      "channel", "pseudochannel", "rank", "bankgroup", "bank", "row", "column",    
+      "channel", "pseudochannel", "narrowio", "wideio", "rank", "bankgroup", "bank", "row", "column",    
     };
 
 
   /************************************************
    *             Requests & Commands
    ***********************************************/
+   // P_ACT: Pseudo-ACT 
+   // Pair 
+   // - P_ACT - PRE_WR or POST_RD
+   // - ACT   - WR/WRA or RD/RDA 
+   // - ACT   - POST_WR/POST_WRA or PRE_RD/PRE_RDA   
     inline static constexpr ImplDef m_commands = {
-      "ACT", 
-      "PRE", "PREA", "PREsb",
-      "RD",  "WR",  "RDA",  "WRA",
-      "REFab",  "REFsb", "REFab_end", "REFsb_end",
+      "ACT",      "P_ACT",
+      "PRE",      "PREA",     "PREsb",     "P_PRE",
+      "RD",       "WR",       "RDA",       "WRA",
+      "PRE_RD",   "PRE_WR",   "PRE_RDA",   
+      "POST_RD",  "POST_WR",  "POST_WRA",
+      "REFab",    "REFsb",    "REFab_end", "REFsb_end",
       // "RFMab",  "RFMsb", "RFMab_end", "RFMsb_end",
       // "DRFMab", "DRFMsb", "DRFMab_end", "DRFMsb_end",
     };
 
     inline static const ImplLUT m_command_scopes = LUT (
       m_commands, m_levels, {
-        {"ACT",   "row"},
-        {"PRE",   "bank"},   {"PREA",   "rank"},   {"PREsb", "bank"},
-        {"RD",    "column"}, {"WR",     "column"}, {"RDA",   "column"}, {"WRA",   "column"},
-        {"REFab",  "rank"},  {"REFsb",  "bank"}, {"REFab_end",  "rank"},  {"REFsb_end",  "bank"},
+        {"ACT",     "row"},    {"P_ACT",     "row"},
+        {"PRE",     "bank"},   {"PREA",    "rank"},   {"PREsb",     "bank"},       {"P_PRE",    "bank"},
+        {"RD",      "column"}, {"WR",      "column"}, {"RDA",       "column"},     {"WRA",        "column"},
+        {"PRE_RD",  "column"}, {"PRE_WR",  "column"}, {"PRE_RDA",   "column"},     
+        {"POST_RD", "column"}, {"POST_WR", "column"}, {"POST_WRA",  "column"},
+        {"REFab",   "rank"},   {"REFsb",   "bank"},   {"REFab_end", "rank"},       {"REFsb_end",  "bank"},
         // {"RFMab",  "rank"},  {"RFMsb",  "bank"}, {"RFMab_end",  "rank"},  {"RFMsb_end",  "bank"},
         // {"DRFMab", "rank"},  {"DRFMsb", "bank"}, {"DRFMab_end", "rank"},  {"DRFMsb_end", "bank"},
       }
@@ -79,13 +91,21 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_commands, {
                       // open?   close?   access?  refresh?
         {"ACT",         {true,   false,   false,   false}},
+        {"P_ACT",       {true,   false,   false,   false}},
         {"PRE",         {false,  true,    false,   false}},
         {"PREA",        {false,  true,    false,   false}},
         {"PREsb",       {false,  true,    false,   false}},
+        {"P_PRE",       {false,  true,    false,   false}},
         {"RD",          {false,  false,   true,    false}},
         {"WR",          {false,  false,   true,    false}},
         {"RDA",         {false,  true,    true,    false}},
         {"WRA",         {false,  true,    true,    false}},
+        {"PRE_RD",      {false,  false,   true,    false}},
+        {"PRE_WR",      {false,  false,   false,   false}},
+        {"POST_RD",     {false,  false,   false,   false}},
+        {"POST_WR",     {false,  false,   true,    false}},
+        {"PRE_RDA",     {false,  true,    true,    false}},
+        {"POST_WRA",    {false,  true,    true,    false}},
         {"REFab",       {false,  false,   false,   true }},
         {"REFsb",       {false,  false,   false,   true }},
         {"REFab_end",   {false,  true,    false,   false}},
@@ -126,8 +146,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       "rate", 
       "nBL", "nCL", "nRCD", "nRP", "nRAS", "nRC", "nWR", "nRTP", "nCWL",
       "nPPD",
-      "nCCDS", "nCCDS_WR", "nCCDS_WTR", 
-      "nCCDL", "nCCDL_WR", "nCCDL_WTR", 
+      "nCCDS", "nCCDS_WR", "nCCDS_WTR", "nCCDS_WTR_WI",
+      "nCCDL", "nCCDL_WR", "nCCDL_WTR", "nCCDL_WTR_WI",
       "nRRDS", "nRRDL",
       "nFAW",
       "nRFC1", "nRFC2", "nRFCsb", "nREFI", "nREFSBRD",
@@ -150,7 +170,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     inline static constexpr ImplDef m_cmds_counted = {
-      "ACT", "PRE", "RD", "WR", "REF", "RFM"
+      "ACT", "P_ACT", "PRE", "RD", "WR", "REF", "RFM", "PRE_RD", "PRE_WR", "POST_RD","POST_WR","PRE_RDA", "POST_WRA"
     };
 
   /************************************************
@@ -160,11 +180,31 @@ class DDR5PCH : public IDRAM, public Implementation {
        "Opened", "Closed", "PowerUp", "N/A", "Refreshing"
     };
 
+    inline static constexpr ImplDef m_f_states = {
+      "Opened", "Closed", "N/A"
+    };
+
     inline static const ImplLUT m_init_states = LUT (
       m_levels, m_states, {
         {"channel",         "N/A"}, 
         {"pseudochannel",   "N/A"}, 
+        {"narrowio",        "N/A"}, 
+        {"wideio",          "N/A"}, 
         {"rank",            "PowerUp"},
+        {"bankgroup",       "N/A"},
+        {"bank",            "Closed"},
+        {"row",             "Closed"},
+        {"column",          "N/A"},
+      }
+    );
+
+    inline static const ImplLUT m_init_f_states = LUT (
+      m_levels, m_states, {
+        {"channel",         "N/A"}, 
+        {"pseudochannel",   "N/A"}, 
+        {"narrowio",        "N/A"}, 
+        {"wideio",          "N/A"}, 
+        {"rank",            "N/A"},
         {"bankgroup",       "N/A"},
         {"bank",            "Closed"},
         {"row",             "Closed"},
@@ -187,6 +227,21 @@ class DDR5PCH : public IDRAM, public Implementation {
     double s_total_rfm_energy = 0.0;
 
     std::vector<size_t> s_total_rfm_cycles;
+    std::vector<bool>   each_pch_refreshing;
+    int num_pseudo_ch = 0; 
+    std::vector<int> db_prefetch_cnt_per_pch;
+    std::vector<int> pre_wr_cnt_per_ch;
+    std::vector<int> post_wr_cnt_per_ch;
+
+    std::vector<std::vector<bool>> need_be_open_per_bank;
+    int m_num_channels;          
+    int m_num_pseudochannel;     
+    int m_num_ranks;             
+    int m_num_bankgroups;        
+    int m_num_banks;             
+    bool m_use_pch;
+    bool m_use_wr_prefetch;
+    std::vector<bool> m_enable_rd_prefetch;
 
   /************************************************
    *                 RFM Related
@@ -227,7 +282,16 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_channels[channel_id]->update_timing(command, addr_vec, m_clk);
       m_channels[channel_id]->update_powers(command, addr_vec, m_clk);
       m_channels[channel_id]->update_states(command, addr_vec, m_clk);
-    
+      
+      
+      
+      if(command == m_commands("PRE_WR")){
+        pre_wr_cnt_per_ch[channel_id]++;
+      }
+      if(command == m_commands("POST_WR")) {
+        post_wr_cnt_per_ch[channel_id]++;
+      }
+           
       // Check if the command requires future action
       check_future_action(command, addr_vec);
     };
@@ -235,6 +299,10 @@ class DDR5PCH : public IDRAM, public Implementation {
     void check_future_action(int command, const AddrVec_t& addr_vec) {
       switch (command) {
         case m_commands("REFab"):
+          // Psuedo Channel State Chagne to Refresing..
+          each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=true;
+          // std::cout<<"["<<m_clk<<"] REFab Start CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] "<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
+          // if(db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]] > 0) exit(1);
           m_future_actions.push_back({command, addr_vec, m_clk + m_timing_vals("nRFC1") - 1});
           break;
         case m_commands("REFsb"):
@@ -262,6 +330,9 @@ class DDR5PCH : public IDRAM, public Implementation {
       int channel_id = addr_vec[m_levels["channel"]];
       switch (command) {
         case m_commands("REFab"):
+          // Refresh Done!
+          each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=false;
+          // std::cout<<"["<<m_clk<<"] REFab Done CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] "<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
           m_channels[channel_id]->update_powers(m_commands("REFab_end"), addr_vec, m_clk);
           m_channels[channel_id]->update_states(m_commands("REFab_end"), addr_vec, m_clk);
           break;
@@ -292,14 +363,30 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     int get_preq_command(int command, const AddrVec_t& addr_vec) override {
-      int channel_id = addr_vec[m_levels["channel"]];
-      // std::cout<<"DDR5-pCH::Get Preq Command!"<<std::endl;
+      int channel_id = addr_vec[m_levels["channel"]];        
       return m_channels[channel_id]->get_preq_command(command, addr_vec, m_clk);
     };
 
+    int get_preq_command_refresh_ch(int command, const AddrVec_t& addr_vec) override {
+      int channel_id = addr_vec[m_levels["channel"]];
+      // std::cout<<"DDR5-pCH::Get Preq Command!"<<std::endl;
+      // Check Each Pseudo Channel is Refreshing, Issue PRE_WR to DB (Not to DRAM)
+      int new_command;
+      if(each_pch_refreshing[addr_vec[0]*num_pseudo_ch+addr_vec[1]] && 
+        ((command == m_commands("WR")) || (command == m_commands("WRA")))) {      
+          new_command = m_commands("PRE_WR");
+      } else {
+          new_command = command;
+      }               
+      return m_channels[channel_id]->get_preq_command(new_command, addr_vec, m_clk);      
+    };
+
+
     bool check_ready(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
-      return m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
+      bool is_ready = true;
+      if(m_command_meta[command].is_closing && get_need_be_open_per_bank(addr_vec)) is_ready = false;
+      return is_ready && m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
     };
 
     bool check_rowbuffer_hit(int command, const AddrVec_t& addr_vec) override {
@@ -311,6 +398,80 @@ class DDR5PCH : public IDRAM, public Implementation {
       int channel_id = addr_vec[m_levels["channel"]];
       return m_channels[channel_id]->check_node_open(command, addr_vec, m_clk);
     };
+
+    bool check_dram_refrsehing() override {
+      bool is_refreshing = false;
+      for(int i=0;i<each_pch_refreshing.size();i++) {
+          if(each_pch_refreshing[i]) is_refreshing = true;
+      }      
+      return is_refreshing;
+    };
+
+    bool check_ch_refrsehing(const AddrVec_t& addr_vec) override {
+      bool is_refreshing = each_pch_refreshing[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
+      return is_refreshing;
+    };
+
+    int get_db_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return db_prefetch_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
+    };
+
+    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) override {
+      db_prefetch_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]] = value;
+    };    
+
+    void reset_need_be_open_per_bank(u_int32_t channel_idx) override {
+      need_be_open_per_bank[channel_idx].assign(need_be_open_per_bank[channel_idx].size(), false);
+    };
+
+    void set_need_be_open_per_bank(const AddrVec_t& addr_vec) override {
+      if(addr_vec[5] != -1 && addr_vec[6] != -1) {
+        uint32_t idx = addr_vec[1] * m_num_ranks * m_num_bankgroups * m_num_banks + 
+                       addr_vec[4] * m_num_bankgroups * m_num_banks + 
+                       addr_vec[5] * m_num_banks +
+                       addr_vec[6];
+        need_be_open_per_bank[addr_vec[0]][idx] = true;
+      }
+    };
+
+    bool get_need_be_open_per_bank(const AddrVec_t& addr_vec) override {
+      if(addr_vec[5] != -1 && addr_vec[6] != -1) {
+        uint32_t idx = addr_vec[1] * m_num_ranks * m_num_bankgroups * m_num_banks + 
+                       addr_vec[4] * m_num_bankgroups * m_num_banks + 
+                       addr_vec[5] * m_num_banks +
+                       addr_vec[6];
+        return need_be_open_per_bank[addr_vec[0]][idx];
+      } 
+      return false;
+    };        
+
+    bool get_use_pch() override {
+      return m_use_pch;
+    };
+
+    bool get_use_wr_prefetch() override {
+      return m_use_wr_prefetch;
+    };    
+
+    // Print Request 
+    void print_req(Request& req) {      
+      std::cout<<"Final ["<<m_commands(req.final_command)<<"] Current ["<<m_commands(req.command)
+                         <<"] CH["<<req.addr_vec[m_levels["channel"]]
+                         <<"]PC["<<req.addr_vec[m_levels["pseudochannel"]]
+                         <<"]BG["<<req.addr_vec[m_levels["bankgroup"]]
+                         <<"]BK["<<req.addr_vec[m_levels["bank"]]
+                         <<"]RO["<<req.addr_vec[m_levels["row"]]
+                         <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
+    };
+
+    void set_enable_rd_prefetch(u_int32_t channel_id) {
+      m_enable_rd_prefetch[channel_id] = true;
+      std::cout<<"["<<channel_id<<"] Enable RD Prefetch from DRAM to DB"<<std::endl;
+    };
+    void reset_enable_rd_prefetch(u_int32_t channel_id) {
+      m_enable_rd_prefetch[channel_id] = false;
+      std::cout<<"["<<channel_id<<"] Disable RD Prefetch from DRAM to DB"<<std::endl;
+    };        
 
   private:
     void set_organization() {
@@ -346,7 +507,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
 
       for (int i = 0; i < m_levels.size(); i++){
-        std::cout<<"level Name :"<<m_levels(i)<<" - "<<m_organization.count[i]<<std::endl;
+        std::cout<<" Check level Name :"<<m_levels(i)<<" - "<<m_organization.count[i]<<std::endl;
       }      
       // Sanity check: is the calculated chip density the same as the provided one?
       size_t _density = size_t(m_organization.count[m_levels["bankgroup"]]) *
@@ -366,8 +527,32 @@ class DDR5PCH : public IDRAM, public Implementation {
       int num_channels = m_organization.count[m_levels["channel"]];
       int num_pseudochannel = m_organization.count[m_levels["pseudochannel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
+      int num_bankgroups = m_organization.count[m_levels["bankgroup"]];
+      int num_banks = m_organization.count[m_levels["bank"]];
       s_total_rfm_cycles.resize(num_channels * num_pseudochannel * num_ranks, 0);
+      m_use_pch = true;
+      m_num_channels      = num_channels ;          
+      m_num_pseudochannel = num_pseudochannel ;     
+      m_num_ranks         = num_ranks ;             
+      m_num_bankgroups    = num_bankgroups ;        
+      m_num_banks         = num_banks ;       
+ 
+      need_be_open_per_bank.resize(num_channels,std::vector<bool>(num_pseudochannel * num_bankgroups * num_banks, false));
 
+      if(num_ranks != 1) {
+        throw ConfigurationError("The number of pseudo-channel DRAM ranks ({}) cannot be greater than “1”.!", num_ranks);
+      }
+      
+      m_use_wr_prefetch = param<bool>("db_fetch_wr").default_val(false);
+
+      pre_wr_cnt_per_ch.resize(num_channels,0);
+      post_wr_cnt_per_ch.resize(num_channels,0);
+            
+      num_pseudo_ch = num_pseudochannel;
+      each_pch_refreshing.resize(num_channels * num_pseudochannel * num_ranks, false);
+      db_prefetch_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks, 0);
+
+      m_enable_rd_prefetch.resize(num_channels, false);
       for (int r = 0; r < num_channels * num_ranks; r++) {
         register_stat(s_total_rfm_cycles[r]).name("total_rfm_cycles_rank{}", r);
       }
@@ -519,30 +704,46 @@ class DDR5PCH : public IDRAM, public Implementation {
       populate_timingcons(this, {
           /*** Channel ***/ 
           // Two-Cycle Commands
-          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA"}, .following = all_commands, .latency = 2},
+          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA",
+                                             "P_ACT", "PRE_WR", "POST_RD"}, .following = all_commands, .latency = 2},
 
+
+          // "PRE_RD",   "PRE_WR",   "PRE_RDA",   
+          // "POST_RD",  "POST_WR",  "POST_WRA",
+          
           // CAS <-> CAS
           /// Data bus occupancy //
           // {.level = "channel", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nBL")},
           // {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nBL")},          
-          {.level = "pseudochannel", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = 4*V("nBL")},
-          {.level = "pseudochannel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = 4*V("nBL")},
+          // {.level = "pseudochannel", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = 4*V("nBL")},
+          // {.level = "pseudochannel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = 4*V("nBL")},
+          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"RD", "RDA", "POST_RD"}, .latency = 4*V("nBL")},
+          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"WR", "WRA", "PRE_WR"},  .latency = 4*V("nBL")},          
 
+          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nBL")},
+          {.level = "wideio", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nBL")},
+          
           /*** Rank (or different BankGroup) ***/ 
           // CAS <-> CAS
           /// nCCDS is the minimal latency for column commands 
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDS")},
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nCCDS_WR")},
+          {.level = "rank", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .following = {"RD", "RDA",  "PRE_RD", "PRE_RDA"},   .latency = V("nCCDS")},
+          {.level = "rank", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCCDS_WR")},
           /// RD <-> WR, Minimum Read to Write, Assuming Read DQS Offset = 0, tRPST = 0.5, tWPRE = 2 tCK                          
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"WR", "WRA"}, .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
+          {.level = "rank", .preceding = {"RD",     "RDA"},     .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
+          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
           /// WR <-> RD, Minimum Read after Write
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCCDS_WTR")},
+          {.level = "rank", .preceding = {"WR",      "WRA"},      .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDS_WTR")},
+          {.level = "rank", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDS_WTR_WI")},
+
           /// CAS <-> CAS between sibling ranks, nCS (rank switching) is needed for new DQS
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA", "WR", "WRA"}, .latency = 4*V("nBL") + V("nCS"), .is_sibling = true},
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCL")  + 4*V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
+          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = 4*V("nBL") + V("nCS"), .is_sibling = true},
+          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = V("nBL") + V("nCS"), .is_sibling = true},
+          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA","PRE_RD", "PRE_RDA"}, .latency = V("nCL")  + 4*V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
+          {.level = "rank", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA","PRE_RD", "PRE_RDA"}, .latency = V("nCL")  + V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
           /// CAS <-> PREab
-          {.level = "rank", .preceding = {"RD"}, .following = {"PREA"}, .latency = V("nRTP")},
-          {.level = "rank", .preceding = {"WR"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL") + V("nWR")},          
+          {.level = "rank", .preceding = {"RD", "PRE_RD"}, .following = {"PREA"}, .latency = V("nRTP")},
+          {.level = "rank", .preceding = {"WR"}, .following = {"PREA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},          
+          {.level = "rank", .preceding = {"POST_WR"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
           /// RAS <-> RAS
           {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDS")},          
           {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nFAW"), .window = 4},          
@@ -557,9 +758,10 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "rank", .preceding = {"PREA"}, .following = {"REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")},   
           {.level = "rank", .preceding = {"PREA"}, .following = {"REFab", "REFsb"}, .latency = V("nRP")},          
           // {.level = "rank", .preceding = {"RDA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nRP") + V("nRTP")},      
-          {.level = "rank", .preceding = {"RDA"}, .following = {"REFab"}, .latency = V("nRP") + V("nRTP")},     
+          {.level = "rank", .preceding = {"RDA", "PRE_RD"}, .following = {"REFab"}, .latency = V("nRTP") + V("nRP")},     
           // {.level = "rank", .preceding = {"WRA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},        
           {.level = "rank", .preceding = {"WRA"}, .following = {"REFab"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},   
+          {.level = "rank", .preceding = {"POST_WRA"}, .following = {"REFab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},   
           // {.level = "rank", .preceding = {"REFab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFC1")},       
           {.level = "rank", .preceding = {"REFab"}, .following = {"ACT", "PREA", "REFab", "REFsb"}, .latency = V("nRFC1")},     
           // {.level = "rank", .preceding = {"RFMab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFM1")},          
@@ -570,26 +772,30 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "rank", .preceding = {"DRFMsb"}, .following = {"PREA", "REFab", "RFMab", "DRFMab"}, .latency = V("nDRFMsb")},  
           /*** Same Bank Group ***/ 
           /// CAS <-> CAS
-          {.level = "bankgroup", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL")},          
-          {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nCCDL_WR")},          
-          {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL_WTR")},
+          {.level = "bankgroup", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL")},          
+          {.level = "bankgroup", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCCDL_WR")},          
+          {.level = "bankgroup", .preceding = {"WR",      "WRA"},      .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL_WTR")},
+          {.level = "bankgroup", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL_WTR_WI")},
           /// RAS <-> RAS
           {.level = "bankgroup", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDL")},  
 
           /*** Bank ***/ 
           // {.level = "bank", .preceding = {"ACT"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRC")},  
           {.level = "bank", .preceding = {"ACT"}, .following = {"ACT", "REFsb"}, .latency = V("nRC")},  
-          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA", "WR", "WRA"}, .latency = V("nRCD")},  
+          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = V("nRCD")},  
           {.level = "bank", .preceding = {"ACT"}, .following = {"PRE", "PREsb"}, .latency = V("nRAS")},  
           // {.level = "bank", .preceding = {"PRE", "PREsb"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")}, 
           {.level = "bank", .preceding = {"PRE", "PREsb"}, .following = {"ACT", "REFsb"}, .latency = V("nRP")},   
-          {.level = "bank", .preceding = {"RD"},  .following = {"PRE", "PREsb"}, .latency = V("nRTP")},  
-          {.level = "bank", .preceding = {"WR"},  .following = {"PRE", "PREsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},  
+          {.level = "bank", .preceding = {"RD", "PRE_RD"},  .following = {"PRE", "PREsb"}, .latency = V("nRTP")},  
+          {.level = "bank", .preceding = {"WR"},      .following = {"PRE", "PREsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},  
+          {.level = "bank", .preceding = {"POST_WR"}, .following = {"PRE", "PREsb"}, .latency = V("nCWL") + V("nBL") + V("nWR")},  
           // {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRTP") + V("nRP")},  
-          {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb"}, .latency = V("nRTP") + V("nRP")},  
+          {.level = "bank", .preceding = {"RDA", "PRE_RDA"}, .following = {"ACT", "REFsb"}, .latency = V("nRTP") + V("nRP")},  
           // {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},
           {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},  
+          {.level = "bank", .preceding = {"POST_WRA"}, .following = {"ACT", "REFsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},  
           {.level = "bank", .preceding = {"WR"},  .following = {"RDA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") - V("nRTP")},  
+          {.level = "bank", .preceding = {"POST_WRA"},  .following = {"RDA"}, .latency = V("nCWL") + V("nBL") + V("nWR") - V("nRTP")},  
 
           /// Same-bank refresh/RFM timings. The timings of the bank in other BGs will be updated by action function
           // {.level = "bank", .preceding = {"REFsb"},  .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFCsb")},  
@@ -626,10 +832,15 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_actions[m_levels["bankgroup"]][m_commands["DRFMsb_end"]] = Lambdas::Action::BankGroup::REFsb_end<DDR5PCH>;
 
       // Bank actions
-      m_actions[m_levels["bank"]][m_commands["ACT"]] = Lambdas::Action::Bank::ACT<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["PRE"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["RDA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["WRA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["ACT"]]      = Lambdas::Action::Bank::ACT<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["PRE"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["RDA"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["PRE_RDA"]]  = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["WRA"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["POST_WRA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
+
+      m_actions[m_levels["bank"]][m_commands["P_ACT"]]    = Lambdas::Action::Bank::P_ACT<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["P_PRE"]]    = Lambdas::Action::Bank::P_PRE<DDR5PCH>;
     };
 
     void set_preqs() {
@@ -646,25 +857,34 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_preqs[m_levels["rank"]][m_commands["DRFMsb"]] = Lambdas::Preq::Rank::RequireSameBanksClosed<DDR5PCH>;
 
       // Bank Preqs
-      m_preqs[m_levels["bank"]][m_commands["RD"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["WR"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["ACT"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["PRE"]] = Lambdas::Preq::Bank::RequireBankClosed<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["RD"]]      = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["WR"]]      = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["ACT"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE"]]     = Lambdas::Preq::Bank::RequireBankClosed<DDR5PCH>;
+
+      m_preqs[m_levels["bank"]][m_commands["PRE_WR"]]   = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["POST_RD"]]  = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
     };
 
     void set_rowhits() {
       m_rowhits.resize(m_levels.size(), std::vector<RowhitFunc_t<Node>>(m_commands.size()));
 
-      m_rowhits[m_levels["bank"]][m_commands["RD"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
-      m_rowhits[m_levels["bank"]][m_commands["WR"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["RD"]]      = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["WR"]]      = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
     }
 
 
     void set_rowopens() {
       m_rowopens.resize(m_levels.size(), std::vector<RowhitFunc_t<Node>>(m_commands.size()));
 
-      m_rowopens[m_levels["bank"]][m_commands["RD"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
-      m_rowopens[m_levels["bank"]][m_commands["WR"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["RD"]]      = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["WR"]]      = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
     }
 
     void set_powers() {
@@ -712,10 +932,12 @@ class DDR5PCH : public IDRAM, public Implementation {
 
       m_powers.resize(m_levels.size(), std::vector<PowerFunc_t<Node>>(m_commands.size()));
 
-      m_powers[m_levels["bank"]][m_commands["ACT"]] = Lambdas::Power::Bank::ACT<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["PRE"]] = Lambdas::Power::Bank::PRE<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["RD"]]  = Lambdas::Power::Bank::RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["WR"]]  = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["ACT"]]     = Lambdas::Power::Bank::ACT<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE"]]     = Lambdas::Power::Bank::PRE<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["RD"]]      = Lambdas::Power::Bank::RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::Power::Bank::RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["WR"]]      = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::Power::Bank::WR<DDR5PCH>;
 
       // m_powers[m_levels["rank"]][m_commands["REFsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["REFsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;

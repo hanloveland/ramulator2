@@ -43,13 +43,15 @@ struct DRAMNodeBase {
     int m_size = -1;       // The size of the node (e.g., how many rows in a bank)
 
     int m_state = -1;      // The state of the node
+    int m_f_state = -1;    // The state of the Fake-Node for NDP Ops
 
     std::vector<Clk_t> m_cmd_ready_clk;             // The next cycle that each command can be issued again at this level
     std::vector<std::deque<Clk_t>> m_cmd_history;   // Issue-history of each command at this level
 
     using RowId_t = int;
     using RowState_t = int;
-    std::map<RowId_t, RowState_t> m_row_state;  // The state of the rows, if I am a bank-ish node
+    std::map<RowId_t, RowState_t> m_row_state;    // The state of the rows, if I am a bank-ish node
+    std::map<RowId_t, RowState_t> m_row_f_state;  // The state of fake-the rows, if I am a bank-ish node
 
     DRAMNodeBase(T* spec, NodeType* parent, int level, int id):
     m_spec(spec), m_parent_node(parent), m_level(level), m_node_id(id) {
@@ -70,7 +72,8 @@ struct DRAMNodeBase {
 
       // auto current_level = T::m_levels(m_level);
       // std::cout<<"DRAMNodeBase Gen.."<<current_level<<" -  ID "<<m_node_id<<std::endl;
-      m_state = spec->m_init_states[m_level];
+      m_state   = spec->m_init_states[m_level];
+      m_f_state = spec->m_init_f_states[m_level];
 
       // Recursively construct next levels
       int next_level = level + 1;
@@ -190,6 +193,9 @@ struct DRAMNodeBase {
     };
 
     int get_preq_command(int command, const AddrVec_t& addr_vec, Clk_t m_clk) {
+      // auto current_level = T::m_levels(m_level);
+      // auto current_command = T::m_commands(command);
+      // std::cout<<current_level<<" - "<<current_command<<std::endl;
       int child_id = addr_vec[m_level + 1];
       if (m_spec->m_preqs[m_level][command]) {
         // Find the command (preq_cmd) needed for that command using the lamda function. 

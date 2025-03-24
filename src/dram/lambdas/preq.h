@@ -38,6 +38,30 @@ int RequireBankClosed(typename T::Node* node, int cmd, const AddrVec_t& addr_vec
     } 
   }
 };  
+
+// for PRE_WR/PRE_RD of DB-related ops (only call by DDR5-pch)
+template <class T>
+int RequireFakeRowOpen(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+  if(!(cmd == T::m_commands["PRE_WR"] || cmd == T::m_commands["POST_RD"])) {
+    spdlog::error("[Preq::Bank] Invalid Command {} for RequireFakeRowOpen Lamdas",T::m_commands(cmd));
+    std::exit(-1);          
+  }
+  switch (node->m_f_state) {
+    case T::m_f_states["Closed"]: return T::m_commands["P_ACT"];
+    case T::m_f_states["Opened"]: {
+      if (node->m_row_f_state.find(addr_vec[T::m_levels["row"]]) != node->m_row_f_state.end()) {
+        return cmd;
+      } else {
+        return T::m_commands["P_PRE"];
+      }
+    }    
+    default: {
+      spdlog::error("[Preq::Bank] Invalid fake-bank state for an PRE_WR/POST_RD!");
+      std::exit(-1);      
+    } 
+  }
+};
+
 }       // namespace Bank
 
 namespace Rank {

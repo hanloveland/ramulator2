@@ -143,16 +143,20 @@ class RoCoBaRaPcCh final : public LinearMapperBase, public Implementation {
       req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
       // Address --> pCh 
       req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> nI
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);            
+      // Address --> wI
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);                  
       // Address --> Rank (PCh has only 1 Rank)
-      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);
-      // Address --> BG
-      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);
-      // Address --> BK
       req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);
-      // Address --> COL
-      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
-      // Address --> ROW
+      // Address --> BG
       req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> BK
+      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
+      // Address --> COL
+      req.addr_vec[8] = slice_lower_bits(addr, m_addr_bits[8]);
+      // Address --> ROW
+      req.addr_vec[7] = slice_lower_bits(addr, m_addr_bits[7]);
 
       // // Address --> Col
       // req.addr_vec[m_addr_bits.size() - 1] = slice_lower_bits(addr, m_addr_bits[m_addr_bits.size() - 1]);

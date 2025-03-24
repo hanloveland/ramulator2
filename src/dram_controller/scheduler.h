@@ -16,6 +16,12 @@ class IScheduler {
     virtual ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2) = 0;
 
     virtual ReqBuffer::iterator get_best_request(ReqBuffer& buffer) = 0;
+
+    virtual ReqBuffer::iterator get_best_request_refresh_ch(ReqBuffer& buffer) = 0;
+
+    virtual ReqBuffer::iterator get_best_request_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) = 0;
+    
+    virtual ReqBuffer::iterator get_best_request_refresh_ch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) = 0;
 };
 
 }       // namespace Ramulator

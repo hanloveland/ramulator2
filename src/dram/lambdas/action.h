@@ -17,6 +17,10 @@ namespace Bank {
   void ACT(typename T::Node* node, int cmd, int target_id, Clk_t clk) {
     node->m_state = T::m_states["Opened"];
     node->m_row_state[target_id] = T::m_states["Opened"];
+    if(node->m_f_state == T::m_f_states["Closed"]) {
+      node->m_f_state = T::m_f_states["Closed"];
+      node->m_row_f_state.clear();      
+    }
   };
 
   template <class T>
@@ -34,6 +38,18 @@ namespace Bank {
   void VRR_end(typename T::Node* node, int cmd, int target_id, Clk_t clk) {
     node->m_state = T::m_states["Closed"];
   };
+
+  template <class T>
+  void P_ACT(typename T::Node* node, int cmd, int target_id, Clk_t clk) {
+    node->m_f_state = T::m_f_states["Opened"];
+    node->m_row_f_state[target_id] = T::m_f_states["Opened"];
+  };  
+
+  template <class T>
+  void P_PRE(typename T::Node* node, int cmd, int target_id, Clk_t clk) {
+    node->m_f_state = T::m_f_states["Closed"];
+    node->m_row_f_state.clear();
+  };    
 
 }       // namespace Bank
 

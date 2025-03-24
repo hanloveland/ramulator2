@@ -98,6 +98,7 @@ class IDRAM : public Clocked<IDRAM> {
      * 
      */
     virtual int get_preq_command(int command, const AddrVec_t& addr_vec) = 0;
+    virtual int get_preq_command_refresh_ch(int command, const AddrVec_t& addr_vec) = 0;
 
     /**
      * @brief     Checks whether the device is ready to accept the given command.
@@ -137,6 +138,26 @@ class IDRAM : public Clocked<IDRAM> {
      * @brief     
     */
     virtual void finalize() {};
+
+    /**
+     * @brief check one of channel is refreshing 
+    */
+   virtual bool check_dram_refrsehing() = 0;    
+
+    /**
+     * @brief check the special Channel (Rank?) is refreshing 
+    */
+   virtual bool check_ch_refrsehing(const AddrVec_t& addr_vec) = 0;    
+   virtual void reset_need_be_open_per_bank(u_int32_t channel_id) = 0;
+   virtual void set_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
+   virtual bool get_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
+   virtual int get_db_fetch_per_pch(const AddrVec_t& addr_vec) = 0;
+   virtual void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) = 0;
+   virtual bool get_use_pch() = 0;
+   virtual bool get_use_wr_prefetch() = 0;
+   virtual void print_req(Request& req) = 0;
+   virtual void set_enable_rd_prefetch(u_int32_t channel_id) = 0;
+   virtual void reset_enable_rd_prefetch(u_int32_t channel_id) = 0;
 
   /************************************************
    *        Interface to Query Device Spec
