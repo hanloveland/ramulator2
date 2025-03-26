@@ -152,13 +152,16 @@ class IDRAM : public Clocked<IDRAM> {
    virtual void set_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
    virtual bool get_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
    virtual int get_db_fetch_per_pch(const AddrVec_t& addr_vec) = 0;
-   virtual void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) = 0;
+   virtual void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) = 0;
    virtual bool get_use_pch() = 0;
-   virtual bool get_use_wr_prefetch() = 0;
    virtual void print_req(Request& req) = 0;
-   virtual void set_enable_rd_prefetch(u_int32_t channel_id) = 0;
-   virtual void reset_enable_rd_prefetch(u_int32_t channel_id) = 0;
+   virtual void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
 
+   virtual bool get_use_wr_prefetch() = 0;
+   virtual bool get_use_rd_prefetch() = 0;
   /************************************************
    *        Interface to Query Device Spec
    ***********************************************/   

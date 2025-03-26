@@ -230,6 +230,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     std::vector<bool>   each_pch_refreshing;
     int num_pseudo_ch = 0; 
     std::vector<int> db_prefetch_cnt_per_pch;
+    std::vector<int> db_prefetch_rd_cnt_per_pch;
+    std::vector<int> db_prefetch_wr_cnt_per_pch;
     std::vector<int> pre_wr_cnt_per_ch;
     std::vector<int> post_wr_cnt_per_ch;
 
@@ -241,7 +243,14 @@ class DDR5PCH : public IDRAM, public Implementation {
     int m_num_banks;             
     bool m_use_pch;
     bool m_use_wr_prefetch;
+    bool m_use_rd_prefetch;
     std::vector<bool> m_enable_rd_prefetch;
+    std::vector<int>  m_db_prefetch_mode;
+
+    const int MODE_PRE_RD  = 0;
+    const int MODE_POST_RD = 1;
+    const int MODE_PRE_WR  = 2;
+    const int MODE_POST_WR = 3;
 
   /************************************************
    *                 RFM Related
@@ -281,9 +290,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       int channel_id = addr_vec[m_levels["channel"]];
       m_channels[channel_id]->update_timing(command, addr_vec, m_clk);
       m_channels[channel_id]->update_powers(command, addr_vec, m_clk);
-      m_channels[channel_id]->update_states(command, addr_vec, m_clk);
-      
-      
+      m_channels[channel_id]->update_states(command, addr_vec, m_clk);  
       
       if(command == m_commands("PRE_WR")){
         pre_wr_cnt_per_ch[channel_id]++;
@@ -301,7 +308,11 @@ class DDR5PCH : public IDRAM, public Implementation {
         case m_commands("REFab"):
           // Psuedo Channel State Chagne to Refresing..
           each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=true;
-          // std::cout<<"["<<m_clk<<"] REFab Start CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] "<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
+          db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
+          // std::cout<<"["<<m_clk<<"] REFab Start CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] MODE"<<m_db_prefetch_mode[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<" | ";
+          // std::cout<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]];
+          // std::cout<<" / "<<db_prefetch_rd_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]];
+          // std::cout<<" / "<<db_prefetch_wr_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
           // if(db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]] > 0) exit(1);
           m_future_actions.push_back({command, addr_vec, m_clk + m_timing_vals("nRFC1") - 1});
           break;
@@ -332,6 +343,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         case m_commands("REFab"):
           // Refresh Done!
           each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=false;
+          db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
           // std::cout<<"["<<m_clk<<"] REFab Done CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] "<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
           m_channels[channel_id]->update_powers(m_commands("REFab_end"), addr_vec, m_clk);
           m_channels[channel_id]->update_states(m_commands("REFab_end"), addr_vec, m_clk);
@@ -372,7 +384,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       // std::cout<<"DDR5-pCH::Get Preq Command!"<<std::endl;
       // Check Each Pseudo Channel is Refreshing, Issue PRE_WR to DB (Not to DRAM)
       int new_command;
-      if(each_pch_refreshing[addr_vec[0]*num_pseudo_ch+addr_vec[1]] && 
+      bool is_enable_wr_prefetch = m_db_prefetch_mode[addr_vec[0]*num_pseudo_ch+addr_vec[1]] == MODE_PRE_WR;
+      if(each_pch_refreshing[addr_vec[0]*num_pseudo_ch+addr_vec[1]] && is_enable_wr_prefetch &&
         ((command == m_commands("WR")) || (command == m_commands("WRA")))) {      
           new_command = m_commands("PRE_WR");
       } else {
@@ -399,6 +412,40 @@ class DDR5PCH : public IDRAM, public Implementation {
       return m_channels[channel_id]->check_node_open(command, addr_vec, m_clk);
     };
 
+    void db_prefetch_change_mode(int _ch_idx, int _pch_idx) {
+      int pch_idx = _ch_idx*num_pseudo_ch+_pch_idx;
+      if(m_db_prefetch_mode[pch_idx] == MODE_POST_WR) {
+        if((db_prefetch_wr_cnt_per_pch[pch_idx] == 0) && m_enable_rd_prefetch[pch_idx]) {
+          // Prefetch RD Mode from DRAM to DB
+          m_db_prefetch_mode[pch_idx] = MODE_PRE_RD;        
+          // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_POST_WR to MODE_PRE_RD"<<std::endl;
+        }
+      }
+      else if(m_db_prefetch_mode[pch_idx] == MODE_PRE_WR) {
+        if(!each_pch_refreshing[pch_idx]) { 
+          m_db_prefetch_mode[pch_idx] = MODE_POST_WR;
+          // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_PRE_WR to MODE_POST_WR"<<std::endl;
+        }
+      }
+      else if(m_db_prefetch_mode[pch_idx] == MODE_POST_RD) {
+        if(db_prefetch_rd_cnt_per_pch[pch_idx]==0) {
+          if(each_pch_refreshing[pch_idx]) {
+            m_db_prefetch_mode[pch_idx] = MODE_PRE_WR;
+            // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_POST_RD to MODE_PRE_WR"<<std::endl;
+          } else {
+            m_db_prefetch_mode[pch_idx] = MODE_POST_WR;
+            // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_POST_RD to MODE_POST_WR"<<std::endl;
+          }           
+        }
+      } else { 
+        // MODE_PRE_RD
+        if(!m_enable_rd_prefetch[pch_idx]) {
+          m_db_prefetch_mode[pch_idx] = MODE_POST_RD;
+          // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_PRE_RD to MODE_POST_RD - "<<db_prefetch_rd_cnt_per_pch[pch_idx]<<std::endl;
+        }
+      }
+    };
+
     bool check_dram_refrsehing() override {
       bool is_refreshing = false;
       for(int i=0;i<each_pch_refreshing.size();i++) {
@@ -416,8 +463,12 @@ class DDR5PCH : public IDRAM, public Implementation {
       return db_prefetch_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
     };
 
-    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) override {
-      db_prefetch_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]] = value;
+    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) override {
+      int pch_idx = addr_vec[0]*num_pseudo_ch+addr_vec[1];
+      db_prefetch_cnt_per_pch[pch_idx]    = value;
+      db_prefetch_rd_cnt_per_pch[pch_idx] = rd_value;
+      db_prefetch_wr_cnt_per_pch[pch_idx] = wr_value;
+      db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
     };    
 
     void reset_need_be_open_per_bank(u_int32_t channel_idx) override {
@@ -451,7 +502,11 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     bool get_use_wr_prefetch() override {
       return m_use_wr_prefetch;
-    };    
+    };        
+
+    bool get_use_rd_prefetch() override {
+      return m_use_rd_prefetch;
+    };        
 
     // Print Request 
     void print_req(Request& req) {      
@@ -464,14 +519,25 @@ class DDR5PCH : public IDRAM, public Implementation {
                          <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
     };
 
-    void set_enable_rd_prefetch(u_int32_t channel_id) {
-      m_enable_rd_prefetch[channel_id] = true;
-      std::cout<<"["<<channel_id<<"] Enable RD Prefetch from DRAM to DB"<<std::endl;
+    void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = true;
+      db_prefetch_change_mode(channel_id,pseudo_channel_id);
+      // std::cout<<"["<<channel_id<<"] ["<<pseudo_channel_id<<"] Enable RD Prefetch from DRAM to DB"<<std::endl;
     };
-    void reset_enable_rd_prefetch(u_int32_t channel_id) {
-      m_enable_rd_prefetch[channel_id] = false;
-      std::cout<<"["<<channel_id<<"] Disable RD Prefetch from DRAM to DB"<<std::endl;
+    void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = false;
+      db_prefetch_change_mode(channel_id,pseudo_channel_id);
+      // std::cout<<"["<<channel_id<<"] ["<<pseudo_channel_id<<"] Disable RD Prefetch from DRAM to DB"<<std::endl;
     };        
+
+    bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      return m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id];
+    };    
+
+    int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      int pch_idx = channel_id*num_pseudo_ch + pseudo_channel_id;
+      return m_db_prefetch_mode[pch_idx];
+    }    
 
   private:
     void set_organization() {
@@ -506,9 +572,11 @@ class DDR5PCH : public IDRAM, public Implementation {
         m_organization.density = *density;
       }
 
+      /*
       for (int i = 0; i < m_levels.size(); i++){
         std::cout<<" Check level Name :"<<m_levels(i)<<" - "<<m_organization.count[i]<<std::endl;
-      }      
+      } 
+        */     
       // Sanity check: is the calculated chip density the same as the provided one?
       size_t _density = size_t(m_organization.count[m_levels["bankgroup"]]) *
                         size_t(m_organization.count[m_levels["bank"]]) *
@@ -544,6 +612,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
       
       m_use_wr_prefetch = param<bool>("db_fetch_wr").default_val(false);
+      m_use_rd_prefetch = param<bool>("db_fetch_rd").default_val(false);
 
       pre_wr_cnt_per_ch.resize(num_channels,0);
       post_wr_cnt_per_ch.resize(num_channels,0);
@@ -551,8 +620,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       num_pseudo_ch = num_pseudochannel;
       each_pch_refreshing.resize(num_channels * num_pseudochannel * num_ranks, false);
       db_prefetch_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks, 0);
-
-      m_enable_rd_prefetch.resize(num_channels, false);
+      m_db_prefetch_mode.resize(num_channels * num_pseudochannel * num_ranks,MODE_POST_WR);
+      db_prefetch_rd_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks,0);
+      db_prefetch_wr_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks,0);
+      m_enable_rd_prefetch.resize(num_channels * num_pseudochannel, false);
       for (int r = 0; r < num_channels * num_ranks; r++) {
         register_stat(s_total_rfm_cycles[r]).name("total_rfm_cycles_rank{}", r);
       }
@@ -717,11 +788,17 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nBL")},          
           // {.level = "pseudochannel", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = 4*V("nBL")},
           // {.level = "pseudochannel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = 4*V("nBL")},
-          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"RD", "RDA", "POST_RD"}, .latency = 4*V("nBL")},
-          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"WR", "WRA", "PRE_WR"},  .latency = 4*V("nBL")},          
+          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"RD", "RDA", "POST_RD"},  .latency = 4*V("nBL")},
+          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"WR", "WRA", "PRE_WR"},   .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},
+          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"WR", "WRA", "PRE_WR"},   .latency = 4*V("nBL")},          
+          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"RD", "RDA", "POST_RD"},  .latency = V("nCCDS_WTR")},          
 
           {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nBL")},
-          {.level = "wideio", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nBL")},
+          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},
+          {.level = "wideio", .preceding = {"WR", "WRA"},                        .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = 4*V("nBL")},
+          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA"},              .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nBL")},
+          {.level = "wideio", .preceding = {"WR", "WRA"},                        .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nCCDS_WTR")},
+          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA"},              .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nCCDS_WTR_WI")},
           
           /*** Rank (or different BankGroup) ***/ 
           // CAS <-> CAS
@@ -978,12 +1055,10 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     void create_nodes() {
       int num_channels = m_organization.count[m_levels["channel"]];
-      std::cout<<" Create_nodes Start!"<<std::endl;
       for (int i = 0; i < num_channels; i++) {
         Node* channel = new Node(this, nullptr, 0, i);
         m_channels.push_back(channel);
       }
-      std::cout<<" Create_nodes Done!"<<std::endl;
     }
     
     void finalize() override {

@@ -344,7 +344,7 @@ class DDR5 : public IDRAM, public Implementation {
       return 0;
     }
 
-    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value) override {
+    void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) override {
     };  
 
 
@@ -363,10 +363,6 @@ class DDR5 : public IDRAM, public Implementation {
       return false;
     };
 
-    bool get_use_wr_prefetch() override {
-      return false;
-    };    
-
     // Print Request 
     void print_req(Request& req) {      
       std::cout<<"Final["<<m_commands(req.final_command)<<"] Current ["<<m_commands(req.command)
@@ -378,12 +374,29 @@ class DDR5 : public IDRAM, public Implementation {
                          <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
     };    
 
-    void set_enable_rd_prefetch(u_int32_t channel_id) {
+    void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
       // Nothing to do
     };
-    void reset_enable_rd_prefetch(u_int32_t channel_id) {
+    void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
       // Nothing to do
     };    
+
+    bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      return false;
+    };        
+
+    int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      return 0;
+    }
+
+    bool get_use_wr_prefetch() override {
+      return false;
+    };        
+
+    bool get_use_rd_prefetch() override {
+      return false;
+    };       
+        
   private:
     void set_organization() {
       // Channel width

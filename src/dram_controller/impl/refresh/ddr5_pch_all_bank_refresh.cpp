@@ -48,14 +48,16 @@ class DR5PCHAllBankRefresh : public IRefreshManager, public Implementation {
       
       // 
       if (m_clk == m_next_enable_rd_prefetch_cycle) {
-        m_dram->set_enable_rd_prefetch(m_ctrl->m_channel_id);
+        for (int p = 0; p < m_num_pseudochannels; p++) {
+          m_dram->set_enable_rd_prefetch(m_ctrl->m_channel_id,p);
+        }
       }
       if (m_clk == m_next_refresh_cycle) {
         // std::cout<<"["<<m_clk<<"] Enque All-Back Refresh"<<std::endl;
-        m_dram->reset_enable_rd_prefetch(m_ctrl->m_channel_id);
         m_next_refresh_cycle += m_nrefi;
         m_next_enable_rd_prefetch_cycle = (m_next_refresh_cycle - m_nrfc);
         for (int p = 0; p < m_num_pseudochannels; p++) {
+          m_dram->reset_enable_rd_prefetch(m_ctrl->m_channel_id,p);
           for (int r = 0; r < m_num_ranks; r++) {
             std::vector<int> addr_vec(m_dram_org_levels, -1);
             addr_vec[0] = m_ctrl->m_channel_id;
