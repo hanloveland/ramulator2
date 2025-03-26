@@ -1,7 +1,8 @@
 Frontend:
   impl: LoadStoreTrace
   clock_ratio: 1
-  path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+  path: ./perf_comparison/traces/random_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
 
   Translation:
     impl: NoTranslation
@@ -15,7 +16,7 @@ MemorySystem:
   DRAM:
     impl: DDR5
     org:
-      preset: DDR5_8Gb_x4
+      preset: DDR5_16Gb_x4
       channel: 2
       rank: 4
     timing:
@@ -35,7 +36,8 @@ MemorySystem:
     RefreshManager:
       impl: AllBank
     RowPolicy:
-      impl: OpenRowPolicy
+      # impl: OpenRowPolicy
+      impl: ClosedRowPolicy
       cap: 4
     plugins:
 
