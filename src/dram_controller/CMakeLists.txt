@@ -24,7 +24,7 @@ target_sources(
   impl/refresh/all_bank_refresh.cpp
   impl/refresh/ddr5_pch_all_bank_refresh.cpp
   
-  #impl/rowpolicy/basic_rowpolicies.cpp
+  impl/rowpolicy/basic_rowpolicies.cpp
 
   impl/plugin/trace_recorder.cpp
   impl/plugin/cmd_counter.cpp
