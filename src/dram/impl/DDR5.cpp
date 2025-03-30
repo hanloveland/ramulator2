@@ -397,6 +397,9 @@ class DDR5 : public IDRAM, public Implementation {
       return false;
     };       
         
+    bool is_ndp_access(const AddrVec_t& addr_vec) override {
+      return false;
+    }    
   private:
     void set_organization() {
       // Channel width

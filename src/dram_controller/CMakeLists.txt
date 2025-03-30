@@ -13,6 +13,7 @@ target_sources(
   # impl/bh_dram_controller.cpp
   impl/dummy_controller.cpp
   impl/generic_dram_controller.cpp
+  impl/ndp_dram_controller.cpp
   # impl/prac_dram_controller.cpp
   
   # impl/scheduler/bh_scheduler.cpp

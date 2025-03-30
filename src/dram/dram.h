@@ -159,6 +159,7 @@ class IDRAM : public Clocked<IDRAM> {
    virtual void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual bool is_ndp_access(const AddrVec_t& addr_vec) = 0;
 
    virtual bool get_use_wr_prefetch() = 0;
    virtual bool get_use_rd_prefetch() = 0;
