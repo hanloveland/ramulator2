@@ -95,6 +95,9 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
       if((total_memory_capacity != 0) && (dram_capacity == total_memory_capacity)) return 1;
       else return 0;
     }
+
+    // Check All Buffers are Empty to finish simulation 
+    virtual bool is_finished() = 0;
 };
 
 }        // namespace Ramulator

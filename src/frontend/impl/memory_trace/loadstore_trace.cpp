@@ -16,6 +16,7 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
     struct Trace {
       bool is_write;
       Addr_t addr;
+      std::vector<uint64_t> payload;
     };
     std::vector<Trace> m_trace;
 
@@ -39,11 +40,20 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
 
 
     void tick() override {
-      const Trace& t = m_trace[m_curr_trace_idx];
-      bool request_sent = m_memory_system->send({t.addr, t.is_write ? Request::Type::Write : Request::Type::Read});
-      if (request_sent) {
-        m_curr_trace_idx = (m_curr_trace_idx + 1) % m_trace_length;
-        m_trace_count++;
+      if(!(m_trace_count >= m_trace_length)) {
+        const Trace& t = m_trace[m_curr_trace_idx];
+        Request req = Request(t.addr, t.is_write ? Request::Type::Write : Request::Type::Read);
+        
+        if(t.is_write && !t.payload.empty()) {
+          for(uint32_t i=0;i<t.payload.size();i++) {
+            req.m_payload.push_back(t.payload[i]);
+          }
+        }
+        bool request_sent = m_memory_system->send(req);
+        if (request_sent) {
+          m_curr_trace_idx = (m_curr_trace_idx + 1) % m_trace_length;
+          m_trace_count++;
+        }
       }
     };
 
@@ -62,19 +72,26 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
 
       std::string line;
       while (std::getline(trace_file, line)) {
+        Trace t;
         std::vector<std::string> tokens;
         tokenize(tokens, line, " ");
 
         // TODO: Add line number here for better error messages
-        if (tokens.size() != 2) {
+        if (!(tokens.size() == 2 || tokens.size() == 10)) {
           throw ConfigurationError("Trace {} format invalid!", file_path_str);
         }
 
         bool is_write = false; 
         if (tokens[0] == "LD") {
           is_write = false;
+          if(tokens.size() != 2) {
+            throw ConfigurationError("Trace {} format invalid!", file_path_str);
+          }
         } else if (tokens[0] == "ST") {
           is_write = true;
+          if(tokens.size() != 10) {
+            throw ConfigurationError("Trace {} format invalid!", file_path_str);
+          }          
         } else {
           throw ConfigurationError("Trace {} format invalid!", file_path_str);
         }
@@ -85,7 +102,21 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
         } else {
           addr = std::stoll(tokens[1]);
         }
-        m_trace.push_back({is_write, addr});
+
+        t.is_write = is_write;
+        t.addr     = addr;
+        if(is_write) {
+          if(tokens.size() == 10) {
+            for(uint32_t i=0;i<8;i++) {
+              if (tokens[i+2].compare(0, 2, "0x") == 0 | tokens[i+2].compare(0, 2, "0X") == 0) {
+                t.payload.push_back(std::stoll(tokens[i+2].substr(2), nullptr, 16));
+              } else {
+                t.payload.push_back(std::stoll(tokens[i+2]));
+              }              
+            }
+          } 
+        }
+        m_trace.push_back(t);
       }
 
       trace_file.close();
@@ -95,7 +126,8 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
 
     // TODO: FIXME
     bool is_finished() override {
-      return m_trace_count >= m_trace_length; 
+      // return m_trace_count >= m_trace_length; 
+      return m_memory_system->is_finished();
     };
 };
 

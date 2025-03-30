@@ -109,6 +109,17 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     // const SpecDef& get_supported_requests() override {
     //   return m_dram->m_requests;
     // };
+
+    bool is_finished() override {
+      bool is_dram_ctrl_finished = true;
+      int num_channels = m_dram->get_level_size("channel"); 
+      for (int i = 0; i < num_channels; i++) {
+        if(!m_controllers[i]->is_finished())
+          is_dram_ctrl_finished = false;
+      }
+
+      return (is_dram_ctrl_finished);
+    }    
 };
   
 }   // namespace 
