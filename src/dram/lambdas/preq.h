@@ -42,7 +42,8 @@ int RequireBankClosed(typename T::Node* node, int cmd, const AddrVec_t& addr_vec
 // for PRE_WR/PRE_RD of DB-related ops (only call by DDR5-pch)
 template <class T>
 int RequireFakeRowOpen(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
-  if(!(cmd == T::m_commands["PRE_WR"] || cmd == T::m_commands["POST_RD"])) {
+  if(!(cmd == T::m_commands["PRE_WR"]    || cmd == T::m_commands["POST_RD"] || 
+       cmd == T::m_commands["NDP_DB_RD"] || cmd == T::m_commands["NDP_DB_WR"])) {
     spdlog::error("[Preq::Bank] Invalid Command {} for RequireFakeRowOpen Lamdas",T::m_commands(cmd));
     std::exit(-1);          
   }

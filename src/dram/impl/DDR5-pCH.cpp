@@ -64,24 +64,62 @@ class DDR5PCH : public IDRAM, public Implementation {
    // - ACT   - WR/WRA or RD/RDA 
    // - ACT   - POST_WR/POST_WRA or PRE_RD/PRE_RDA   
     inline static constexpr ImplDef m_commands = {
-      "ACT",      "P_ACT",
-      "PRE",      "PREA",     "PREsb",     "P_PRE",
-      "RD",       "WR",       "RDA",       "WRA",
-      "PRE_RD",   "PRE_WR",   "PRE_RDA",   
-      "POST_RD",  "POST_WR",  "POST_WRA",
-      "REFab",    "REFsb",    "REFab_end", "REFsb_end",
+      "ACT",         "P_ACT",
+      "PRE",         "PREA",        "PREsb",      "P_PRE",
+      "RD",          "WR",          "RDA",        "WRA",
+      "PRE_RD",      "PRE_WR",      "PRE_RDA",   
+      "POST_RD",     "POST_WR",     "POST_WRA",
+      "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA",
+      "NDP_DB_RD",   "NDP_DB_WR",
+      "REFab",       "REFsb",       "REFab_end", "REFsb_end",
       // "RFMab",  "RFMsb", "RFMab_end", "RFMsb_end",
       // "DRFMab", "DRFMsb", "DRFMab_end", "DRFMsb_end",
     };
+    // NDP_DB_RD   == POST_RD, NDP_DB_WR   == PRE_WR
+    // NDP_DRAM_RD == PRE_RD,  NDP_DRAM_WR == POST_WR 
+
+    /*
+      DDR Command
+      - RD/WR (DRAM->DB->MC)/(MC->DB->DRAM)
+      - PRE/POST RD/WR (MC->DB)/(DB->DRAM)/(DRAM->DB)/(DB->MC)
+      - NDP_DRAM_RD/WR (DRAM->DB)/(DB->DRAN)
+      - NDP_DB_RD/WR (DB->MC)/(MC->DB)
+
+      BCOM Command
+      N: NDP BCOM
+      PP: is_PRE/POST
+      P: is_PRE
+      BI: Buffer Index for Pre/Post Request
+      R: Reserved
+      ID: NDP Exeuction ID
+      C: Column Address
+      NT: NDP Type(CONF_REG, INST_MEM, DAT_MEM)
+      - DRAM_RD     : 2 cycle : BCOM_RD(3'b011)  → {N(1'b0),PP(1'b0),BL}
+      - DRAM_WR     : 2 cycle : BCOM_WR(3'b010)  → {N(1'b0),PP(1'b0),BL}
+      - PRE_RD      : 4 cycle : BCOM_RD(3'b011)  → {N(1'b0),PP(1'b1),BL} → {P(1'b1), BI2, BI1} → {BI1, BI0, R}
+      - POST_RD     : 4 cycle : BCOM_RD(3'b011)  → {N(1'b0),PP(1'b1),BL} → {P(1'b0), BI2, BI1} → {BI1, BI0, R}
+      - PRE_WR      : 4 cycle : BCOM_WR(3'b010)  → {N(1'b0),PP(1'b1),BL} → {P(1'b1), BI2, BI1} → {BI1, BI0, R}
+      - POST_WR     : 4 cycle : BCOM_WR(3'b010)  → {N(1'b0),PP(1'b1),BL} → {P(1'b0), BI2, BI1} → {BI1, BI0, R}
+      | MC - 2 cc - RCD - 4 cc - DB - max 7 cc - BUF in NDP - 4 cc - DB | 
+      - NDP_DRAM_RD : 8 cycle : BCOM_RD(3'b011)  → {N(1'b1),PP(1'b0),BL} → {BG2, BG1, BG0}     → {BK1, BK0, R} → {ID2 ,ID1, ID0} → {C10, C9, C8} → {C7, C6, C5} → {C4, R, R}
+      - NDP_DRAM_WR : 8 cycle : BCOM_WR(3'b010)  → {N(1'b1),PP(1'b0),BL} → {BG2, BG1, BG0}     → {BK1, BK0, R} → {ID2 ,ID1, ID0} → {C10, C9, C8} → {C7, C6, C5} → {C4, R, R}
+      | MC - 2 cc - RCD - 8 cc - DB - max 7 cc - BCOM DEC of NDP - 4 cc - REG/SRAM - 4 cc - BUF - 4 cc - ECC - 4 cc - O.H (bypass) - DB | 31? (Support Only CWL > 32)
+      - NDP_DB_RD   : 8 cycle : BCOM_RFU(3’b100) → {RW(1’b1), BK1, BK0}  → {BG2, BG1, BG0}     → {C10, C9, C8} → {C7, C6, C5}    → {C4, R, R}    → {R, R, R}    → {R, R, R}
+      | MC - 2 cc - RCD - 8 cc - DB - max 7 cc - BCOM DEC of NDP - 4 cc - REG/SRAM - 4 cc - BUF - 4 cc - O.H (bypass) - DB | total 27 cycle (Support Only CL > 28) 
+      - NDP_DB_WR   : 8 cycle : BCOM_RFU(3’b100) → {RW(1’b0), BK1, BK0}  → {BG2, BG1, BG0}     → {C10, C9, C8} → {C7, C6, C5}    → {C4, R, R}    → {R, R, R}    → {R, R, R}
+    */
+   
 
     inline static const ImplLUT m_command_scopes = LUT (
       m_commands, m_levels, {
-        {"ACT",     "row"},    {"P_ACT",     "row"},
-        {"PRE",     "bank"},   {"PREA",    "rank"},   {"PREsb",     "bank"},       {"P_PRE",    "bank"},
-        {"RD",      "column"}, {"WR",      "column"}, {"RDA",       "column"},     {"WRA",        "column"},
-        {"PRE_RD",  "column"}, {"PRE_WR",  "column"}, {"PRE_RDA",   "column"},     
-        {"POST_RD", "column"}, {"POST_WR", "column"}, {"POST_WRA",  "column"},
-        {"REFab",   "rank"},   {"REFsb",   "bank"},   {"REFab_end", "rank"},       {"REFsb_end",  "bank"},
+        {"ACT",     "row"},        {"P_ACT",     "row"},
+        {"PRE",     "bank"},       {"PREA",    "rank"},       {"PREsb",     "bank"},       {"P_PRE",    "bank"},
+        {"RD",      "column"},     {"WR",      "column"},     {"RDA",       "column"},     {"WRA",        "column"},
+        {"PRE_RD",  "column"},     {"PRE_WR",  "column"},     {"PRE_RDA",   "column"},     
+        {"POST_RD", "column"},     {"POST_WR", "column"},     {"POST_WRA",  "column"},
+        {"NDP_DRAM_RD", "column"}, {"NDP_DRAM_WR", "column"}, {"NDP_DRAM_RDA",  "column"}, {"NDP_DRAM_WRA",  "column"},
+        {"NDP_DB_RD", "column"},   {"NDP_DB_WR", "column"}, 
+        {"REFab",   "rank"},       {"REFsb",   "bank"},       {"REFab_end", "rank"},       {"REFsb_end",  "bank"},
         // {"RFMab",  "rank"},  {"RFMsb",  "bank"}, {"RFMab_end",  "rank"},  {"RFMsb_end",  "bank"},
         // {"DRFMab", "rank"},  {"DRFMsb", "bank"}, {"DRFMab_end", "rank"},  {"DRFMsb_end", "bank"},
       }
@@ -106,6 +144,12 @@ class DDR5PCH : public IDRAM, public Implementation {
         {"POST_WR",     {false,  false,   true,    false}},
         {"PRE_RDA",     {false,  true,    true,    false}},
         {"POST_WRA",    {false,  true,    true,    false}},
+        {"NDP_DRAM_RD", {false,  false,   true,    false}},
+        {"NDP_DRAM_WR", {false,  false,   true,    false}},
+        {"NDP_DRAM_RDA",{false,  true,    true,    false}},
+        {"NDP_DRAM_WRA",{false,  true,    true,    false}},
+        {"NDP_DB_RD",   {false,  false,   false,   false}},
+        {"NDP_DB_WR",   {false,  false,   false,   false}},
         {"REFab",       {false,  false,   false,   true }},
         {"REFsb",       {false,  false,   false,   true }},
         {"REFab_end",   {false,  true,    false,   false}},
@@ -126,7 +170,9 @@ class DDR5PCH : public IDRAM, public Implementation {
       "all-bank-refresh", "same-bank-refresh", 
       // "rfm", "same-bank-rfm",
       // "directed-rfm", "same-bank-directed-rfm",
-      "open-row", "close-row"
+      "open-row", "close-row",
+      "ndp-db-read",   "ndp-db-write",
+      "ndp-dram-read", "ndp-dram-write",
     };
 
     inline static const ImplLUT m_request_translations = LUT (
@@ -135,7 +181,9 @@ class DDR5PCH : public IDRAM, public Implementation {
         {"all-bank-refresh", "REFab"}, {"same-bank-refresh", "REFsb"}, 
         // {"rfm", "RFMab"}, {"same-bank-rfm", "RFMsb"}, 
         // {"directed-rfm", "DRFMab"}, {"same-bank-directed-rfm", "DRFMsb"}, 
-        {"open-row", "ACT"}, {"close-row", "PRE"}
+        {"open-row", "ACT"}, {"close-row", "PRE"},
+        {"ndp-db-read", "NDP_DB_RD"}, {"ndp-db-write", "NDP_DB_WR"},
+        {"ndp-dram-read", "NDP_DRAM_RD"}, {"ndp-dram-write", "NDP_DRAM_WR"},
       }
     );
 
@@ -170,8 +218,9 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     inline static constexpr ImplDef m_cmds_counted = {
-      "ACT", "P_ACT", "PRE", "RD", "WR", "REF", "RFM", "PRE_RD", "PRE_WR", "POST_RD","POST_WR","PRE_RDA", "POST_WRA"
+      "ACT", "P_ACT", "PRE", "RD", "WR", "REF", "RFM", "PRE_RD", "PRE_WR", "POST_RD","POST_WR","PRE_RDA", "POST_WRA", "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA","NDP_DB_RD",   "NDP_DB_WR"
     };
+
 
   /************************************************
    *                 Node States
@@ -252,6 +301,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     const int MODE_PRE_WR  = 2;
     const int MODE_POST_WR = 3;
 
+    int ndp_access_row; 
+
   /************************************************
    *                 RFM Related
    ***********************************************/
@@ -284,6 +335,11 @@ class DDR5PCH : public IDRAM, public Implementation {
       set_powers();
       
       create_nodes();
+
+      Logger_t m_logger;
+      m_logger = Logging::create_logger("DDR5-PCH");
+      m_logger->info("DRAM init()");      
+      m_logger->info(" NDP ADDRESS SPACE ROW : {}",ndp_access_row);
     };
 
     void issue_command(int command, const AddrVec_t& addr_vec) override {
@@ -539,6 +595,12 @@ class DDR5PCH : public IDRAM, public Implementation {
       return m_db_prefetch_mode[pch_idx];
     }    
 
+    bool is_ndp_access(const AddrVec_t& addr_vec) override {
+      // is NDP Unit Access or NDP Execution
+      if(addr_vec[m_levels["row"]] == ndp_access_row) return true;
+      else                                            return false;
+    }
+
   private:
     void set_organization() {
       // Channel width
@@ -775,12 +837,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       populate_timingcons(this, {
           /*** Channel ***/ 
           // Two-Cycle Commands
-          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA",
-                                             "P_ACT", "PRE_WR", "POST_RD"}, .following = all_commands, .latency = 2},
-
-
-          // "PRE_RD",   "PRE_WR",   "PRE_RDA",   
-          // "POST_RD",  "POST_WR",  "POST_WRA",
+          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA", 
+                                             "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA",
+                                             "P_ACT",  "PRE_WR",  "POST_RD",
+                                             "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA","NDP_DB_RD", "NDP_DB_WR"}, .following = all_commands, .latency = 2},
           
           // CAS <-> CAS
           /// Data bus occupancy //
@@ -788,39 +848,48 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nBL")},          
           // {.level = "pseudochannel", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = 4*V("nBL")},
           // {.level = "pseudochannel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = 4*V("nBL")},
-          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"RD", "RDA", "POST_RD"},  .latency = 4*V("nBL")},
-          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD"}, .following = {"WR", "WRA", "PRE_WR"},   .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},
-          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"WR", "WRA", "PRE_WR"},   .latency = 4*V("nBL")},          
-          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR"},  .following = {"RD", "RDA", "POST_RD"},  .latency = V("nCCDS_WTR")},          
+          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD", "NDP_DB_RD"}, .following = {"RD", "RDA", "POST_RD", "NDP_DB_RD"},  .latency = 4*V("nBL")},
+          {.level = "narrowio", .preceding = {"RD", "RDA", "POST_RD", "NDP_DB_RD"}, .following = {"WR", "WRA", "PRE_WR", "NDP_DB_WR"},   .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},
+          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR", "NDP_DB_WR"},  .following = {"WR", "WRA", "PRE_WR", "NDP_DB_WR"},   .latency = 4*V("nBL")},          
+          {.level = "narrowio", .preceding = {"WR", "WRA", "PRE_WR", "NDP_DB_WR"},  .following = {"RD", "RDA", "POST_RD", "NDP_DB_RD"},  .latency = V("nCCDS_WTR")},          
 
-          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nBL")},
-          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},
-          {.level = "wideio", .preceding = {"WR", "WRA"},                        .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = 4*V("nBL")},
-          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA"},              .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nBL")},
-          {.level = "wideio", .preceding = {"WR", "WRA"},                        .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nCCDS_WTR")},
-          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA"},              .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .latency = V("nCCDS_WTR_WI")},
+          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .latency = V("nBL")},
+          {.level = "wideio", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .following = {"WR", "WRA", "POST_WR", "POST_WRA","NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},
+          {.level = "wideio", .preceding = {"WR", "WRA"},                                                       .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = 4*V("nBL")},
+          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"},              .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nBL")},
+          {.level = "wideio", .preceding = {"WR", "WRA"},                                                       .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .latency = V("nCCDS_WTR")},
+          {.level = "wideio", .preceding = {"POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"},              .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .latency = V("nCCDS_WTR_WI")},
+          
           
           /*** Rank (or different BankGroup) ***/ 
           // CAS <-> CAS
           /// nCCDS is the minimal latency for column commands 
-          {.level = "rank", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .following = {"RD", "RDA",  "PRE_RD", "PRE_RDA"},   .latency = V("nCCDS")},
-          {.level = "rank", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCCDS_WR")},
+          {.level = "rank", .preceding = {"RD", "RDA", "PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},   .following = {"RD", "RDA",  "PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},   .latency = V("nCCDS")},
+          {.level = "rank", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"},  .latency = V("nCCDS_WR")},
           /// RD <-> WR, Minimum Read to Write, Assuming Read DQS Offset = 0, tRPST = 0.5, tWPRE = 2 tCK                          
-          {.level = "rank", .preceding = {"RD",     "RDA"},     .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
-          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
+          {.level = "rank", .preceding = {"RD",     "RDA"},                                      .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nCL") + 4*V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
+          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},   .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},   // nCCDS_RTW
           /// WR <-> RD, Minimum Read after Write
-          {.level = "rank", .preceding = {"WR",      "WRA"},      .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDS_WTR")},
-          {.level = "rank", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDS_WTR_WI")},
+          {.level = "rank", .preceding = {"WR",      "WRA"},                                     .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, .latency = V("nCCDS_WTR")},
+          {.level = "rank", .preceding = {"POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, .latency = V("nCCDS_WTR_WI")},           
 
           /// CAS <-> CAS between sibling ranks, nCS (rank switching) is needed for new DQS
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = 4*V("nBL") + V("nCS"), .is_sibling = true},
-          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = V("nBL") + V("nCS"), .is_sibling = true},
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA","PRE_RD", "PRE_RDA"}, .latency = V("nCL")  + 4*V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
-          {.level = "rank", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA","PRE_RD", "PRE_RDA"}, .latency = V("nCL")  + V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
+          {.level = "rank", .preceding = {"RD", "RDA"}, 
+                            .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA", "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA"}, 
+                            .latency = 4*V("nBL") + V("nCS"), .is_sibling = true},
+          {.level = "rank", .preceding = {"PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, 
+                            .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA","NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA"}, 
+                            .latency = V("nBL") + V("nCS"), .is_sibling = true},
+          {.level = "rank", .preceding = {"WR", "WRA"}, 
+                            .following = {"RD", "RDA","PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, 
+                            .latency = V("nCL")  + 4*V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
+          {.level = "rank", .preceding = {"POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, 
+                            .following = {"RD", "RDA","PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, 
+                            .latency = V("nCL")  + V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
           /// CAS <-> PREab
-          {.level = "rank", .preceding = {"RD", "PRE_RD"}, .following = {"PREA"}, .latency = V("nRTP")},
-          {.level = "rank", .preceding = {"WR"}, .following = {"PREA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},          
-          {.level = "rank", .preceding = {"POST_WR"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
+          {.level = "rank", .preceding = {"RD", "PRE_RD", "NDP_DRAM_RD"}, .following = {"PREA"}, .latency = V("nRTP")},
+          {.level = "rank", .preceding = {"WR"},                          .following = {"PREA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},          
+          {.level = "rank", .preceding = {"POST_WR", "NDP_DRAM_WR"},      .following = {"PREA"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
           /// RAS <-> RAS
           {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDS")},          
           {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nFAW"), .window = 4},          
@@ -835,10 +904,10 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "rank", .preceding = {"PREA"}, .following = {"REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")},   
           {.level = "rank", .preceding = {"PREA"}, .following = {"REFab", "REFsb"}, .latency = V("nRP")},          
           // {.level = "rank", .preceding = {"RDA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nRP") + V("nRTP")},      
-          {.level = "rank", .preceding = {"RDA", "PRE_RD"}, .following = {"REFab"}, .latency = V("nRTP") + V("nRP")},     
+          {.level = "rank", .preceding = {"RDA", "PRE_RDA", "NDP_DRAM_RDA"}, .following = {"REFab"}, .latency = V("nRTP") + V("nRP")},     
           // {.level = "rank", .preceding = {"WRA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},        
           {.level = "rank", .preceding = {"WRA"}, .following = {"REFab"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},   
-          {.level = "rank", .preceding = {"POST_WRA"}, .following = {"REFab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},   
+          {.level = "rank", .preceding = {"POST_WRA","NDP_DRAM_WRA"}, .following = {"REFab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},   
           // {.level = "rank", .preceding = {"REFab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFC1")},       
           {.level = "rank", .preceding = {"REFab"}, .following = {"ACT", "PREA", "REFab", "REFsb"}, .latency = V("nRFC1")},     
           // {.level = "rank", .preceding = {"RFMab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFM1")},          
@@ -849,30 +918,31 @@ class DDR5PCH : public IDRAM, public Implementation {
           // {.level = "rank", .preceding = {"DRFMsb"}, .following = {"PREA", "REFab", "RFMab", "DRFMab"}, .latency = V("nDRFMsb")},  
           /*** Same Bank Group ***/ 
           /// CAS <-> CAS
-          {.level = "bankgroup", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL")},          
-          {.level = "bankgroup", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA"}, .latency = V("nCCDL_WR")},          
-          {.level = "bankgroup", .preceding = {"WR",      "WRA"},      .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL_WTR")},
-          {.level = "bankgroup", .preceding = {"POST_WR", "POST_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA"}, .latency = V("nCCDL_WTR_WI")},
+          
+          {.level = "bankgroup", .preceding = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"},  .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, .latency = V("nCCDL")},          
+          {.level = "bankgroup", .preceding = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .following = {"WR", "WRA", "POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nCCDL_WR")},          
+          {.level = "bankgroup", .preceding = {"WR",      "WRA"},                                     .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, .latency = V("nCCDL_WTR")},
+          {.level = "bankgroup", .preceding = {"POST_WR", "POST_WRA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .following = {"RD", "RDA", "PRE_RD",  "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA"}, .latency = V("nCCDL_WTR_WI")},
           /// RAS <-> RAS
           {.level = "bankgroup", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDL")},  
-
+          
           /*** Bank ***/ 
           // {.level = "bank", .preceding = {"ACT"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRC")},  
           {.level = "bank", .preceding = {"ACT"}, .following = {"ACT", "REFsb"}, .latency = V("nRC")},  
-          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA"}, .latency = V("nRCD")},  
+          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA", "WR", "WRA", "PRE_RD", "PRE_RDA", "POST_WR", "POST_WRA", "NDP_DRAM_RD", "NDP_DRAM_RDA", "NDP_DRAM_WR", "NDP_DRAM_WRA"}, .latency = V("nRCD")},  
           {.level = "bank", .preceding = {"ACT"}, .following = {"PRE", "PREsb"}, .latency = V("nRAS")},  
           // {.level = "bank", .preceding = {"PRE", "PREsb"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")}, 
-          {.level = "bank", .preceding = {"PRE", "PREsb"}, .following = {"ACT", "REFsb"}, .latency = V("nRP")},   
-          {.level = "bank", .preceding = {"RD", "PRE_RD"},  .following = {"PRE", "PREsb"}, .latency = V("nRTP")},  
-          {.level = "bank", .preceding = {"WR"},      .following = {"PRE", "PREsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},  
-          {.level = "bank", .preceding = {"POST_WR"}, .following = {"PRE", "PREsb"}, .latency = V("nCWL") + V("nBL") + V("nWR")},  
+          {.level = "bank", .preceding = {"PRE", "PREsb"},                 .following = {"ACT", "REFsb"}, .latency = V("nRP")},   
+          {.level = "bank", .preceding = {"RD", "PRE_RD", "NDP_DRAM_RD"},  .following = {"PRE", "PREsb"}, .latency = V("nRTP")},  
+          {.level = "bank", .preceding = {"WR"},                           .following = {"PRE", "PREsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR")},  
+          {.level = "bank", .preceding = {"POST_WR", "NDP_DRAM_WR"},       .following = {"PRE", "PREsb"}, .latency = V("nCWL") + V("nBL") + V("nWR")},  
           // {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRTP") + V("nRP")},  
-          {.level = "bank", .preceding = {"RDA", "PRE_RDA"}, .following = {"ACT", "REFsb"}, .latency = V("nRTP") + V("nRP")},  
+          {.level = "bank", .preceding = {"RDA", "PRE_RDA", "NDP_DRAM_RDA"}, .following = {"ACT", "REFsb"}, .latency = V("nRTP") + V("nRP")},  
           // {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},
-          {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},  
-          {.level = "bank", .preceding = {"POST_WRA"}, .following = {"ACT", "REFsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},  
-          {.level = "bank", .preceding = {"WR"},  .following = {"RDA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") - V("nRTP")},  
-          {.level = "bank", .preceding = {"POST_WRA"},  .following = {"RDA"}, .latency = V("nCWL") + V("nBL") + V("nWR") - V("nRTP")},  
+          {.level = "bank", .preceding = {"WRA"},                       .following = {"ACT", "REFsb"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") + V("nRP")},  
+          {.level = "bank", .preceding = {"POST_WRA", "NDP_DRAM_WRA"},  .following = {"ACT", "REFsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},  
+          {.level = "bank", .preceding = {"WR"},                        .following = {"RDA"}, .latency = V("nCWL") + 4*V("nBL") + V("nWR") - V("nRTP")},  
+          {.level = "bank", .preceding = {"POST_WRA", "NDP_DRAM_WRA"},  .following = {"RDA"}, .latency = V("nCWL") + V("nBL") + V("nWR") - V("nRTP")},  
 
           /// Same-bank refresh/RFM timings. The timings of the bank in other BGs will be updated by action function
           // {.level = "bank", .preceding = {"REFsb"},  .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFCsb")},  
@@ -909,12 +979,14 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_actions[m_levels["bankgroup"]][m_commands["DRFMsb_end"]] = Lambdas::Action::BankGroup::REFsb_end<DDR5PCH>;
 
       // Bank actions
-      m_actions[m_levels["bank"]][m_commands["ACT"]]      = Lambdas::Action::Bank::ACT<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["PRE"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["RDA"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["PRE_RDA"]]  = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["WRA"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
-      m_actions[m_levels["bank"]][m_commands["POST_WRA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["ACT"]]          = Lambdas::Action::Bank::ACT<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["PRE"]]          = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["RDA"]]          = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["PRE_RDA"]]      = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["WRA"]]          = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["POST_WRA"]]     = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
+      m_actions[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]] = Lambdas::Action::Bank::PRE<DDR5PCH>;
 
       m_actions[m_levels["bank"]][m_commands["P_ACT"]]    = Lambdas::Action::Bank::P_ACT<DDR5PCH>;
       m_actions[m_levels["bank"]][m_commands["P_PRE"]]    = Lambdas::Action::Bank::P_PRE<DDR5PCH>;
@@ -934,34 +1006,43 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_preqs[m_levels["rank"]][m_commands["DRFMsb"]] = Lambdas::Preq::Rank::RequireSameBanksClosed<DDR5PCH>;
 
       // Bank Preqs
-      m_preqs[m_levels["bank"]][m_commands["RD"]]      = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["WR"]]      = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["ACT"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["PRE"]]     = Lambdas::Preq::Bank::RequireBankClosed<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["RD"]]              = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE_RD"]]          = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["WR"]]              = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["POST_WR"]]         = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]]    = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]]    = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["ACT"]]             = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE"]]             = Lambdas::Preq::Bank::RequireBankClosed<DDR5PCH>;
 
-      m_preqs[m_levels["bank"]][m_commands["PRE_WR"]]   = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["POST_RD"]]  = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE_WR"]]          = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["POST_RD"]]         = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DB_RD"]]       = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DB_WR"]]       = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;
     };
 
     void set_rowhits() {
       m_rowhits.resize(m_levels.size(), std::vector<RowhitFunc_t<Node>>(m_commands.size()));
 
-      m_rowhits[m_levels["bank"]][m_commands["RD"]]      = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
-      m_rowhits[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
-      m_rowhits[m_levels["bank"]][m_commands["WR"]]      = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
-      m_rowhits[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["RD"]]          = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["PRE_RD"]]      = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["WR"]]          = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["POST_WR"]]     = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["NDP_DRAM_RD"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
+      m_rowhits[m_levels["bank"]][m_commands["NDP_DRAM_WR"]] = Lambdas::RowHit::Bank::RDWR<DDR5PCH>;
     }
-
 
     void set_rowopens() {
       m_rowopens.resize(m_levels.size(), std::vector<RowhitFunc_t<Node>>(m_commands.size()));
 
-      m_rowopens[m_levels["bank"]][m_commands["RD"]]      = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
-      m_rowopens[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
-      m_rowopens[m_levels["bank"]][m_commands["WR"]]      = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
-      m_rowopens[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["RD"]]          = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["PRE_RD"]]      = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["WR"]]          = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["POST_WR"]]     = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["NDP_DRAM_RD"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
+      m_rowopens[m_levels["bank"]][m_commands["NDP_DRAM_WR"]] = Lambdas::RowOpen::Bank::RDWR<DDR5PCH>;
     }
 
     void set_powers() {
@@ -1009,13 +1090,15 @@ class DDR5PCH : public IDRAM, public Implementation {
 
       m_powers.resize(m_levels.size(), std::vector<PowerFunc_t<Node>>(m_commands.size()));
 
-      m_powers[m_levels["bank"]][m_commands["ACT"]]     = Lambdas::Power::Bank::ACT<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["PRE"]]     = Lambdas::Power::Bank::PRE<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["RD"]]      = Lambdas::Power::Bank::RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["PRE_RD"]]  = Lambdas::Power::Bank::RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["WR"]]      = Lambdas::Power::Bank::WR<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["POST_WR"]] = Lambdas::Power::Bank::WR<DDR5PCH>;
-
+      m_powers[m_levels["bank"]][m_commands["ACT"]]          = Lambdas::Power::Bank::ACT<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE"]]          = Lambdas::Power::Bank::PRE<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["RD"]]           = Lambdas::Power::Bank::RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE_RD"]]       = Lambdas::Power::Bank::RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]  = Lambdas::Power::Bank::RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["WR"]]           = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["POST_WR"]]      = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["WR"]]           = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::WR<DDR5PCH>;
       // m_powers[m_levels["rank"]][m_commands["REFsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["REFsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["RFMsb"]] = Lambdas::Power::Rank::RFMsb<DDR5PCH>;
@@ -1034,7 +1117,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_powers[m_levels["rank"]][m_commands["DRFMab_end"]] = Lambdas::Power::Rank::REFab_end<DDR5>;
 
       m_powers[m_levels["rank"]][m_commands["PREsb"]] = Lambdas::Power::Rank::PREsb<DDR5PCH>;
-
+            
       // register stats
       register_stat(s_total_background_energy).name("total_background_energy");
       register_stat(s_total_cmd_energy).name("total_cmd_energy");
