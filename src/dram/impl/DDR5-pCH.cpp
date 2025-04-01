@@ -45,6 +45,23 @@ class DDR5PCH : public IDRAM, public Implementation {
       // name           IDD0  IDD2N   IDD3N   IDD4R   IDD4W   IDD5B   IPP0  IPP2N  IPP3N  IPP4R  IPP4W  IPP5B
       {"Default",       {60,   50,     55,     145,    145,    362,     3,    3,     3,     3,     3,     48}},
     };
+
+    /*
+        16Gb DDR5 SDRAM (MT60B4G4, MT60B2G8, MT60B1G16) -48B Speed Grade, 4800B nCL-nRCD-nRP (40-39-39) 
+        (x4/x8/x16)
+        - IDD0: 103/103/122 
+        - IDD2N: 92
+        - IDD3N: 142
+        - IDD4R: 318/377/530
+        - IDD4W: 345/359/479
+        - IDD5B: 277
+        - IPP0: 8/8/10
+        - IPP2N: 6
+        - IPP3N: 7
+        - IPP4R: 9
+        - IPP4W: 36/37/64
+        - IPP5B: 28
+    */
   /************************************************
    *                Organization
    ***********************************************/   
@@ -261,6 +278,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
     );
 
+    inline static constexpr ImplDef m_ndp_status = {
+      "idle", "run", "barrier", "wait_done", "done"
+   };
+
   public:
     struct Node : public DRAMNodeBase<DDR5PCH> {
       Node(DDR5PCH* dram, Node* parent, int level, int id) : DRAMNodeBase<DDR5PCH>(dram, parent, level, id) {};
@@ -302,7 +323,57 @@ class DDR5PCH : public IDRAM, public Implementation {
     const int MODE_POST_WR = 3;
 
     int ndp_access_row; 
+    int ndp_ctrl_access_bk;
+    int ndp_ctrl_access_bg; 
+    int ndp_ins_mem_access_bk;
+    int ndp_ins_mem_access_bg;
+    int ndp_dat_mem_access_bk;
+    int ndp_dat_mem_access_bg;    
+    // NDP Unit per pch 
+    std::vector<std::vector<uint64_t>>  ins_mem_per_pch;
+    std::vector<std::vector<uint64_t>>  dat_mem_per_pch;
+    std::vector<int>                    ndp_status_per_pch;
+    std::vector<int>                    ndp_pc_per_pch;
+    std::vector<std::vector<Inst_Slot>> ndp_inst_slot_per_pch; 
 
+    // MC -> RCD -> BD Clock
+    std::vector<std::vector<int>>                   pipe_ndp_latency_per_pch;
+    std::vector<std::vector<int>>                   pipe_ndp_cmd_per_pch;
+    std::vector<std::vector<AddrVec_t>>             pipe_ndp_addr_per_pch;
+    std::vector<std::vector<int>>                   pipe_ndp_id_per_pch;
+    std::vector<std::vector<bool>>                  pipe_ndp_payload_valid_per_pch;
+    std::vector<bool>                               ndp_valid_per_pch;
+    std::vector<int>                                ndp_cmd_per_pch;
+    std::vector<AddrVec_t>                          ndp_addr_per_pch;    
+    std::vector<int>                                ndp_id_per_pch;    
+    std::vector<bool>                               ndp_payload_valid_per_pch;    
+    std::vector<std::vector<std::vector<uint64_t>>> pipe_ndp_payload_per_pch;
+
+    /*
+      x4/x8 DRAM: 8BG,4BK per BG --> 32 BK
+      CHx/PCHx/BK3/BG7/ROW(Highest Row): HSNC-Ctrl Reg
+      CHx/PCHx/BK3/BG6/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
+      CHv/PCHv/BK3/BG5/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
+      CHv/PCHv/BK3/BG4/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
+      CHv/PCHv/BK3/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK3/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK2/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+      CHv/PCHv/BK1/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+      CHv/PCHv/BK0/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+      x16 DRAM: 4BG,4BK per BG --> 16 BK
+      CHx/PCHx/BK3/BG3/ROW(Highest Row): HSNC-Ctrl Reg
+      CHx/PCHx/BK3/BG2/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
+      CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
+      CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
+      CHv/PCHv/BK2/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK2/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK2/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK2/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+      CHv/PCHv/BK1/BG0-BG3/ROW(Highest Row)/COL0-127: Reserved
+      CHv/PCHv/BK0/BG0-BG3/ROW(Highest Row)/COL0-127: Reserved    
+    */
   /************************************************
    *                 RFM Related
    ***********************************************/
@@ -322,6 +393,203 @@ class DDR5PCH : public IDRAM, public Implementation {
           m_future_actions.erase(m_future_actions.begin() + i);
         }
       }
+
+      // NDP Unit tick()
+      if(m_clk%4 == 0) {
+        // NDP Unit Clock is 1/4 of DRAM clock
+        // iteration each channel and pseudo channel
+        for(int ch=0;ch<m_num_channels;ch++) {
+          for(int pch=0;pch<m_num_pseudochannel;pch++) {
+            int pch_idx = ch*m_num_pseudochannel + pch;
+
+            // Fetch Instruction from instruction memory
+            if(ndp_status_per_pch[pch_idx] == m_ndp_status("run")) {              
+              if(ndp_inst_slot_per_pch[pch_idx].size() < 16) {
+                std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
+                Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
+                if(inst.opcode == 48) {
+                  ndp_status_per_pch[pch_idx] = m_ndp_status("barrier");
+                } else if(inst.opcode == 49) {
+                  ndp_status_per_pch[pch_idx] = m_ndp_status("wait_done");
+                } else {
+                  ndp_inst_slot_per_pch[pch_idx].push_back(inst);
+                }
+                ndp_pc_per_pch[pch_idx]++;
+              }                            
+            }
+
+            if(ndp_valid_per_pch[pch_idx]) {
+              ndp_valid_per_pch[pch_idx] =  false;
+              std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch;
+              std::cout<<"] NDP Unit Receive : "<<m_commands(ndp_cmd_per_pch[pch_idx])<<std::endl;                                                   
+              
+              if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
+                if(ndp_addr_per_pch[pch_idx][m_levels["row"]] != ndp_access_row) {
+                  throw std::runtime_error("Invalid Address to access NDP!");
+                } else {
+                  if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ctrl_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ctrl_access_bg) {
+                    // Access NDP Configuration Register 
+                    if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
+                      if(ndp_payload_valid_per_pch[pch_idx]) {
+                        if(pipe_ndp_payload_per_pch[pch_idx][0].size() != 8) {
+                          throw std::runtime_error("Invalid Payload Size!!");
+                        } else {
+                          if(pipe_ndp_payload_per_pch[pch_idx][0][0] == 1) {
+                            if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
+                              std::cout<<"NDP status["<<m_ndp_status(ndp_status_per_pch[pch_idx])<<"]"<<std::endl;
+                              throw std::runtime_error("NDP Unit start when is not idle");
+                            } else {
+                              std::cout<<"start NDP Unit"<<std::endl;
+                              ndp_status_per_pch[pch_idx] = m_ndp_status("run");
+                            }
+                          }                        
+                        }
+                      } 
+                    }
+
+                  } else if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ins_mem_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ins_mem_access_bg) {
+                    // Access NDP Instruction Memory
+                    if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
+
+                      if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
+                        throw std::runtime_error("NDP Write when NDP unit is exec!");
+                      }
+
+                      if(ndp_payload_valid_per_pch[pch_idx]) {
+                        if(pipe_ndp_payload_per_pch[pch_idx][0].size() != 8) {
+                          throw std::runtime_error("Invalid Payload Size!!");
+                        } else {
+                          for(int i=0;i<8;i++) {
+                            ins_mem_per_pch[pch_idx][8*ndp_addr_per_pch[pch_idx][m_levels["column"]] + i] = pipe_ndp_payload_per_pch[pch_idx][0][i];
+                            std::cout<<"CH["<<ch<<"] PCH["<<pch;
+                            std::cout<<"] - Insert Insruction Memory COL["<<ndp_addr_per_pch[pch_idx][m_levels["column"]]<<"]["<<i<<"]: 0x";
+                            std::cout<<std::hex<<ins_mem_per_pch[pch_idx][8*ndp_addr_per_pch[pch_idx][m_levels["column"]] + i]<<std::dec<<std::endl;
+                          }
+                        }
+                      } 
+                    }
+                  } else if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] <= ndp_dat_mem_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <= ndp_dat_mem_access_bg) {
+                    // Access NDP Data Memory
+                    // dat_mem_per_pch
+                    
+                  } else {
+                    // Access Not Mapped Address
+                    throw std::runtime_error("Invalid Not Mapped NDP Address!");
+                  }
+                }
+              } else if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RDA"]) {
+                // NDP Exeuction with RD Data   
+                if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+                  throw std::runtime_error("NDP DRAM RD when NDP is idle!!");
+                } else {
+                  if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                    throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
+                  } else {
+                    // Find Matching Inst
+                    bool is_find = false;
+                    int match_idx = -1;
+                    for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
+                      if(ndp_inst_slot_per_pch[pch_idx][i].id == ndp_id_per_pch[pch_idx] &&
+                         ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
+                         ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]) {
+                        is_find = true;
+                        match_idx = i;
+                      }
+                      if(is_find) break;
+                    }
+                    if(!is_find) {
+                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
+                    } else {
+                      // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
+                      if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
+                        ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + match_idx);
+                      } else {
+                        ndp_inst_slot_per_pch[pch_idx][match_idx].cnt++;
+                      }
+                    }
+                  }              
+                }                
+                
+              } else if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_WR"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_WRA"]) {
+                // NDP Write Back to DRAM (Data Memory)
+                if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+                  throw std::runtime_error("NDP DRAM WR when NDP is idle!!");
+                } else {
+                  if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                    throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
+                  } else {
+                    // Find Matching Inst
+                    bool is_find = false;
+                    int match_idx = -1;
+                    for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
+                      if(ndp_inst_slot_per_pch[pch_idx][i].id == ndp_id_per_pch[pch_idx] &&
+                         ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
+                         ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]) {
+                        is_find = true;
+                        match_idx = i;
+                      }
+                      if(is_find) break;
+                    }
+                    if(!is_find) {
+                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
+                    } else {
+                      // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
+                      if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
+                        ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + match_idx);
+                      } else {
+                        ndp_inst_slot_per_pch[pch_idx][match_idx].cnt++;
+                      }
+                    }
+                  }              
+                }                
+                // NDP Exeuction with RD Data
+              }
+
+              // Remove Used Data 
+              if(ndp_payload_valid_per_pch[pch_idx]) {
+                ndp_payload_valid_per_pch[pch_idx] = false;
+                // remove first vector 
+                if(pipe_ndp_payload_per_pch[pch_idx].size() == 0) {
+                  throw std::runtime_error("Remove Empty pipe_ndp_payload_per_pch");
+                } else {
+                  pipe_ndp_payload_per_pch[pch_idx].erase(pipe_ndp_payload_per_pch[pch_idx].begin());
+                }
+              }
+              
+            } 
+          } // PCH 
+        } // CH
+      } // NDP_CLK 
+
+      // DB -> NDP Unit
+      for(int pch_idx=0;pch_idx<m_num_channels*m_num_pseudochannel;pch_idx++) {
+        if(pipe_ndp_latency_per_pch[pch_idx].size() != 0) {
+          for(int i=0;i<pipe_ndp_latency_per_pch[pch_idx].size();i++) {
+            pipe_ndp_latency_per_pch[pch_idx][i]--;
+            if(pipe_ndp_latency_per_pch[pch_idx][i]<0) {
+              throw std::runtime_error("Timing Error from MC to DB!");
+            }
+          }
+          if(pipe_ndp_latency_per_pch[pch_idx][0] == 0) {
+            if(ndp_valid_per_pch[pch_idx]) {
+              throw std::runtime_error("Collision Bus DB to NDP Unit");
+            }
+            ndp_valid_per_pch[pch_idx]         = true;
+            ndp_cmd_per_pch[pch_idx]           = pipe_ndp_cmd_per_pch[pch_idx][0];
+            ndp_addr_per_pch[pch_idx]          = pipe_ndp_addr_per_pch[pch_idx][0];
+            ndp_id_per_pch[pch_idx]            = pipe_ndp_id_per_pch[pch_idx][0];
+            ndp_payload_valid_per_pch[pch_idx] = pipe_ndp_payload_valid_per_pch[pch_idx][0];
+            // Remove First Element of vector
+            pipe_ndp_latency_per_pch[pch_idx].erase(pipe_ndp_latency_per_pch[pch_idx].begin());
+            pipe_ndp_cmd_per_pch[pch_idx].erase(pipe_ndp_cmd_per_pch[pch_idx].begin());
+            pipe_ndp_addr_per_pch[pch_idx].erase(pipe_ndp_addr_per_pch[pch_idx].begin());
+            pipe_ndp_id_per_pch[pch_idx].erase(pipe_ndp_id_per_pch[pch_idx].begin());
+            pipe_ndp_payload_valid_per_pch[pch_idx].erase(pipe_ndp_payload_valid_per_pch[pch_idx].begin());
+            std::cout<<"["<<m_clk<<"] CH["<<ndp_addr_per_pch[pch_idx][m_levels["channel"]]<<"] PCH["<<ndp_addr_per_pch[pch_idx][m_levels["pseudochannel"]];
+            std::cout<<"] ISSUE COMMAND from DB to NDP : "<<m_commands(ndp_cmd_per_pch[pch_idx])<<std::endl;
+          }
+        }
+      }
     };
 
     void init() override {
@@ -339,7 +607,13 @@ class DDR5PCH : public IDRAM, public Implementation {
       Logger_t m_logger;
       m_logger = Logging::create_logger("DDR5-PCH");
       m_logger->info("DRAM init()");      
-      m_logger->info(" NDP ADDRESS SPACE ROW : {}",ndp_access_row);
+      m_logger->info(" Address Space (Row) of NDP UNit       : {}",ndp_access_row);
+      m_logger->info(" Address Space (Bank) of NDP Unit Ctrl : {}",ndp_ctrl_access_bk);
+      m_logger->info(" Address Space (BankGroup) of NDP Unit Ctrl : {}",ndp_ctrl_access_bg);
+      m_logger->info(" Address Space (Bank) of NDP Unit Instruction Memory : {}",ndp_ins_mem_access_bk);
+      m_logger->info(" Address Space (BankGroup) of NDP Unit Instruction Memory : {}",ndp_ins_mem_access_bg);     
+      m_logger->info(" Address Space (0<=Bank) of NDP Unit Instruction Memory : {}",ndp_dat_mem_access_bk);
+      m_logger->info(" Address Space (0<=BankGroup) of NDP Unit Instruction Memory : {}",ndp_dat_mem_access_bg);            
     };
 
     void issue_command(int command, const AddrVec_t& addr_vec) override {
@@ -358,6 +632,28 @@ class DDR5PCH : public IDRAM, public Implementation {
       // Check if the command requires future action
       check_future_action(command, addr_vec);
     };
+    
+    void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload) override {
+      // NDP-related Code
+      // "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA", "NDP_DB_RD",   "NDP_DB_WR",
+      std::cout<<"["<<m_clk<<"] CH["<<addr_vec[m_levels["channel"]]<<"] PCH["<<addr_vec[m_levels["pseudochannel"]]<<"] ISSUE COMMAND from MC to DB : "<<m_commands(command)<<std::endl;
+      int pch_idx = addr_vec[m_levels["channel"]]*num_pseudo_ch + addr_vec[m_levels["pseudochannel"]];
+      // Write Payload..
+      if(payload.size()!=0) {
+        if(payload.size() != 8) {
+          throw std::runtime_error("Invalid Payload Size!!");
+        } else {
+          pipe_ndp_payload_per_pch[pch_idx].push_back(payload);
+        }
+        pipe_ndp_payload_valid_per_pch[pch_idx].push_back(true);
+      } else {
+        pipe_ndp_payload_valid_per_pch[pch_idx].push_back(false);
+      }
+      pipe_ndp_latency_per_pch[pch_idx].push_back(10);
+      pipe_ndp_cmd_per_pch[pch_idx].push_back(command);
+      pipe_ndp_addr_per_pch[pch_idx].push_back(addr_vec);      
+      pipe_ndp_id_per_pch[pch_idx].push_back(thread_id);      
+    }
 
     void check_future_action(int command, const AddrVec_t& addr_vec) {
       switch (command) {
@@ -601,6 +897,16 @@ class DDR5PCH : public IDRAM, public Implementation {
       else                                            return false;
     }
 
+    Inst_Slot decoding_inst(uint64_t inst) {
+      uint64_t opcode = (inst >> 58) & 0x3f;
+      uint64_t opsize = (inst >> 51) & 0x7f;
+      uint64_t id     = (inst >> 48) & 0x7;
+      uint64_t bg     = (inst >> 45) & 0x7;
+      uint64_t bk     = (inst >> 43) & 0x3;
+      std::cout<<"decoding opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<std::endl;
+      return Inst_Slot(true,opcode,opsize,id,bg,bk);
+    };
+
   private:
     void set_organization() {
       // Channel width
@@ -654,6 +960,11 @@ class DDR5PCH : public IDRAM, public Implementation {
             m_organization.density
         );
       }
+
+      if(_density < 16384) {
+        throw ConfigurationError("DDR5-PCH with NDP Not support the DRAM density under ({}) Mb.!", _density);
+      }
+
       int num_channels = m_organization.count[m_levels["channel"]];
       int num_pseudochannel = m_organization.count[m_levels["pseudochannel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
@@ -689,6 +1000,52 @@ class DDR5PCH : public IDRAM, public Implementation {
       for (int r = 0; r < num_channels * num_ranks; r++) {
         register_stat(s_total_rfm_cycles[r]).name("total_rfm_cycles_rank{}", r);
       }
+
+      // Set NDP Unit
+      // 8KB Instruction memory per pseudo channel 
+      ins_mem_per_pch.resize(num_channels* num_pseudochannel,std::vector<u_int64_t>(128*8,0));
+      // 32KB Data memory per pseudo channel 
+      dat_mem_per_pch.resize(num_channels* num_pseudochannel,std::vector<u_int64_t>(128*4*8,0));
+
+      ndp_status_per_pch.resize(num_channels* num_pseudochannel,m_ndp_status("idle"));      
+      ndp_pc_per_pch.resize(num_channels* num_pseudochannel,0);      
+      ndp_inst_slot_per_pch.resize(num_channels* num_pseudochannel,std::vector<Inst_Slot>(0,Inst_Slot()));      
+
+      // Command from MC to DB (NDP Unit)
+      pipe_ndp_latency_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));
+      pipe_ndp_cmd_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));
+      pipe_ndp_addr_per_pch.resize(num_channels*num_pseudochannel,std::vector<AddrVec_t>(0,AddrVec_t(0)));     
+      pipe_ndp_id_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));     
+      pipe_ndp_payload_valid_per_pch.resize(num_channels*num_pseudochannel,std::vector<bool>(0,false));     
+      
+      ndp_valid_per_pch.resize(num_channels* num_pseudochannel,false);
+      ndp_cmd_per_pch.resize(num_channels* num_pseudochannel,0);
+      ndp_id_per_pch.resize(num_channels* num_pseudochannel,0);
+      ndp_addr_per_pch.resize(num_channels* num_pseudochannel,AddrVec_t(0));
+      ndp_payload_valid_per_pch.resize(num_channels* num_pseudochannel,false);
+      
+      //payload
+      pipe_ndp_payload_per_pch.resize(num_channels*num_pseudochannel,std::vector<std::vector<uint64_t>>(0,std::vector<uint64_t>(0,0)));      
+
+      ndp_access_row          = (m_organization.count[m_levels["row"]] - 1);
+      if(m_organization.dq == 16) {
+        //x16 DRAM with 4BG and 4BK per BG
+        ndp_ctrl_access_bk      = 3;
+        ndp_ctrl_access_bg      = 1;
+        ndp_ins_mem_access_bk   = 3;
+        ndp_ins_mem_access_bg   = 0;
+        ndp_dat_mem_access_bk   = 2;
+        ndp_dat_mem_access_bg   = 3; // BG0-BG3
+      } else {
+        // x4/x8 DRAM with 8BG and 4 BK per BG
+        ndp_ctrl_access_bk      = 3;
+        ndp_ctrl_access_bg      = 5;
+        ndp_ins_mem_access_bk   = 3;
+        ndp_ins_mem_access_bg   = 4;
+        ndp_dat_mem_access_bk   = 2;
+        ndp_dat_mem_access_bg   = 3; // BG0-BG3        
+      }
+
     };
 
     void set_timing_vals() {

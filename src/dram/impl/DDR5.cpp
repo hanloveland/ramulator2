@@ -400,6 +400,9 @@ class DDR5 : public IDRAM, public Implementation {
     bool is_ndp_access(const AddrVec_t& addr_vec) override {
       return false;
     }    
+
+    void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload) override {
+    }
   private:
     void set_organization() {
       // Channel width

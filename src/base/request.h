@@ -32,6 +32,7 @@ struct Request {
   bool is_db_cmd = false;       // PRE-WR or POST-RD (only DDR5-PCH)
   bool is_actived = false;
   bool is_ndp_req = false;      // NDP-related Request
+  int ndp_id = -1;              // NDP-related Request ID
 
   Clk_t arrive = -1;   // Clock cycle when the request arrive at the memory controller
   Clk_t depart = -1;   // Clock cycle when the request depart the memory controller
@@ -74,6 +75,44 @@ struct ReqBuffer {
   void remove(iterator it) {
     buffer.erase(it);
   }
+};
+
+struct Inst_Slot {
+  bool valid = false;
+  int opcode = -1;
+  int opsize = -1;
+  int id = -1;
+  int bg = -1;
+  int bk = -1;
+  int cnt = 0;
+
+  Inst_Slot() : 
+    valid(false), opcode(-1), opsize(-1), id(-1), bg(-1), bk(-1), cnt(0) {};
+
+  Inst_Slot(bool is_valid, int _opcode, int _opsize, int _id, int _bg, int _bk) : 
+    valid(is_valid), opcode(_opcode), opsize(_opsize), id(_id), bg(_bg), bk(_bk), cnt(0)  {};
+};
+
+struct AccInst_Slot {
+  bool valid = false;
+  int opcode = -1;
+  int opsize = -1;
+  int ch = -1;
+  int pch = -1;
+  int bg = -1;
+  int bk = -1;
+  int row = -1;
+  int col = -1;
+  int id = -1;
+  int cnt = 0;
+
+  AccInst_Slot() : 
+    valid(false), cnt(0) {};
+
+    AccInst_Slot(bool is_valid, int _opcode, int _opsize, int _ch, int _pch, int _bg,
+                 int _bk, int _row, int _col, int _id) : 
+    valid(is_valid), opcode(_opcode), opsize(_opsize), ch(_ch), pch(_pch), bg(_bg), 
+    bk(_bk), row(_row), col(_col), id(_id), cnt(0)  {};
 };
 
 }        // namespace Ramulator

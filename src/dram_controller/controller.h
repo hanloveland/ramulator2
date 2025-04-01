@@ -51,6 +51,7 @@ class IDRAMController : public Clocked<IDRAMController> {
     virtual void tick() = 0;
 
     virtual bool is_finished() = 0;
+    virtual bool is_empty_ndp_req() = 0;
    
 };
 

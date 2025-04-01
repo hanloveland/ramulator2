@@ -32,6 +32,9 @@ class DummyController final : public IDRAMController, public Implementation {
       return true;
     }    
 
+    bool is_empty_ndp_req() override {    
+      return false;
+     }    
 };
 
 }   // namespace Ramulator
