@@ -27,6 +27,8 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
 
     Logger_t m_logger;
 
+    size_t elapsed_tick = 0;
+
   public:
     void init() override {
       std::string trace_path_str = param<std::string>("path").desc("Path to the load store trace file.").required();
@@ -40,7 +42,11 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
 
 
     void tick() override {
-      if(!(m_trace_count >= m_trace_length)) {
+      if((m_trace_count < m_trace_length)) {
+        if(m_trace_count == elapsed_tick*(m_trace_length/50)) {
+          m_logger->info("Trace-Mode Progress [{}/{}]", m_trace_count,m_trace_length);
+          elapsed_tick++;
+        }      
         const Trace& t = m_trace[m_curr_trace_idx];
         Request req = Request(t.addr, t.is_write ? Request::Type::Write : Request::Type::Read);
         
@@ -89,7 +95,7 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
           }
         } else if (tokens[0] == "ST") {
           is_write = true;
-          if(tokens.size() != 10) {
+          if(!(tokens.size() == 2 || tokens.size() == 10)) {
             throw ConfigurationError("Trace {} format invalid!", file_path_str);
           }          
         } else {
@@ -109,9 +115,9 @@ class LoadStoreTrace : public IFrontEnd, public Implementation {
           if(tokens.size() == 10) {
             for(uint32_t i=0;i<8;i++) {
               if (tokens[i+2].compare(0, 2, "0x") == 0 | tokens[i+2].compare(0, 2, "0X") == 0) {
-                t.payload.push_back(std::stoll(tokens[i+2].substr(2), nullptr, 16));
+                t.payload.push_back(std::stoull(tokens[i+2].substr(2), nullptr, 16));
               } else {
-                t.payload.push_back(std::stoll(tokens[i+2]));
+                t.payload.push_back(std::stoull(tokens[i+2]));
               }              
             }
           } 
