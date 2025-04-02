@@ -24,6 +24,8 @@ class IScheduler {
     virtual ReqBuffer::iterator get_best_request_prefetch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array,bool is_refreshing,bool is_wr_mode) = 0;
 
     virtual ReqBuffer::iterator get_best_request_refresh_ch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) = 0;
+
+    virtual ReqBuffer::iterator get_best_pre_request(ReqBuffer& buffer) = 0;
 };
 
 }       // namespace Ramulator

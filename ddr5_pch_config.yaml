@@ -2,14 +2,19 @@ Frontend:
   impl: LoadStoreTrace
   clock_ratio: 1
   # path: ./perf_comparison/traces/random_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/random_5M_R5W5_ramulatorv2.trace
+  # path: ./perf_comparison/traces/random_5M_R2W8_ramulatorv2.trace
   path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R5W5_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R2W8_ramulatorv2.trace
+  # path: memory_trace.txt
   Translation:
     impl: NoTranslation
     max_addr: 2147483648
               
 
 MemorySystem:
-  impl: GenericDRAM
+  impl: ndpDRAM
   clock_ratio: 1
 
   DRAM:
@@ -24,17 +29,16 @@ MemorySystem:
     RFM:
       BRC: 0  
     drampower_enable: false
-    db_fetch_wr: true
-    db_fetch_rd: true
+    use_db_fetch: true
     voltage:
       preset: Default
     current:
       preset: Default
 
   Controller:
-    impl: Generic
+    impl: ndpDRAMCtrl
     Scheduler:
-      impl: FRFCFS
+      impl: NDPFRFCFS
     RefreshManager:
       impl: DR5CHAllBank
     RowPolicy:

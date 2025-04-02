@@ -27,6 +27,26 @@ int RequireRowOpen(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, C
 };
 
 template <class T>
+int PCHRequireRowOpen(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+  if(node->m_f_state == T::m_f_states["Opened"]) return T::m_commands["P_PRE"];
+  switch (node->m_state) {
+    case T::m_states["Closed"]: return T::m_commands["ACT"];
+    case T::m_states["Opened"]: {
+      if (node->m_row_state.find(addr_vec[T::m_levels["row"]]) != node->m_row_state.end()) {
+        return cmd;
+      } else {
+        return T::m_commands["PRE"];
+      }
+    }    
+    case T::m_states["Refreshing"]: return T::m_commands["ACT"];
+    default: {
+      spdlog::error("[Preq::Bank] Invalid bank state for an RD/WR command!");
+      std::exit(-1);      
+    } 
+  }
+};
+
+template <class T>
 int RequireBankClosed(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
   switch (node->m_state) {
     case T::m_states["Closed"]: return cmd;
@@ -47,6 +67,7 @@ int RequireFakeRowOpen(typename T::Node* node, int cmd, const AddrVec_t& addr_ve
     spdlog::error("[Preq::Bank] Invalid Command {} for RequireFakeRowOpen Lamdas",T::m_commands(cmd));
     std::exit(-1);          
   }
+  if(node->m_state == T::m_states["Opened"]) return T::m_commands["PRE"];
   switch (node->m_f_state) {
     case T::m_f_states["Closed"]: return T::m_commands["P_ACT"];
     case T::m_f_states["Opened"]: {

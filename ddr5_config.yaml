@@ -1,8 +1,12 @@
 Frontend:
   impl: LoadStoreTrace
   clock_ratio: 1
-  path: ./perf_comparison/traces/random_5M_R8W2_ramulatorv2.trace
-  # path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/random_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/random_5M_R5W5_ramulatorv2.trace
+  # path: ./perf_comparison/traces/random_5M_R2W8_ramulatorv2.trace
+  path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R5W5_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R2W8_ramulatorv2.trace
 
   Translation:
     impl: NoTranslation
@@ -36,10 +40,13 @@ MemorySystem:
     RefreshManager:
       impl: AllBank
     RowPolicy:
-      # impl: OpenRowPolicy
-      impl: ClosedRowPolicy
+      impl: OpenRowPolicy
+      # impl: ClosedRowPolicy
       cap: 4
     plugins:
 
   AddrMapper:
-    impl: RoBaRaCoCh
+    # impl: RoBaRaCoCh
+    impl: RoCoBaRaCh
+    # impl: RoCoRaBaCh
+    

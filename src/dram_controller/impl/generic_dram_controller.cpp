@@ -80,9 +80,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
     std::vector<bool> is_empty_priority_per_pch;
 
-    // Enable Write/Read Prefetcher from DRAM to DB
-    bool m_use_wr_prefetch;
-    bool m_use_rd_prefetch;
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -107,8 +104,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       m_priority_buffer.max_size = 512*3 + 32;
       m_active_buffer.max_size = 32*4;
       m_prefetched_buffer.max_size = 16*4;
-      m_write_buffer.max_size = 64;
-      m_read_buffer.max_size = 64;
+      m_write_buffer.max_size = 128;
+      m_read_buffer.max_size = 128;
       // std::cout<<m_active_buffer.max_size<<std::endl;
       // exit(1);
 
@@ -116,9 +113,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       else                                              use_pseudo_ch = true;
 
       if(use_pseudo_ch) psuedo_ch_idx = m_dram->m_levels("pseudochannel");
-
-      m_use_rd_prefetch = m_dram->get_use_rd_prefetch();
-      m_use_wr_prefetch = m_dram->get_use_wr_prefetch();
 
       m_num_cores = frontend->get_num_cores();
 
@@ -692,27 +686,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           req_it->command = m_dram->get_preq_command(req_it->final_command, req_it->addr_vec);
           
           request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-          if(!use_pseudo_ch) {
-            if (!request_found & m_priority_buffer.size() != 0) {
-              return false;
-            }
-          }
-        }
 
-
-        // Find request in prefetched buffer
-        if(use_pseudo_ch) {
-          // Only Called by DDR5-PCH
-          set_write_mode();
-          bool is_refreshing = m_dram->check_dram_refrsehing();
-          if(!request_found && m_prefetched_buffer.size() != 0) {
-            // std::cout<<"["<<m_clk<<"] try .. get request .. within "<<m_prefetched_buffer.size()<<std::endl;;
-            if (req_it = m_scheduler->get_best_request_prefetch_with_mask(m_prefetched_buffer,is_empty_priority_per_pch,is_refreshing,m_is_write_mode); req_it != m_prefetched_buffer.end()) {
-              request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-              req_buffer = &m_prefetched_buffer;
-            }
-            // std::cout<<" result .. "<<request_found<<std::endl;
-            // if(request_found) std::cout<<"Request from Prefteched BUF"<<std::endl;
+          if (!request_found & m_priority_buffer.size() != 0) {
+            return false;
           }
         }
 
@@ -721,30 +697,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           // Query the write policy to decide which buffer to servef
           set_write_mode();
           auto& buffer = m_is_write_mode ? m_write_buffer : m_read_buffer;
-          if(use_pseudo_ch) {
-            if (req_it = m_scheduler->get_best_request_with_mask(buffer,is_empty_priority_per_pch); req_it != buffer.end()) {
-              request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-              req_buffer = &buffer;
-            }
-          } else {
-            if (req_it = m_scheduler->get_best_request(buffer); req_it != buffer.end()) {
-              request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-              req_buffer = &buffer;
-            }
-          }
-
-          // Check WR Command to issue PRE_WR command during refreshing..
-          if(use_pseudo_ch) {
-            // Only Called by DDR5-PCH
-            bool is_refreshing = m_dram->check_dram_refrsehing();
-            if(!request_found && is_refreshing && m_use_wr_prefetch) {
-              auto& buffer = m_write_buffer;
-              if (req_it = m_scheduler->get_best_request_refresh_ch_with_mask(buffer,is_empty_priority_per_pch); req_it != buffer.end()) {
-                request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-                req_buffer = &buffer;
-                req_it->is_db_cmd = true;
-              }            
-            }
+          if (req_it = m_scheduler->get_best_request(buffer); req_it != buffer.end()) {
+            request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+            req_buffer = &buffer;
           }
         }
       }
@@ -764,9 +719,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
             }
             if (is_matching) {
               request_found = false;
-              if(use_pseudo_ch) {
-                if(req_it->command == m_dram->m_commands("P_PRE")) req_it->is_db_cmd = false;
-              }
               break;
             }
           }

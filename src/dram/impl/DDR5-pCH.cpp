@@ -312,8 +312,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     int m_num_bankgroups;        
     int m_num_banks;             
     bool m_use_pch;
-    bool m_use_wr_prefetch;
-    bool m_use_rd_prefetch;
+    bool m_use_prefetch;
+
     std::vector<bool> m_enable_rd_prefetch;
     std::vector<int>  m_db_prefetch_mode;
 
@@ -628,7 +628,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       if(command == m_commands("POST_WR")) {
         post_wr_cnt_per_ch[channel_id]++;
       }
-           
+                 
       // Check if the command requires future action
       check_future_action(command, addr_vec);
     };
@@ -746,6 +746,26 @@ class DDR5PCH : public IDRAM, public Implementation {
       return m_channels[channel_id]->get_preq_command(new_command, addr_vec, m_clk);      
     };
 
+    int get_preq_pre_command(int command, const AddrVec_t& addr_vec) override {
+      int channel_id = addr_vec[m_levels["channel"]];    
+      // get PRE-* Command 
+      // RD/RDA --> PRE_RD
+      // WR/WRA --> PRE_WR
+      // NDP_DB_WR --> NDP_DB_WR
+      // NDP_DB_RD --> NDP_DB_RD
+      // NDP_DRAM_RD --> NDP_DRAM_RD
+      // NDP_DRAM_WR --> NDP_DRAM_WR 
+      int new_command;
+      if((command == m_commands("WR")) || (command == m_commands("WRA"))) {      
+          new_command = m_commands("PRE_WR");
+      } else if((command == m_commands("RD")) || (command == m_commands("RDA"))) {
+          new_command = m_commands("PRE_RD");
+      } else {
+          new_command = command;
+      }              
+      return m_channels[channel_id]->get_preq_command(new_command, addr_vec, m_clk);      
+    };    
+
 
     bool check_ready(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
@@ -811,9 +831,21 @@ class DDR5PCH : public IDRAM, public Implementation {
       return is_refreshing;
     };
 
+    bool check_pch_refrsehing_by_idx(int ch_idx, int pch_idx) override {
+      bool is_refreshing = each_pch_refreshing[ch_idx*num_pseudo_ch+pch_idx];
+      return is_refreshing;
+    };    
+
     int get_db_fetch_per_pch(const AddrVec_t& addr_vec) override {
       return db_prefetch_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
     };
+
+    int get_db_rd_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return db_prefetch_rd_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
+    };    
+    int get_db_wr_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return db_prefetch_wr_cnt_per_pch[addr_vec[0]*num_pseudo_ch+addr_vec[1]];
+    };        
 
     void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) override {
       int pch_idx = addr_vec[0]*num_pseudo_ch+addr_vec[1];
@@ -852,12 +884,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       return m_use_pch;
     };
 
-    bool get_use_wr_prefetch() override {
-      return m_use_wr_prefetch;
-    };        
-
-    bool get_use_rd_prefetch() override {
-      return m_use_rd_prefetch;
+    bool get_use_prefetch() override {
+      return m_use_prefetch;
     };        
 
     // Print Request 
@@ -972,11 +1000,11 @@ class DDR5PCH : public IDRAM, public Implementation {
       int num_banks = m_organization.count[m_levels["bank"]];
       s_total_rfm_cycles.resize(num_channels * num_pseudochannel * num_ranks, 0);
       m_use_pch = true;
-      m_num_channels      = num_channels ;          
-      m_num_pseudochannel = num_pseudochannel ;     
-      m_num_ranks         = num_ranks ;             
-      m_num_bankgroups    = num_bankgroups ;        
-      m_num_banks         = num_banks ;       
+      m_num_channels      = num_channels;          
+      m_num_pseudochannel = num_pseudochannel;     
+      m_num_ranks         = num_ranks;             
+      m_num_bankgroups    = num_bankgroups;        
+      m_num_banks         = num_banks;       
  
       need_be_open_per_bank.resize(num_channels,std::vector<bool>(num_pseudochannel * num_bankgroups * num_banks, false));
 
@@ -984,8 +1012,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         throw ConfigurationError("The number of pseudo-channel DRAM ranks ({}) cannot be greater than “1”.!", num_ranks);
       }
       
-      m_use_wr_prefetch = param<bool>("db_fetch_wr").default_val(false);
-      m_use_rd_prefetch = param<bool>("db_fetch_rd").default_val(false);
+      m_use_prefetch = param<bool>("use_db_fetch").default_val(false);
 
       pre_wr_cnt_per_ch.resize(num_channels,0);
       post_wr_cnt_per_ch.resize(num_channels,0);
@@ -1363,15 +1390,15 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_preqs[m_levels["rank"]][m_commands["DRFMsb"]] = Lambdas::Preq::Rank::RequireSameBanksClosed<DDR5PCH>;
 
       // Bank Preqs
-      m_preqs[m_levels["bank"]][m_commands["RD"]]              = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["PRE_RD"]]          = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["WR"]]              = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["POST_WR"]]         = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]     = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]]    = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]]    = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["ACT"]]             = Lambdas::Preq::Bank::RequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["RD"]]              = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["PRE_RD"]]          = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["WR"]]              = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["POST_WR"]]         = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]     = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]     = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]]    = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]]    = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
+      m_preqs[m_levels["bank"]][m_commands["ACT"]]             = Lambdas::Preq::Bank::PCHRequireRowOpen<DDR5PCH>;
       m_preqs[m_levels["bank"]][m_commands["PRE"]]             = Lambdas::Preq::Bank::RequireBankClosed<DDR5PCH>;
 
       m_preqs[m_levels["bank"]][m_commands["PRE_WR"]]          = Lambdas::Preq::Bank::RequireFakeRowOpen<DDR5PCH>;

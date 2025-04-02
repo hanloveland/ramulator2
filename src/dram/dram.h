@@ -99,6 +99,7 @@ class IDRAM : public Clocked<IDRAM> {
      */
     virtual int get_preq_command(int command, const AddrVec_t& addr_vec) = 0;
     virtual int get_preq_command_refresh_ch(int command, const AddrVec_t& addr_vec) = 0;
+    virtual int get_preq_pre_command(int command, const AddrVec_t& addr_vec) = 0;
 
     /**
      * @brief     Checks whether the device is ready to accept the given command.
@@ -143,6 +144,7 @@ class IDRAM : public Clocked<IDRAM> {
      * @brief check one of channel is refreshing 
     */
    virtual bool check_dram_refrsehing() = 0;    
+   virtual bool check_pch_refrsehing_by_idx(int ch_idx, int pch_idx) = 0;
 
     /**
      * @brief check the special Channel (Rank?) is refreshing 
@@ -151,18 +153,20 @@ class IDRAM : public Clocked<IDRAM> {
    virtual void reset_need_be_open_per_bank(u_int32_t channel_id) = 0;
    virtual void set_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
    virtual bool get_need_be_open_per_bank(const AddrVec_t& addr_vec) = 0;
+
    virtual int get_db_fetch_per_pch(const AddrVec_t& addr_vec) = 0;
+   virtual int get_db_rd_fetch_per_pch(const AddrVec_t& addr_vec) = 0;
+   virtual int get_db_wr_fetch_per_pch(const AddrVec_t& addr_vec) = 0;
+
    virtual void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) = 0;
    virtual bool get_use_pch() = 0;
    virtual void print_req(Request& req) = 0;
    virtual void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
-   virtual int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual bool is_ndp_access(const AddrVec_t& addr_vec) = 0;
    virtual void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload = {}) = 0;
-   virtual bool get_use_wr_prefetch() = 0;
-   virtual bool get_use_rd_prefetch() = 0;
+   virtual bool get_use_prefetch() = 0;
   /************************************************
    *        Interface to Query Device Spec
    ***********************************************/   

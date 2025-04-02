@@ -19,6 +19,7 @@ target_sources(
   # impl/scheduler/bh_scheduler.cpp
   # impl/scheduler/blocking_scheduler.cpp
   impl/scheduler/generic_scheduler.cpp
+  impl/scheduler/ndp_dram_scheduler.cpp
   # impl/scheduler/bliss_scheduler.cpp
   # impl/scheduler/prac_scheduler.cpp
 

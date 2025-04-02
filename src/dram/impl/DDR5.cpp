@@ -317,6 +317,10 @@ class DDR5 : public IDRAM, public Implementation {
       return -1;
     };
 
+    int get_preq_pre_command(int command, const AddrVec_t& addr_vec) override {
+      return -1;
+    };     
+
     bool check_ready(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
       return m_channels[channel_id]->check_ready(command, addr_vec, m_clk);
@@ -340,9 +344,23 @@ class DDR5 : public IDRAM, public Implementation {
       return false;
     };    
 
+    bool check_pch_refrsehing_by_idx(int ch_idx, int pch_idx) override {    
+      return false;
+    };    
+
+
     int get_db_fetch_per_pch(const AddrVec_t& addr_vec) override {
       return 0;
     }
+
+    int get_db_rd_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return 0;
+    }
+    
+    int get_db_wr_fetch_per_pch(const AddrVec_t& addr_vec) override {
+      return 0;
+    }
+
 
     void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) override {
     };  
@@ -389,11 +407,7 @@ class DDR5 : public IDRAM, public Implementation {
       return 0;
     }
 
-    bool get_use_wr_prefetch() override {
-      return false;
-    };        
-
-    bool get_use_rd_prefetch() override {
+    bool get_use_prefetch() override {
       return false;
     };       
         
@@ -403,6 +417,7 @@ class DDR5 : public IDRAM, public Implementation {
 
     void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload) override {
     }
+
   private:
     void set_organization() {
       // Channel width
