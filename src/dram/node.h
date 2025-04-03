@@ -271,6 +271,28 @@ struct DRAMNodeBase {
       // recursively check for row hits at my child
       return m_child_nodes[child_id]->check_node_open(command, addr_vec, m_clk);
     }
+
+    void print_updated_timing() {      
+      /************************************************
+       *         Print Each Node Updated Timing
+       ***********************************************/
+      std::cout<<"====== Node Level ["<<T::m_levels(m_level)<<"] ID ["<<m_node_id<<"]======"<<std::endl;
+
+      for(int i=0;i<m_cmd_ready_clk.size();i++) {
+        std::cout<<"["<< T::m_commands(i)<<"] next issueabled cycle :"<<m_cmd_ready_clk[i]<<std::endl;
+      }
+
+
+      if (!m_child_nodes.size()) {
+        // stop recursion: updated all levels
+        return; 
+      }
+
+      // recursively print updated timing
+      for (auto child : m_child_nodes) {
+        child->print_updated_timing();
+      }
+    };    
 };
 
 template<class T>
