@@ -125,133 +125,23 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     
     // Get Best Reuqest within masked pseudo channel
     ReqBuffer::iterator get_best_request_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) override {
-      if (buffer.size() == 0) {
-        return buffer.end();
-      }
-
-      for (auto& req : buffer) {
-        // Specifies a command (preq_cmd) for all requests in the buffer to be fulfilled 
-        req.command = m_dram->get_preq_command(req.final_command, req.addr_vec);
-      }
-
-      // Pick up the oldest of commands that are ready
-      auto candidate = buffer.begin();
-      for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
-        bool req1_ready = !check_db_buf_over_th(candidate) && mask_array[candidate->addr_vec[1]]; 
-        bool req2_ready = !check_db_buf_over_th(next) && mask_array[next->addr_vec[1]];
-        candidate = compare(candidate, next, req1_ready, req2_ready);
-      }
-
-      if(!check_db_buf_over_th(candidate) && mask_array[candidate->addr_vec[1]]) return candidate;
-      else                                                                         return buffer.end();
+      return buffer.end();
     }   
 
     // Get Best Reuqest within masked pseudo channel for prefetched buffer
-    ReqBuffer::iterator get_best_request_prefetch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array,bool is_refreshing,bool is_wr_mode) override {
-      if (buffer.size() == 0) {
-        return buffer.end();
-      }
-
-      for (auto& req : buffer) {
-        // Specifies a command (preq_cmd) for all requests in the buffer to be fulfilled 
-        req.command = m_dram->get_preq_command(req.final_command, req.addr_vec);
-      }
-
-      // m_dram->get_db_fetch_mode(req1->addr_vec[0],req1->addr_vec[1]) == 1
-      // m_dram->get_db_fetch_mode(req1->addr_vec[0],req1->addr_vec[1]) == 3/*MODE_POST_WR:3*/
-      // Pick up the oldest of commands that are ready      
-      auto candidate = buffer.begin();
-      for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
-        bool req_ready1 = mask_array[candidate->addr_vec[1]] && check_post_rw(candidate,is_wr_mode);
-        bool req_ready2 = mask_array[next->addr_vec[1]] && check_post_rw(next,is_wr_mode);
-        candidate = compare(candidate, next, req_ready1, req_ready2);
-      }
-
-      if(mask_array[candidate->addr_vec[1]] && check_post_rw(candidate,is_wr_mode)) return candidate;
-      else                                                                          return buffer.end();
+    ReqBuffer::iterator get_best_request_prefetch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array,bool is_refreshing,bool is_wr_mode) override { 
+      return buffer.end();
     }   
 
     // Get Best Reuqest during Refresh to issue PRE_WR
     ReqBuffer::iterator get_best_request_refresh_ch(ReqBuffer& buffer) override {
-      if (buffer.size() == 0) {
-        return buffer.end();
-      }
-
-      for (auto& req : buffer) {
-        // Specifies a command (preq_cmd) for all requests in the buffer to be fulfilled 
-        req.command = m_dram->get_preq_command_refresh_ch(req.final_command, req.addr_vec);
-      }
-
-      // Pick up the oldest of commands that are ready
-      auto candidate = buffer.begin();
-      for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
-        bool req1_ready = !check_db_buf_over_th(candidate) && m_dram->check_ch_refrsehing(candidate->addr_vec);
-        bool req2_ready = !check_db_buf_over_th(next) && m_dram->check_ch_refrsehing(next->addr_vec);
-        candidate = compare(candidate, next, req1_ready, req2_ready);
-      }
-
-      if(!check_db_buf_over_th(candidate)) return candidate;
-      else                                   return buffer.end();
+      return buffer.end();
     }    
 
     // Get Best Reuqest during Refresh to issue PRE_WR within masked pseudo channel
     ReqBuffer::iterator get_best_request_refresh_ch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) override {
-      if (buffer.size() == 0) {
-        return buffer.end();
-      }
-
-      for (auto& req : buffer) {
-        // Specifies a command (preq_cmd) for all requests in the buffer to be fulfilled 
-        req.command = m_dram->get_preq_command_refresh_ch(req.final_command, req.addr_vec);
-      }
-
-      // Pick up the oldest of commands that are ready
-      auto candidate = buffer.begin();
-      for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
-        bool req1_ready = !check_db_buf_over_th(candidate) && m_dram->check_ch_refrsehing(candidate->addr_vec) && mask_array[candidate->addr_vec[1]];
-        bool req2_ready = !check_db_buf_over_th(next) && m_dram->check_ch_refrsehing(next->addr_vec) && mask_array[next->addr_vec[1]];
-        candidate = compare(candidate, next, req1_ready, req2_ready);
-      }
-
-      if(!check_db_buf_over_th(candidate) && mask_array[candidate->addr_vec[1]]) return candidate;
-      else                                                                         return buffer.end();
+      return buffer.end();
     }  
-
-    /*
-      if(m_dram->get_use_pch()) {
-        // try first ready1 check 
-        ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-        // try second ready check 
-        bool is_req1_enable_rd_prefetch = m_dram->get_db_fetch_mode(req1->addr_vec[0],req1->addr_vec[1]) == 0;
-        if(m_use_rd_prefetch && !ready1 && m_dram->get_enable_rd_prefetch(req1->addr_vec[0],req1->addr_vec[1]) && 
-           is_req1_enable_rd_prefetch && ((m_dram->get_db_fetch_per_pch(req1->addr_vec)) < 16) &&
-          ((req1->command == m_dram->m_commands("RD")) || (req1->command == m_dram->m_commands("RDA")))) {
-            int new_cmd = -1;
-            if(req1->command == m_dram->m_commands("RD")) new_cmd = m_dram->m_commands("PRE_RD");
-            else                                          new_cmd = m_dram->m_commands("PRE_RDA"); 
-
-            ready1 = m_dram->check_ready(new_cmd, req1->addr_vec);
-            if(ready1) req1->command = new_cmd;
-        }
-        // try first ready2 check 
-        ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
-        // try second ready check 
-        bool is_req2_enable_rd_prefetch = m_dram->get_db_fetch_mode(req2->addr_vec[0],req2->addr_vec[1]) == 0;
-        if(m_use_rd_prefetch && !ready2 && m_dram->get_enable_rd_prefetch(req2->addr_vec[0],req2->addr_vec[1]) && 
-           is_req2_enable_rd_prefetch && ((m_dram->get_db_fetch_per_pch(req2->addr_vec)) < 16) &&
-           ((req2->command == m_dram->m_commands("RD")) || (req2->command == m_dram->m_commands("RDA")))) {
-          int new_cmd = -1;
-          if(req2->command == m_dram->m_commands("RD")) new_cmd = m_dram->m_commands("PRE_RD");
-          else                                          new_cmd = m_dram->m_commands("PRE_RDA"); 
-
-          ready2 = m_dram->check_ready(new_cmd, req2->addr_vec);
-          if(ready2) req2->command = new_cmd;
-        }
-      } else {
-        ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-        ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
-      }
-      */        
 };
 
 }       // namespace Ramulator

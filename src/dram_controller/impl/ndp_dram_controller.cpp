@@ -349,8 +349,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       s_queue_len += m_priority_buffer.size() + pending.size();
       s_read_queue_len += pending.size();
       for(int i=0;i<num_pseudochannel;i++) {
-        s_read_queue_len += m_read_buffers[i].size() +  m_rd_prefetch_buffers[i].size();
-        s_write_queue_len += m_write_buffers[i].size()+ m_wr_prefetch_buffers[i].size();
+        s_read_queue_len += m_read_buffers[i].size();
+        s_write_queue_len += m_write_buffers[i].size();
         s_read_prefetch_queue_len += m_rd_prefetch_buffers[i].size();
         s_write_prefetch_queue_len += m_wr_prefetch_buffers[i].size();
         if(m_is_write_mode_per_pch[i]) s_num_write_mode_per_pch[i]++;
@@ -443,8 +443,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }
 
           // Update PRE_RD
-          if((req_it->command == m_dram->m_commands("ACT") || req_it->command == m_dram->m_commands("RD") ||
-              req_it->command  == m_dram->m_commands("RDA")) && (req_it->final_command == m_dram->m_commands("RD") || 
+          if((req_it->command == m_dram->m_commands("ACT")  || req_it->command == m_dram->m_commands("RD") ||
+              req_it->command  == m_dram->m_commands("RDA") || req_it->command  == m_dram->m_commands("PRE_RD") ||
+              req_it->command  == m_dram->m_commands("PRE_RDA")) && (req_it->final_command == m_dram->m_commands("RD") || 
               req_it->final_command == m_dram->m_commands("RDA")) && req_it->is_db_cmd) {                
             // PRE_RD from READ_BUFFER --> update PRD_RD Counter
             s_num_pre_rd++;
@@ -499,8 +500,19 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }
           // Exception 
           if(db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]] > 32 || db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]] < 0) {
-            std::cout<<"["<<m_clk<<"] CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] Over Prefetched cnt"<<std::endl;
-            std::cout<<" - "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;
+            std::string write_mode;
+            if(m_is_write_mode_per_pch[req_it->addr_vec[psuedo_ch_idx]]) write_mode = "[WRITE_MODE]";
+            else                                                         write_mode = "[READ_MODE]";
+            std::cout<<"[ndpDRAMCtrl]";
+            std::cout<<write_mode<<" - ";            
+            m_dram->print_req(*req_it);
+            std::cout<<"[ndpDRAMCtrl] - Over Prefresh Threshold!"<<std::endl;
+            for(int i=0;i<num_pseudochannel;i++) {
+              std::cout<<"["<<m_clk<<"] CH["<<m_channel_id<<"]PCH["<<i<<"] "<<std::endl;
+              std::cout<<" - Total: "<<db_prefetch_cnt_per_pch[i]<<std::endl;
+              std::cout<<" - Write: "<<db_prefetch_wr_cnt_per_pch[i]<<std::endl;
+              std::cout<<" - Read: "<<db_prefetch_rd_cnt_per_pch[i]<<std::endl;       
+            }
             exit(1);
           }
           }
@@ -602,17 +614,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
            req_it->command == m_dram->m_commands("PRE_RD") ||
            req_it->command == m_dram->m_commands("PRE_WR"))*/ 
           ) {
-          std::cout<<"["<<m_clk<<"]["<<(m_clk-pre_clk)<<"] ";
-          pre_clk = m_clk;          
-          std::cout<<"[NDP_DRAM_CTRL] Issue Request read ["<<s_num_issue_reads<<"] write ["<<s_num_issue_writes<<"] ";
-          std::cout<<" / act_buf : "<<m_active_buffer.size();
-          std::cout<<" / pri_buf : "<<m_priority_buffer.size();
-          std::cout<<" / rd_buf : "<<m_read_buffers[0].size()<<"/"<<m_read_buffers[1].size()<<"/"<<m_read_buffers[2].size()<<"/"<<m_read_buffers[3].size();
-          std::cout<<" / wr_buf : "<<m_write_buffers[0].size()<<"/"<<m_write_buffers[1].size()<<"/"<<m_write_buffers[2].size()<<"/"<<m_write_buffers[3].size();
-          std::cout<<" / rd_pre_buf : "<<m_rd_prefetch_buffers[0].size()<<"/"<<m_rd_prefetch_buffers[1].size()<<"/"<<m_rd_prefetch_buffers[2].size()<<"/"<<m_rd_prefetch_buffers[3].size();
-          std::cout<<" / wr_pre_buf : "<<m_wr_prefetch_buffers[0].size()<<"/"<<m_wr_prefetch_buffers[1].size()<<"/"<<m_wr_prefetch_buffers[2].size()<<"/"<<m_wr_prefetch_buffers[3].size()<<" - ";
-          std::cout<<std::endl;
-          // m_dram->print_req(*req_it);
+            std::cout<<"["<<m_clk<<"]["<<(m_clk-pre_clk)<<"] ";
+            pre_clk = m_clk;          
+            std::cout<<"[NDP_DRAM_CTRL] read ["<<s_num_issue_reads<<"] write ["<<s_num_issue_writes<<"] ";
+            std::cout<<" / act_buf : "<<m_active_buffer.size();
+            std::cout<<" / pri_buf : "<<m_priority_buffer.size();
+            std::cout<<" / rd_buf : "<<m_read_buffers[0].size()<<"/"<<m_read_buffers[1].size()<<"/"<<m_read_buffers[2].size()<<"/"<<m_read_buffers[3].size();
+            std::cout<<" / wr_buf : "<<m_write_buffers[0].size()<<"/"<<m_write_buffers[1].size()<<"/"<<m_write_buffers[2].size()<<"/"<<m_write_buffers[3].size();
+            std::cout<<" / rd_pre_buf : "<<m_rd_prefetch_buffers[0].size()<<"/"<<m_rd_prefetch_buffers[1].size()<<"/"<<m_rd_prefetch_buffers[2].size()<<"/"<<m_rd_prefetch_buffers[3].size();
+            std::cout<<" / wr_pre_buf : "<<m_wr_prefetch_buffers[0].size()<<"/"<<m_wr_prefetch_buffers[1].size()<<"/"<<m_wr_prefetch_buffers[2].size()<<"/"<<m_wr_prefetch_buffers[3].size()<<" - ";
+            std::cout<<" / s_num_pre_rd "<<s_num_pre_rd<<"/";
+            std::string write_mode;
+            if(m_is_write_mode_per_pch[req_it->addr_vec[psuedo_ch_idx]]) write_mode = "[WRITE_MODE]";
+            else                                                         write_mode = "[READ_MODE]";
+            std::cout<<write_mode<<" ";
+            m_dram->print_req(*req_it);
+            // std::cout<<std::endl;
         }
         // #endif
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
@@ -816,7 +833,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           s_num_rw_switch++;
         }
       } else {
-        if ((m_write_buffers[pch_idx].size() < m_wr_low_watermark * m_write_buffers[pch_idx].max_size) && (num_ndp_wr_req_per_pch[pch_idx] == 0) && 
+        if ((num_ndp_wr_req_per_pch[pch_idx] == 0) && 
+            ((m_write_buffers[pch_idx].size() < m_wr_low_watermark * m_write_buffers[pch_idx].max_size) || m_wr_prefetch_buffers[pch_idx].size() == 16) &&             
             (m_rd_prefetch_buffers[pch_idx].size() != 0 || m_wr_prefetch_buffers[pch_idx].size() != 0 || m_read_buffers[pch_idx].size() != 0)) {
           m_is_write_mode_per_pch[pch_idx] = false;
           s_num_rw_switch++;
@@ -928,8 +946,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     req_buffer = &m_read_buffers[pch_idx];   
                     if(request_found) {
                       if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-                        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") ||
-                        req_it->command == m_dram->m_commands("ACT")) {
+                        if(!(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("P_PRE"))) {
                           req_it->is_db_cmd = true;  
                         }
                       }
@@ -953,7 +970,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                 }        
                 */      
                 // NORMAL WR (WRITE_BUFFER)  
-                if(!request_found) {
+                if(!request_found && !m_use_prefetch) {
                   if (req_it = m_scheduler->get_best_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                     req_buffer = &m_write_buffers[pch_idx];                                                                   

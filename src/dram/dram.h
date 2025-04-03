@@ -161,9 +161,9 @@ class IDRAM : public Clocked<IDRAM> {
    virtual void set_db_fetch_per_pch(const AddrVec_t& addr_vec, int value, int rd_value, int wr_value) = 0;
    virtual bool get_use_pch() = 0;
    virtual void print_req(Request& req) = 0;
-   virtual void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
-   virtual void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
-   virtual bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual void set_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual void reset_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
+   virtual bool get_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual bool is_ndp_access(const AddrVec_t& addr_vec) = 0;
    virtual void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload = {}) = 0;
    virtual bool get_use_prefetch() = 0;

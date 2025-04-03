@@ -392,14 +392,14 @@ class DDR5 : public IDRAM, public Implementation {
                          <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
     };    
 
-    void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+    void set_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
       // Nothing to do
     };
-    void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+    void reset_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
       // Nothing to do
     };    
 
-    bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+    bool get_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
       return false;
     };        
 

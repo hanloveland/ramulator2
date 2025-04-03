@@ -314,7 +314,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     bool m_use_pch;
     bool m_use_prefetch;
 
-    std::vector<bool> m_enable_rd_prefetch;
+    std::vector<bool> m_high_pri_prefetch;
     std::vector<int>  m_db_prefetch_mode;
 
     const int MODE_PRE_RD  = 0;
@@ -660,7 +660,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         case m_commands("REFab"):
           // Psuedo Channel State Chagne to Refresing..
           each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=true;
-          db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
+          // db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
           // std::cout<<"["<<m_clk<<"] REFab Start CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] MODE"<<m_db_prefetch_mode[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<" | ";
           // std::cout<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]];
           // std::cout<<" / "<<db_prefetch_rd_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]];
@@ -695,7 +695,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         case m_commands("REFab"):
           // Refresh Done!
           each_pch_refreshing[num_pseudo_ch*addr_vec[0]+addr_vec[1]]=false;
-          db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
+          // db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
           // std::cout<<"["<<m_clk<<"] REFab Done CH["<<addr_vec[0]<<"]PCH["<<addr_vec[1]<<"] "<<db_prefetch_cnt_per_pch[num_pseudo_ch*addr_vec[0]+addr_vec[1]]<<std::endl;
           m_channels[channel_id]->update_powers(m_commands("REFab_end"), addr_vec, m_clk);
           m_channels[channel_id]->update_states(m_commands("REFab_end"), addr_vec, m_clk);
@@ -785,6 +785,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     void db_prefetch_change_mode(int _ch_idx, int _pch_idx) {
+      /*
       int pch_idx = _ch_idx*num_pseudo_ch+_pch_idx;
       if(m_db_prefetch_mode[pch_idx] == MODE_POST_WR) {
         if((db_prefetch_wr_cnt_per_pch[pch_idx] == 0) && m_enable_rd_prefetch[pch_idx]) {
@@ -816,6 +817,7 @@ class DDR5PCH : public IDRAM, public Implementation {
           // std::cout<<"["<<_ch_idx<<"] ["<<_pch_idx<<"] MODE Change from MODE_PRE_RD to MODE_POST_RD - "<<db_prefetch_rd_cnt_per_pch[pch_idx]<<std::endl;
         }
       }
+      */
     };
 
     bool check_dram_refrsehing() override {
@@ -852,7 +854,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       db_prefetch_cnt_per_pch[pch_idx]    = value;
       db_prefetch_rd_cnt_per_pch[pch_idx] = rd_value;
       db_prefetch_wr_cnt_per_pch[pch_idx] = wr_value;
-      db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
+      // db_prefetch_change_mode(addr_vec[0],addr_vec[1]);
     };    
 
     void reset_need_be_open_per_bank(u_int32_t channel_idx) override {
@@ -896,27 +898,28 @@ class DDR5PCH : public IDRAM, public Implementation {
                          <<"]BG["<<req.addr_vec[m_levels["bankgroup"]]
                          <<"]BK["<<req.addr_vec[m_levels["bank"]]
                          <<"]RO["<<req.addr_vec[m_levels["row"]]
-                         <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"<<std::endl;
+                         <<"]CO["<<req.addr_vec[m_levels["column"]]<<"]"
+                         <<"PF["<<req.is_db_cmd<<"]"<<std::endl;
     };
 
-    void set_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
-      m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = true;
-      db_prefetch_change_mode(channel_id,pseudo_channel_id);
+    void set_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      m_high_pri_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = true;
+      // db_prefetch_change_mode(channel_id,pseudo_channel_id);
       // std::cout<<"["<<channel_id<<"] ["<<pseudo_channel_id<<"] Enable RD Prefetch from DRAM to DB"<<std::endl;
     };
-    void reset_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
-      m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = false;
-      db_prefetch_change_mode(channel_id,pseudo_channel_id);
+    void reset_high_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      m_high_pri_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id] = false;
+      // db_prefetch_change_mode(channel_id,pseudo_channel_id);
       // std::cout<<"["<<channel_id<<"] ["<<pseudo_channel_id<<"] Disable RD Prefetch from DRAM to DB"<<std::endl;
     };        
 
-    bool get_enable_rd_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
-      return m_enable_rd_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id];
+    bool get_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
+      return m_high_pri_prefetch[channel_id*num_pseudo_ch+pseudo_channel_id];
     };    
 
     int get_db_fetch_mode(u_int32_t channel_id, u_int32_t pseudo_channel_id) {
-      int pch_idx = channel_id*num_pseudo_ch + pseudo_channel_id;
-      return m_db_prefetch_mode[pch_idx];
+      // int pch_idx = channel_id*num_pseudo_ch + pseudo_channel_id;
+      return -1;
     }    
 
     bool is_ndp_access(const AddrVec_t& addr_vec) override {
@@ -1023,7 +1026,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_db_prefetch_mode.resize(num_channels * num_pseudochannel * num_ranks,MODE_POST_WR);
       db_prefetch_rd_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks,0);
       db_prefetch_wr_cnt_per_pch.resize(num_channels * num_pseudochannel * num_ranks,0);
-      m_enable_rd_prefetch.resize(num_channels * num_pseudochannel, false);
+      m_high_pri_prefetch.resize(num_channels * num_pseudochannel, false);
       for (int r = 0; r < num_channels * num_ranks; r++) {
         register_stat(s_total_rfm_cycles[r]).name("total_rfm_cycles_rank{}", r);
       }
