@@ -85,16 +85,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<int> db_prefetch_rd_cnt_per_pch;
     std::vector<int> db_prefetch_wr_cnt_per_pch;
 
-    uint32_t s_num_pre_wr;
-    uint32_t s_num_post_wr;
-    uint32_t s_num_pre_rd;
-    uint32_t s_num_post_rd;    
-    uint32_t s_num_act;
-    uint32_t s_num_pre;
-    uint32_t s_num_p_act;
-    uint32_t s_num_p_pre;    
-    uint32_t s_num_rd;
-    uint32_t s_num_wr; 
+    uint32_t s_num_pre_wr = 0;
+    uint32_t s_num_post_wr  = 0;
+    uint32_t s_num_pre_rd = 0;
+    uint32_t s_num_post_rd  = 0;    
+    uint32_t s_num_act  = 0;
+    uint32_t s_num_pre  = 0;
+    uint32_t s_num_p_act  = 0;
+    uint32_t s_num_p_pre  = 0;    
+    uint32_t s_num_rd = 0;
+    uint32_t s_num_wr = 0; 
 
     uint32_t pre_clk = 0;
     std::vector<int> io_busy_clk_per_pch;
@@ -368,7 +368,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
 
       // Check tREF and Send REF by priority_send()
-      m_refresh->tick();
+      // m_refresh->tick();
 
       // 2. Try to find a request to serve.
       ReqBuffer::iterator req_it;
@@ -949,6 +949,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                         if(!(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("P_PRE"))) {
                           req_it->is_db_cmd = true;  
                         }
+                        // if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") ||
+                          //  req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA") ||
+                          //  req_it->command == m_dram->m_commands("ACT")) {
+                        // }
                       }
                     }                                 
                   }      
