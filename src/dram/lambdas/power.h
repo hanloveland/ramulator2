@@ -17,6 +17,20 @@ namespace Bank {
       auto channel_node = rank_node->m_parent_node;
       rank_id = rank_node->m_node_id;
       channel_id = channel_node->m_node_id;
+    } else if constexpr ((T::m_levels["rank"] - T::m_levels["channel"]) == 4) { 
+      // channel - pseudochannel - narrowio - wideio - rank - bankgroup
+      int num_pseudochannels = node->m_spec->get_level_size("pseudochannel");
+      int pseudochannel_id = -1;
+      auto bg_node = node->m_parent_node;
+      auto rank_node = bg_node->m_parent_node;
+      auto wideio_node = rank_node->m_parent_node;
+      auto narrowio_node = wideio_node->m_parent_node;
+      auto pseudochannel_node = narrowio_node->m_parent_node;
+      auto channel_node = pseudochannel_node->m_parent_node;
+      channel_id = channel_node->m_node_id;
+      pseudochannel_id = pseudochannel_node->m_node_id;
+      rank_id = rank_node->m_node_id;        
+      return channel_id * num_ranks * num_pseudochannels + pseudochannel_id * num_ranks + rank_id;
     } else if constexpr (T::m_levels["bank"] - T::m_levels["rank"] == 2) {
       auto bg_node = node->m_parent_node;
       auto rank_node = bg_node->m_parent_node;
@@ -59,6 +73,30 @@ namespace Bank {
   }
 
   template <class T>
+  void DRAM2DB_RD(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing DRAM-to-DB RD counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("DRAM2DB_RD")]++;
+  }
+
+  template <class T>
+  void DB2DRAM_WR(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing DB-to-DRAM WR counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("DB2DRAM_WR")]++;
+  }  
+
+  template <class T>
+  void DB2MC_RD(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing DB-to-MC RD counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("DB2MC_RD")]++;
+  }  
+  
+  template <class T>
+  void MC2DB_WR(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing MC-to-DB WR counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("MC2DB_WR")]++;
+  }    
+
+  template <class T>
   void VRR(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
     Bank::debug<T>(node, "Incrementing VRR counter.", clk);
     node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("VRR")]++;
@@ -80,10 +118,25 @@ namespace Rank {
   template <class T>
   int get_flat_rank_id(typename T::Node* node) {
     int num_ranks = node->m_spec->get_level_size("rank");
-    auto channel_node = node->m_parent_node;
-    int rank_id = node->m_node_id;
-    int channel_id = channel_node->m_node_id;
-    return channel_id * num_ranks + rank_id;
+    int channel_id = -1;
+    int rank_id = -1;
+    if constexpr (T::m_levels["rank"] - T::m_levels["channel"] == 1) {
+      auto channel_node = node->m_parent_node;
+      rank_id = node->m_node_id;
+      channel_id = channel_node->m_node_id;
+      return channel_id * num_ranks + rank_id;
+    } else {
+      int num_pseudochannels = node->m_spec->get_level_size("pseudochannel");
+      int pseudochannel_id = -1;
+      auto wideio_node = node->m_parent_node;
+      auto narrowio_node = wideio_node->m_parent_node;
+      auto pseudochannel_node = narrowio_node->m_parent_node;
+      auto channel_node = pseudochannel_node->m_parent_node;
+      rank_id = node->m_node_id;    
+      pseudochannel_id = pseudochannel_node->m_node_id;
+      channel_id = channel_node->m_node_id;
+      return channel_id * num_ranks * num_pseudochannels + pseudochannel_id * num_ranks + rank_id;
+    }
   }
 
   template <class T>

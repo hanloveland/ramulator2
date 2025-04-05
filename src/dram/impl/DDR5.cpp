@@ -823,8 +823,13 @@ class DDR5 : public IDRAM, public Implementation {
       register_stat(s_total_background_energy).name("total_background_energy");
       register_stat(s_total_cmd_energy).name("total_cmd_energy");
       register_stat(s_total_energy).name("total_energy");
+      register_stat(s_total_energy).name("s_total_dq_energy");
       register_stat(s_total_rfm_energy).name("total_rfm_energy");
 
+      register_stat(s_total_background_power).name("s_total_background_power");
+      register_stat(s_total_cmd_power).name("s_total_cmd_power");
+      register_stat(s_total_dq_power).name("s_total_dq_power");
+      register_stat(s_total_power).name("s_total_power");
             
       for (auto& power_stat : m_power_stats){
         register_stat(power_stat.total_background_energy).name("total_background_energy_rank{}", power_stat.rank_id);
@@ -850,13 +855,58 @@ class DDR5 : public IDRAM, public Implementation {
       if (!m_drampower_enable)
         return;
 
+      #ifdef PRINT_TEST
+        std::cout<<"Print Power Calculation Info."<<std::endl;
+        std::cout<<" Timing Information "<<std::endl;
+        for(int i=0;i<m_timings.size();i++) {
+          std::cout<<m_timings(i)<<" : "<<m_timing_vals(i)<<std::endl;
+        }
+        std::cout<<" Voltage Information "<<std::endl;
+        for(int i=0;i<m_voltages.size();i++) {
+          std::cout<<m_voltages(i)<<" : "<<m_voltage_vals(i)<<std::endl;
+        }
+        std::cout<<" Current Information "<<std::endl;
+        for(int i=0;i<m_currents.size();i++) {
+          std::cout<<m_currents(i)<<" : "<<m_current_vals(i)<<std::endl;
+        }
+      #endif 
+
       int num_channels = m_organization.count[m_levels["channel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
+
+      // pJ
+      double socket_dq_energy = 18.48;
+      double on_board_dq_energy = 10.08;
       for (int i = 0; i < num_channels; i++) {
+        int num_trans = 0;
         for (int j = 0; j < num_ranks; j++) {
           process_rank_energy(m_power_stats[i * num_ranks + j], m_channels[i]->m_child_nodes[j]);
+          num_trans += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] + 
+                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
         }
+        // DQ Power (nJ)
+        double dq_energy = num_trans * 16 * m_channel_width * (socket_dq_energy + on_board_dq_energy) / 1E3;
+        double dq_power = dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
+        std::cout<<"["<<num_channels<<"] Channel DQ Power Report"<<std::endl;
+        std::cout<<" - DQ Energy (nJ) : "<<dq_energy<<std::endl;
+        std::cout<<" - DQ Power (W)   : "<<dq_power<<std::endl;    
+        s_total_dq_energy += (dq_energy);
+        s_total_energy    += (dq_energy);
+        s_total_dq_power  += (dq_power);
+        s_total_power     += (dq_power);
       }
+
+      
+      std::cout<<" ==== Total Channel Power Report === "<<std::endl;
+      std::cout<<" - DRAM Background Energy (nJ)  : "<<s_total_background_energy<<std::endl;
+      std::cout<<" - DRAM Command Energy (nJ)     : "<<s_total_cmd_energy<<std::endl;
+      std::cout<<" - DRAM DQ Energy (nJ)          : "<<s_total_dq_energy<<std::endl;
+      std::cout<<" - Total DRAM Energy (nJ)       : "<<s_total_energy<<std::endl;
+
+      std::cout<<" - DRAM Background Power (W)    : "<<s_total_background_power<<std::endl;
+      std::cout<<" - DRAM Command Power (W)       : "<<s_total_cmd_power<<std::endl;
+      std::cout<<" - DRAM DQ Power(W)             : "<<s_total_dq_power<<std::endl;
+      std::cout<<" - Total DRAM Power (W)         : "<<s_total_power<<std::endl;
     }
 
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
@@ -871,6 +921,7 @@ class DDR5 : public IDRAM, public Implementation {
 
       double tCK_ns = (double) TS("tCK_ps") / 1000.0;
 
+      // V * mA * ns / 1E3 --> fJ
       rank_stats.act_background_energy = (VE("VDD") * CE("IDD3N") + VE("VPP") * CE("IPP3N")) 
                                             * rank_stats.active_cycles * tCK_ns / 1E3;
 
@@ -912,6 +963,21 @@ class DDR5 : public IDRAM, public Implementation {
       s_total_rfm_energy += rfm_cmd_energy;
 
       s_total_rfm_cycles[rank_stats.rank_id] = rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb");
+
+      // nJ / ns 
+      int num_dev_per_rank = m_channel_width/m_organization.dq;      
+      double background_power = rank_stats.total_background_energy / ((double)m_clk * tCK_ns);
+      double command_power = rank_stats.total_cmd_energy / ((double)m_clk * tCK_ns);
+      double total_power = (background_power + command_power) * (double) num_dev_per_rank;
+      s_total_background_power += (background_power * (double) num_dev_per_rank);
+      s_total_cmd_power        += (command_power * (double) num_dev_per_rank);
+      s_total_power            += total_power;
+      std::cout<<"["<<rank_stats.rank_id<<"] Power Report"<<std::endl;
+      std::cout<<" - Background Energy (nJ) : "<<rank_stats.total_background_energy<<std::endl;
+      std::cout<<" - Command Energy (nJ)    : "<<rank_stats.total_cmd_energy<<std::endl;
+      std::cout<<" - Background Power (W)   : "<<background_power<<std::endl;
+      std::cout<<" - Command Power (W)      : "<<command_power<<std::endl;      
+      std::cout<<" - Rank Power (W)         : "<<total_power<<std::endl;      
     }
 };
 

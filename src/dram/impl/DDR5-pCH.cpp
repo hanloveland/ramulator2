@@ -1504,12 +1504,22 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_powers[m_levels["bank"]][m_commands["ACT"]]          = Lambdas::Power::Bank::ACT<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["PRE"]]          = Lambdas::Power::Bank::PRE<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["RD"]]           = Lambdas::Power::Bank::RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["PRE_RD"]]       = Lambdas::Power::Bank::RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]  = Lambdas::Power::Bank::RD<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["WR"]]           = Lambdas::Power::Bank::WR<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["POST_WR"]]      = Lambdas::Power::Bank::WR<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["WR"]]           = Lambdas::Power::Bank::WR<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE_RD"]]       = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE_RDA"]]      = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]  = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]] = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["POST_WR"]]      = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["POST_WRA"]]     = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]] = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
+
+      m_powers[m_levels["bank"]][m_commands["POST_RD"]]      = Lambdas::Power::Bank::DB2MC_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DB_RD"]]    = Lambdas::Power::Bank::DB2MC_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["PRE_WR"]]       = Lambdas::Power::Bank::MC2DB_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DB_WR"]]    = Lambdas::Power::Bank::MC2DB_WR<DDR5PCH>;
+
       // m_powers[m_levels["rank"]][m_commands["REFsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["REFsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["RFMsb"]] = Lambdas::Power::Rank::RFMsb<DDR5PCH>;
@@ -1528,13 +1538,28 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_powers[m_levels["rank"]][m_commands["DRFMab_end"]] = Lambdas::Power::Rank::REFab_end<DDR5>;
 
       m_powers[m_levels["rank"]][m_commands["PREsb"]] = Lambdas::Power::Rank::PREsb<DDR5PCH>;
-            
+      
+      // "REF", "RFM",
+      // "ACT"
+      // "PRE"
+      // RD: "RD", 
+      // WR: "WR",
+      // DRAM2DB_RD: "PRE_RD", "PRE_RDA", "NDP_DRAM_RD", "NDP_DRAM_RDA",
+      // DB2DRAM_WR: "POST_WR", "POST_WRA", "NDP_DRAM_WR", , "NDP_DRAM_WRA"  
+      // DB2MC_RD: "POST_RD", ,"NDP_DB_RD", 
+      // MC2DB_WR: "PRE_WR", "NDP_DB_WR"
+
       // register stats
       register_stat(s_total_background_energy).name("total_background_energy");
       register_stat(s_total_cmd_energy).name("total_cmd_energy");
       register_stat(s_total_energy).name("total_energy");
+      register_stat(s_total_energy).name("s_total_dq_energy");
       register_stat(s_total_rfm_energy).name("total_rfm_energy");
 
+      register_stat(s_total_background_power).name("s_total_background_power");
+      register_stat(s_total_cmd_power).name("s_total_cmd_power");
+      register_stat(s_total_dq_power).name("s_total_dq_power");
+      register_stat(s_total_power).name("s_total_power");
             
       for (auto& power_stat : m_power_stats){
         register_stat(power_stat.total_background_energy).name("total_background_energy_rank{}", power_stat.rank_id);
@@ -1560,19 +1585,63 @@ class DDR5PCH : public IDRAM, public Implementation {
       if (!m_drampower_enable)
         return;
 
+      // pJ
+      double socket_dq_energy = 18.48;
+      double on_board_dq_energy = 10.08;
       int num_channels = m_organization.count[m_levels["channel"]];
+      int num_pseudochannels = m_organization.count[m_levels["pseudochannel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
       for (int i = 0; i < num_channels; i++) {
-        for (int j = 0; j < num_ranks; j++) {
-          process_rank_energy(m_power_stats[i * num_ranks + j], m_channels[i]->m_child_nodes[j]);
+        int num_socket_trans = 0;
+        int num_on_board_trans = 0;
+        for (int k = 0; k < num_pseudochannels; k++) {
+            for (int j = 0; j < num_ranks; j++) {
+            process_rank_energy(m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j], 
+                                // Channel->pseudochannel->narrowIO->wdeIO-rank
+                                m_channels[i]->m_child_nodes[k]->m_child_nodes[0]->m_child_nodes[0]->m_child_nodes[j]);
+            num_socket_trans+=   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("RD")] + 
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("WR")] +        
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2MC_RD")] +  
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("MC2DB_WR")];     
+            num_on_board_trans+= m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("RD")] + 
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("WR")] +        
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] +  
+                                 m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];
+          }
         }
+        // DQ Power (nJ)
+        double chanenl_socket_dq_energy = (double) num_socket_trans * (double) (16 * 4) * (double) (m_channel_width/4) * socket_dq_energy/ 1E3;
+        double chanenl_onboard_dq_energy = (double) num_on_board_trans * (double) (16) * (double) m_channel_width * on_board_dq_energy / 1E3;
+        double chanenl_socket_dq_power = chanenl_socket_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
+        double chanenl_onboard_dq_power = chanenl_onboard_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
+        s_total_dq_energy += (chanenl_socket_dq_energy + chanenl_onboard_dq_energy);
+        s_total_energy    += (chanenl_socket_dq_energy + chanenl_onboard_dq_energy);
+        s_total_dq_power  += (chanenl_socket_dq_power + chanenl_onboard_dq_power);
+        s_total_power     += (chanenl_socket_dq_power + chanenl_onboard_dq_power);
+        std::cout<<"["<<i<<"] Channel DQ Power Report"<<std::endl;
+        std::cout<<" - DQ (Socket) Energy (nJ)  : "<<chanenl_socket_dq_energy<<std::endl;
+        std::cout<<" - DQ (OnBoard) Energy (nJ) : "<<chanenl_onboard_dq_energy<<std::endl;
+        std::cout<<" - DQ (Socket) Power (W)    : "<<chanenl_socket_dq_power<<std::endl;   
+        std::cout<<" - DQ (OnBoard) Power (W)   : "<<chanenl_onboard_dq_power<<std::endl;    
       }
-    }
 
+      std::cout<<" ==== Total Channel Power Report === "<<std::endl;
+      std::cout<<" - DRAM Background Energy (nJ)  : "<<s_total_background_energy<<std::endl;
+      std::cout<<" - DRAM Command Energy (nJ)     : "<<s_total_cmd_energy<<std::endl;
+      std::cout<<" - DRAM DQ Energy (nJ)          : "<<s_total_dq_energy<<std::endl;
+      std::cout<<" - Total DRAM Energy (nJ)       : "<<s_total_energy<<std::endl;
+
+      std::cout<<" - DRAM Background Power (W)    : "<<s_total_background_power<<std::endl;
+      std::cout<<" - DRAM Command Power (W)       : "<<s_total_cmd_power<<std::endl;
+      std::cout<<" - DRAM DQ Power(W)             : "<<s_total_dq_power<<std::endl;
+      std::cout<<" - Total DRAM Power (W)         : "<<s_total_power<<std::endl;
+
+
+    }
+// DRAM2DB_RD", "DB2DRAM_WR", "DB2MC_RD", "MC2DB_WR"
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
       
       Lambdas::Power::Rank::finalize_rank<DDR5PCH>(rank_node, 0, AddrVec_t(), m_clk);
-
       size_t num_bankgroups = m_organization.count[m_levels["bankgroup"]];
 
       auto TS = [&](std::string_view timing) { return m_timing_vals(timing); };
@@ -1595,11 +1664,11 @@ class DDR5PCH : public IDRAM, public Implementation {
                                       * rank_stats.cmd_counters[m_cmds_counted("PRE")] * TS("nRP")  * tCK_ns / 1E3;
 
       double rd_cmd_energy   = (VE("VDD") * (CE("IDD4R") - CE("IDD3N")) + VE("VPP") * (CE("IPP4R") - CE("IPP3N"))) 
-                                      * rank_stats.cmd_counters[m_cmds_counted("RD")] * TS("nBL") * tCK_ns / 1E3;
-
+                                      * (rank_stats.cmd_counters[m_cmds_counted("RD")] + rank_stats.cmd_counters[m_cmds_counted("DRAM2DB_RD")]) * TS("nBL") * tCK_ns / 1E3;
+                                      
       double wr_cmd_energy   = (VE("VDD") * (CE("IDD4W") - CE("IDD3N")) + VE("VPP") * (CE("IPP4W") - CE("IPP3N"))) 
-                                      * rank_stats.cmd_counters[m_cmds_counted("WR")] * TS("nBL") * tCK_ns / 1E3;
-
+                                      * (rank_stats.cmd_counters[m_cmds_counted("WR")] + rank_stats.cmd_counters[m_cmds_counted("DB2DRAM_WR")]) * TS("nBL") * tCK_ns / 1E3;
+                                      
       double ref_cmd_energy  = (VE("VDD") * (CE("IDD5B")) + VE("VPP") * (CE("IPP5B"))) 
                                       * rank_stats.cmd_counters[m_cmds_counted("REF")] * TS("nRFC1") * tCK_ns / 1E3;
 
@@ -1622,6 +1691,22 @@ class DDR5PCH : public IDRAM, public Implementation {
       s_total_rfm_energy += rfm_cmd_energy;
 
       s_total_rfm_cycles[rank_stats.rank_id] = rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb");
+
+      // nJ / ns 
+      int num_dev_per_rank = m_channel_width/m_organization.dq;      
+      double background_power = rank_stats.total_background_energy / ((double)m_clk * tCK_ns);
+      double command_power = rank_stats.total_cmd_energy / ((double)m_clk * tCK_ns);
+      double total_power = (background_power + command_power) * (double) num_dev_per_rank;
+
+      s_total_background_power += (background_power * (double) num_dev_per_rank);
+      s_total_cmd_power        += (command_power * (double) num_dev_per_rank);
+      s_total_power            += total_power;
+      std::cout<<"["<<rank_stats.rank_id<<"] Power Report"<<std::endl;
+      std::cout<<" - Background Energy (nJ) : "<<rank_stats.total_background_energy<<std::endl;
+      std::cout<<" - Command Energy (nJ)    : "<<rank_stats.total_cmd_energy<<std::endl;
+      std::cout<<" - Background Power (W)   : "<<background_power<<std::endl;
+      std::cout<<" - Command Power (W)      : "<<command_power<<std::endl;      
+      std::cout<<" - Rank Power (W)         : "<<total_power<<std::endl;           
     }
 };
 

@@ -73,9 +73,15 @@ class IDRAM : public Clocked<IDRAM> {
 
     bool m_power_debug = false;
 
-    double s_total_background_energy = 0; // Total background energy consumed by the device
-    double s_total_cmd_energy = 0;        // Total command energy consumed by the device
-    double s_total_energy = 0;            // Total energy consumed by the device
+    double s_total_background_energy = 0; // (nJ) Total background energy consumed by the device
+    double s_total_cmd_energy = 0;        // (nJ) Total command energy consumed by the device
+    double s_total_energy = 0;            // (nJ) Total energy consumed by the device
+    double s_total_dq_energy = 0;         // (nJ) Total energy consumed by the DQ of DRFAM devce
+
+    double s_total_background_power = 0;  // (W) Total background energy consumed by the device
+    double s_total_cmd_power = 0;         // (W) Total command energy consumed by the device
+    double s_total_dq_power = 0;          // (W) Total energy consumed by the DQ of DRFAM devce
+    double s_total_power = 0;             // (W) Total energy consumed by the device
 
   /************************************************
    *          Device Behavior Interface
