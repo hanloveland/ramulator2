@@ -69,6 +69,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     float s_max_bandwidth = 0;
     size_t s_num_issue_reads = 0;
     size_t s_num_issue_writes = 0;
+    float s_effective_bandwidth = 0; 
 
     std::vector<size_t> s_num_trans_per_pch;
     std::vector<size_t> s_num_refresh_cc_per_pch;
@@ -191,6 +192,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       register_stat(s_num_issue_writes).name("num_issue_writes_{}", m_channel_id);
       register_stat(s_dq_bandwidth).name("dq_bandwidth_{}", m_channel_id);
       register_stat(s_max_bandwidth).name("max_bandwidth_{}", m_channel_id);
+      register_stat(s_effective_bandwidth).name("s_effective_bandwidth_{}", m_channel_id);
 
       num_pseudochannel = m_dram->get_level_size("pseudochannel");  
 
@@ -271,12 +273,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           // NDP Execution
           if(req.type_id == Request::Type::Read) req.final_command = m_dram->m_request_translations(m_dram->m_requests("ndp-dram-read"));
           else                                   req.final_command = m_dram->m_request_translations(m_dram->m_requests("ndp-dram-write")); 
-        }
-        if(req.type_id == Request::Type::Read) num_ndp_rd_req++;
-        else {
-          num_ndp_wr_req++;
-          num_ndp_wr_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
-        }                                  
+        }                   
       } else {
         req.final_command = m_dram->m_request_translations(req.type_id);
       }
@@ -326,6 +323,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             break;
           }
         }      
+
+        if(req.is_ndp_req) {
+          if(req.type_id == Request::Type::Read) num_ndp_rd_req++;
+          else {
+            num_ndp_wr_req++;
+            num_ndp_wr_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
+          }          
+          // std::cout<<"["<<m_clk<<"][DRAMCtrl] Get NDP Request: ";
+          // m_dram->print_req(req);     
+        }
       }
       // if(is_success) {
       //   std::cout<<"[NDP_DRAM_CTRL] Get Request ";
@@ -599,7 +606,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           pre_clk = m_clk;
         }
         
-        if(false && req_it->addr_vec[0]==0 && req_it->addr_vec[1]==0
+        if(false 
            /*
            true && req_it->addr_vec[0]==0 && req_it->addr_vec[1]==0 && (
            req_it->command == m_dram->m_commands("RD") ||
@@ -964,7 +971,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   --> 4. POST_RD (RD_PREFETCH_BUFFER)    
                   5. NORMAL WR (WRITE_BUFFER)             
                 */
-                // PRE_WR (WRITE_BUFFER)
+                // PRE_WR/NDP_DB_WRITE (WRITE_BUFFER)
                 if(!request_found && m_use_prefetch) {
                   if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
@@ -1097,6 +1104,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       // I/O Utilization (%)
       s_cmd_io_util = 100 * (float) cmd_io_cc / (float) m_clk;    
+
+      // Effective Bandwidth (DB <-> DRAMs)
+      size_t total_transfer_data = 0;
+      for(auto io_busy_clk : s_wide_io_busy_clk_per_pch) {
+        // Each Pseudo Channel has one DB --> 2 DRAMs I/O with 4 ranks
+        // Double Data Rate 
+        total_transfer_data += 2 * m_dram->m_organization.dq * 4 * io_busy_clk * 2;
+      }
+      s_effective_bandwidth = ((float)(total_transfer_data/8)/(float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024*1024*1012);
       return;
     }
 

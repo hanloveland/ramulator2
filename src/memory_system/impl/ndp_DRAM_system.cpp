@@ -226,8 +226,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             ndp_ctrl_status     = NDP_RUN;
             ndp_ctrl_pc         = 0;
             ndp_access_slot_idx = 0;
+            #ifdef NDP_DEBUG
             std::cout<<"["<<m_clk<<"]";
             std::cout<<"[HSNU] Send start request to all target pseudo-channels"<<std::endl;           
+            #endif 
           }
         } else {
           if(ndp_ctrl_status != NDP_IDLE && ndp_access_inst_slots.size() != 0) {
@@ -246,14 +248,18 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             req.is_ndp_req                                  = true;
 
             bool issue_req;
+            #ifdef NDP_DEBUG
             std::cout<<"[NDP_MEM_SYS] Send MC :";
             m_dram->print_req(req);
+            #endif 
             issue_req = m_controllers[ndp_access_inst_slots[ndp_access_slot_idx].ch]->send(req);      
             if(issue_req) {
               if(ndp_access_inst_slots[ndp_access_slot_idx].cnt == ndp_access_inst_slots[ndp_access_slot_idx].opsize) {
                 // Remove Done Request
                 ndp_access_inst_slots.erase(ndp_access_inst_slots.begin() + ndp_access_slot_idx);
+                #ifdef NDP_DEBUG
                 std::cout<<"[NDP_MEM_SYS] One Access Instruction Done! Remove from inst_slots"<<std::endl;
+                #endif
               } else {
                 ndp_access_inst_slots[ndp_access_slot_idx].cnt++;
                 ndp_access_inst_slots[ndp_access_slot_idx].col++;
@@ -265,14 +271,20 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
           if(ndp_ctrl_status == NDP_RUN) {
             if(ndp_access_inst_slots.size()<16) {
+              #ifdef NDP_DEBUG
               std::cout<<"[NDP_MEM_SYS] NDP_CTRL_PC: "<<ndp_ctrl_pc<<std::endl;
+              #endif 
               AccInst_Slot access_inst = ndp_access_infos[ndp_ctrl_pc];
               if(access_inst.opcode == 3) {
                 ndp_ctrl_status = NDP_BAR;
+                #ifdef NDP_DEBUG
                 std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_BAR"<<std::endl;
+                #endif
               } else if(access_inst.opcode == 15) {
                 ndp_ctrl_status = NDP_DONE;
+                #ifdef NDP_DEBUG
                 std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_DONE"<<std::endl;
+                #endif
               } else {
                 ndp_access_inst_slots.push_back(access_inst);
               }
@@ -285,7 +297,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             }
             if(is_empty_ndp_req && ndp_access_inst_slots.size() == 0) {
               ndp_ctrl_status = NDP_RUN;
+              #ifdef NDP_DEUBG
               std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_BAR --> NDP_RUN"<<std::endl;
+              #endif
             }
           } else if(ndp_ctrl_status == NDP_DONE) {
             bool is_empty_ndp_req = true;
@@ -295,7 +309,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             if(is_empty_ndp_req && ndp_access_inst_slots.size() == 0) {
               ndp_ctrl_status = NDP_IDLE;
               ndp_on = false;
+              #ifdef NDP_DEUBG
               std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_DONE --> NDP_IDLE"<<std::endl;
+              #endif
             }
           }
         }
@@ -310,8 +326,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         if(is_empty_ndp_req) {
           wait_ndp_on = false;
           ndp_on      = true;          
+          #ifdef NDP_DEBUG
           std::cout<<"["<<m_clk<<"]";
           std::cout<<"[HSNU] Start NDP_ON ["<<ndp_on<<"] WAIT_NDP_ON ["<<wait_ndp_on<<"]"<<std::endl;          
+          #endif 
         }
       }
     };
@@ -324,13 +342,17 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     //   return m_dram->m_requests;
     // };
     bool send_ndp_ctrl(Request req) {
-      // 
+      
+      #ifdef NDP_DEBUG
       std::cout<<"NDP Ctrl Get .. NDP Control Request"<<std::endl;
+      #endif
       if(req.addr_vec[bk_addr_idx] == ndp_ctrl_bk && req.addr_vec[bg_addr_idx] == ndp_ctrl_bg) {
         // NDP Control 
         if(req.type_id == Request::Type::Write) {
+          #ifdef NDP_DEBUG
           std::cout<<"[HSNU] payload [0]:"<<req.m_payload[0]<<std::endl;
           std::cout<<"[HSNU] payload [1]:"<<req.m_payload[1]<<std::endl;
+          #endif 
 
           if(req.m_payload[0] == 1) {
             bool is_empty_ndp_req = true;
@@ -347,18 +369,22 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 ndp_on           = false;
                 ndp_issued_start = false;
               }
+              #ifdef NDP_DEBUG
               std::cout<<"["<<m_clk<<"]";
               std::cout<<"[HSNU] Get NDP Start Request - NDP_ON ["<<ndp_on<<"] WAIT_NDP_ON ["<<wait_ndp_on<<"]"<<std::endl;
+              #endif
 
               for(int i=0;i<issue_ndp_start.size();i++) {
                 if(((req.m_payload[1]>>i) & 0x1) == 0x1) issue_ndp_start[i] = false;
               }              
-
+              
+              #ifdef NDP_DEBUG
               std::cout<<"[HSNU] Print Acc Inst. "<<std::endl;
               for(int i=0;i<18;i++) {
                 std::cout<<"["<<i<<"]";
                 print_acc_inst(ndp_access_infos[i]);
               }
+              #endif 
             }
           }
         }

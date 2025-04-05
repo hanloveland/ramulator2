@@ -64,7 +64,8 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       if(req->type_id == Request::Type::Read) {
         if(req->final_command == m_dram->m_commands("RD") || req->final_command == m_dram->m_commands("RDA")) is_pre_enabled_req = true;
       } else {
-        if(req->final_command == m_dram->m_commands("WR") || req->final_command == m_dram->m_commands("WRA")) is_pre_enabled_req = true;
+        if(req->final_command == m_dram->m_commands("WR") || req->final_command == m_dram->m_commands("WRA") ||
+           req->final_command == m_dram->m_commands("NDP_DB_WR")) is_pre_enabled_req = true;
       }
       return is_pre_enabled_req;
     }

@@ -1,6 +1,14 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
 
+// #define PRINT_DEBUG
+
+#ifdef PRINT_DEBUG
+#define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)
+#else
+#define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do {} while(0)
+#endif
+
 namespace Ramulator {
 
 class DDR5PCH : public IDRAM, public Implementation {
@@ -235,9 +243,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     inline static constexpr ImplDef m_cmds_counted = {
-      "ACT", "P_ACT", "PRE", "RD", "WR", "REF", "RFM", "PRE_RD", "PRE_WR", "POST_RD","POST_WR","PRE_RDA", "POST_WRA", "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA","NDP_DB_RD",   "NDP_DB_WR"
+      "ACT", "PRE", "RD", "WR", "REF", "RFM", "DRAM2DB_RD", "DB2DRAM_WR", "DB2MC_RD", "MC2DB_WR"
     };
-
 
   /************************************************
    *                 Node States
@@ -409,6 +416,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                 Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
                 if(inst.opcode == 48) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("barrier");
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> barrier"); 
                 } else if(inst.opcode == 49) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("wait_done");
                 } else {
@@ -416,12 +424,25 @@ class DDR5PCH : public IDRAM, public Implementation {
                 }
                 ndp_pc_per_pch[pch_idx]++;
               }                            
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("barrier")) {
+              if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                ndp_status_per_pch[pch_idx] = m_ndp_status("run");
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status barrier -> run"); 
+              }
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("wait_done")) {
+              if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                ndp_status_per_pch[pch_idx] = m_ndp_status("done");
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status wait_done -> done"); 
+              }
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {
+              
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+
             }
 
             if(ndp_valid_per_pch[pch_idx]) {
               ndp_valid_per_pch[pch_idx] =  false;
-              std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch;
-              std::cout<<"] NDP Unit Receive : "<<m_commands(ndp_cmd_per_pch[pch_idx])<<std::endl;                                                   
+              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string(" Receive : ") + std::string(m_commands(ndp_cmd_per_pch[pch_idx]))));                                              
               
               if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
                 if(ndp_addr_per_pch[pch_idx][m_levels["row"]] != ndp_access_row) {
@@ -436,10 +457,10 @@ class DDR5PCH : public IDRAM, public Implementation {
                         } else {
                           if(pipe_ndp_payload_per_pch[pch_idx][0][0] == 1) {
                             if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
-                              std::cout<<"NDP status["<<m_ndp_status(ndp_status_per_pch[pch_idx])<<"]"<<std::endl;
+                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string("NDP status : ") + std::string(m_ndp_status(ndp_status_per_pch[pch_idx]))));                                              
                               throw std::runtime_error("NDP Unit start when is not idle");
                             } else {
-                              std::cout<<"start NDP Unit"<<std::endl;
+                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch,"Start NDP Operation");                                              
                               ndp_status_per_pch[pch_idx] = m_ndp_status("run");
                             }
                           }                        
@@ -503,6 +524,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
                         ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + match_idx);
+                        DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, " Remove Done Request!!");                         
                       } else {
                         ndp_inst_slot_per_pch[pch_idx][match_idx].cnt++;
                       }
@@ -618,9 +640,11 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     void issue_command(int command, const AddrVec_t& addr_vec) override {
       int channel_id = addr_vec[m_levels["channel"]];
+
       m_channels[channel_id]->update_timing(command, addr_vec, m_clk);
       m_channels[channel_id]->update_powers(command, addr_vec, m_clk);
       m_channels[channel_id]->update_states(command, addr_vec, m_clk);  
+
       
       if(command == m_commands("PRE_WR")){
         pre_wr_cnt_per_ch[channel_id]++;
@@ -628,7 +652,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       if(command == m_commands("POST_WR")) {
         post_wr_cnt_per_ch[channel_id]++;
       }
-                 
+                       
       // Check if the command requires future action
       check_future_action(command, addr_vec);
     };
@@ -636,7 +660,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload) override {
       // NDP-related Code
       // "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA", "NDP_DB_RD",   "NDP_DB_WR",
-      std::cout<<"["<<m_clk<<"] CH["<<addr_vec[m_levels["channel"]]<<"] PCH["<<addr_vec[m_levels["pseudochannel"]]<<"] ISSUE COMMAND from MC to DB : "<<m_commands(command)<<std::endl;
+      // std::cout<<"["<<m_clk<<"] CH["<<addr_vec[m_levels["channel"]]<<"] PCH["<<addr_vec[m_levels["pseudochannel"]]<<"] ISSUE COMMAND from MC to DB : "<<m_commands(command)<<std::endl;
       int pch_idx = addr_vec[m_levels["channel"]]*num_pseudo_ch + addr_vec[m_levels["pseudochannel"]];
       // Write Payload..
       if(payload.size()!=0) {
