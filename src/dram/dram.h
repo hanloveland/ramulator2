@@ -23,6 +23,7 @@ class IDRAM : public Clocked<IDRAM> {
     SpecDef m_levels;                   // Definition (i.e., names and ids) of the levels in the hierarchy
     Organization m_organization;        // The organization of the device (density, dq, levels)
     int m_channel_width = -1;           // Channel width (should be set by the implementation's config)
+    int m_parity_width = -1;
 
 
   /************************************************
