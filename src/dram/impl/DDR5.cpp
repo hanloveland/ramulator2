@@ -430,6 +430,8 @@ class DDR5 : public IDRAM, public Implementation {
       // Channel width
       m_channel_width = param_group("org").param<int>("channel_width").default_val(32);
 
+      m_parity_width = param_group("org").param<int>("parity_width").default_val(8);
+
       // Organization
       m_organization.count.resize(m_levels.size(), -1);
 
@@ -897,7 +899,7 @@ class DDR5 : public IDRAM, public Implementation {
                        m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
         }
         // DQ Power (nJ)
-        double dq_energy = num_trans * 16 * m_channel_width * (socket_dq_energy + on_board_dq_energy) / 1E3;
+        double dq_energy = num_trans * 16 * (m_channel_width+m_parity_width) * (socket_dq_energy + on_board_dq_energy) / 1E3;
         double dq_power = dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         std::cout<<"["<<num_channels<<"] Channel DQ Power Report"<<std::endl;
         std::cout<<" - DQ Energy (nJ) : "<<dq_energy<<std::endl;
@@ -977,7 +979,7 @@ class DDR5 : public IDRAM, public Implementation {
       s_total_rfm_cycles[rank_stats.rank_id] = rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb");
 
       // nJ / ns 
-      int num_dev_per_rank = m_channel_width/m_organization.dq;      
+      int num_dev_per_rank = (m_channel_width+m_parity_width)/m_organization.dq;         
       double background_power = rank_stats.total_background_energy / ((double)m_clk * tCK_ns);
       double command_power = rank_stats.total_cmd_energy / ((double)m_clk * tCK_ns);
       double total_power = (background_power + command_power) * (double) num_dev_per_rank;
