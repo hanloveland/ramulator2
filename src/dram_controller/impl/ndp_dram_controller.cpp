@@ -29,6 +29,18 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<bool> m_is_write_mode_per_pch;
     std::vector<bool> prefetch_mode_before_ref_per_ch;
 
+    // Estimation .. Each Status: 0: Read, 1: Write, 2: Prefetch, 3: Refresh
+    std::vector<int>   current_sch_mode_per_pch;
+    std::vector<int>   sch_mode_per_pch;
+    std::vector<int>   read_mode_cycle_per_pch;
+    std::vector<int>   write_mode_cycle_per_pch;
+    std::vector<int>   prefetch_mode_cycle_per_pch;
+    std::vector<int>   refresh_mode_cycle_per_pch;
+    std::vector<int>   busy_read_mode_cycle_per_pch;
+    std::vector<int>   busy_write_mode_cycle_per_pch;
+    std::vector<int>   busy_prefetch_mode_cycle_per_pch;
+    std::vector<int>   busy_refresh_mode_cycle_per_pch;
+
     size_t s_row_hits = 0;
     size_t s_row_misses = 0;
     size_t s_row_conflicts = 0;
@@ -259,6 +271,20 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       // Inintialization NDP-related variables
       num_ndp_rd_req = 0;
       num_ndp_wr_req = 0;      
+
+      // Test
+
+      current_sch_mode_per_pch.resize(num_pseudochannel,0);
+      sch_mode_per_pch.resize(num_pseudochannel,0);
+      read_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      write_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      prefetch_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      refresh_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      busy_read_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      busy_write_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      busy_prefetch_mode_cycle_per_pch.resize(num_pseudochannel,0);
+      busy_refresh_mode_cycle_per_pch.resize(num_pseudochannel,0);
+
     };
 
     bool send(Request& req) override {
@@ -372,6 +398,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         prefetch_mode_before_ref_per_ch[pch_idx] = prefetch_mode_before_ref;
       }
 
+      for(int pch_idx=0;pch_idx<num_pseudochannel;pch_idx++) {
+        if(current_sch_mode_per_pch[pch_idx] == 0)        read_mode_cycle_per_pch[pch_idx]++;
+        else if(current_sch_mode_per_pch[pch_idx] == 1)   write_mode_cycle_per_pch[pch_idx]++;
+        else if(current_sch_mode_per_pch[pch_idx] == 2)   prefetch_mode_cycle_per_pch[pch_idx]++;
+        else if(current_sch_mode_per_pch[pch_idx] == 3)   refresh_mode_cycle_per_pch[pch_idx]++;
+      }
+              
       // 1. Serve completed reads
       serve_completed_reads();
 
@@ -533,14 +566,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
 
         if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || 
-           req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) {
+        req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) {
           s_narrow_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(32);
           s_wide_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(8);
+          if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 0)      busy_read_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 1) busy_write_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 2) busy_prefetch_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 3) busy_refresh_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;                              
         }
 
         if(req_it->command == m_dram->m_commands("POST_RD") || req_it->command == m_dram->m_commands("PRE_WR") || 
            req_it->command == m_dram->m_commands("NDP_DB_RD") || req_it->command == m_dram->m_commands("NDP_DB_WR")) {
           s_narrow_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(32);
+          if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 0)      busy_read_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 1) busy_write_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 2) busy_prefetch_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;
+          else if(current_sch_mode_per_pch[req_it->addr_vec[1]] == 3) busy_refresh_mode_cycle_per_pch[req_it->addr_vec[1]]+=32;                    
         }
 
         if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")          || 
@@ -919,6 +960,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
                 */            
                 // PRE_RD (READ_BUFFER)
+                current_sch_mode_per_pch[pch_idx] = 2;
                 if(!request_found && m_use_prefetch) { 
                   if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
@@ -932,6 +974,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     }                                 
                   }      
                 }
+                // PRE_WR
+                if(!request_found) {
+                  if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
+                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                    req_buffer = &m_write_buffers[pch_idx];     
+                  }                              
+                } 
+                /*
+                // POST_WR (WR_PREFETCH_BUFFER)
+                if(!request_found) {
+                  if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
+                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                    req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                               
+                  }      
+                } 
+                */                            
                 // Search POST_RD
                 if(!request_found && m_use_prefetch) {
                   if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
@@ -939,15 +997,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                       
                   }      
                 }                     
-                // POST_WR (WR_PREFETCH_BUFFER)
-                if(!request_found) {
-                  if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
-                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-                    req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                               
-                  }      
-                }                             
               } else if(!request_found && m_dram->check_pch_refrsehing_by_idx(m_channel_id,pch_idx) && m_use_prefetch) {
                 /*=============== Scheduling during Refresh =================*/
+                current_sch_mode_per_pch[pch_idx] = 3;
                 // Fist Check POST_RD
                 if(!request_found) {
                   if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
@@ -965,20 +1017,25 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
               } else if(m_is_write_mode_per_pch[pch_idx]) { // Write Mode 
                 /*=============== WRITE MODE  =================*/
                 /*
-                  1. PRE_WR (WRITE_BUFFER)
-                  2. PRE_RD (READ_BUFFER)
-                  --> 3. POST_WR (WR_PREFETCH_BUFFER)
-                  --> 4. POST_RD (RD_PREFETCH_BUFFER)    
+                  Simplify Write Mode 
+                  X 1. PRE_WR (WRITE_BUFFER)
+                  X 2. PRE_RD (READ_BUFFER)
+                  X 3. POST_WR (WR_PREFETCH_BUFFER)
+                  X 4. POST_RD (RD_PREFETCH_BUFFER)    
                   5. NORMAL WR (WRITE_BUFFER)             
                 */
                 // PRE_WR/NDP_DB_WRITE (WRITE_BUFFER)
+                current_sch_mode_per_pch[pch_idx] = 1;
+                /*
                 if(!request_found && m_use_prefetch) {
                   if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                     req_buffer = &m_write_buffers[pch_idx];     
                   }                              
                 } 
+                  */
                 // PRE_RD (READ_BUFFER)
+                /*
                 if(!request_found && m_use_prefetch) { 
                   if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
@@ -992,6 +1049,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     }                                 
                   }      
                 }
+                */
                 /*
                 // POST_WR (WR_PREFETCH_BUFFER)
                 if(!request_found) {
@@ -1009,7 +1067,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                 }        
                 */      
                 // NORMAL WR (WRITE_BUFFER)  
-                if(!request_found && !m_use_prefetch) {
+                if(!request_found/*&& !m_use_prefetch*/) {
                   if (req_it = m_scheduler->get_best_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                     req_buffer = &m_write_buffers[pch_idx];                                                                   
@@ -1024,14 +1082,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   2. NORMAL RD (READ_BUFFER)             
                   3. POST_WR (WR_PREFETCH_BUFFER)
                 */                
-
-                // Search POST_RD
-                if(!request_found && m_use_prefetch) {
-                  if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
-                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-                    req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                       
-                  }      
-                }
+               current_sch_mode_per_pch[pch_idx] = 0;
                 // Search POST_WR
                 if(!request_found && m_use_prefetch) {
                   if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
@@ -1039,6 +1090,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                                
                   }      
                 }
+                // Search POST_RD
+                if(!request_found && m_use_prefetch) {
+                  if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
+                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                    req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                       
+                  }      
+                }               
                 // Search Normal RD
                 if(!request_found) { 
                   if (req_it = m_scheduler->get_best_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
@@ -1113,6 +1171,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         total_transfer_data += 2 * m_dram->m_organization.dq * 4 * io_busy_clk * 2;
       }
       s_effective_bandwidth = ((float)(total_transfer_data/8)/(float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024*1024*1012);
+
+      /*
+      for(int pch_idx=0;pch_idx<num_pseudochannel;pch_idx++) {
+        std::cout<<"Read Mode :"<<read_mode_cycle_per_pch[pch_idx]<<" ("<<(100*read_mode_cycle_per_pch[pch_idx]/m_clk)<<" %)"<<std::endl;
+        std::cout<<"Write Mode :"<<write_mode_cycle_per_pch[pch_idx]<<" ("<<(100*write_mode_cycle_per_pch[pch_idx]/m_clk)<<" %)"<<std::endl;
+        std::cout<<"Prefetch Mode :"<<prefetch_mode_cycle_per_pch[pch_idx]<<" ("<<(100*prefetch_mode_cycle_per_pch[pch_idx]/m_clk)<<" %)"<<std::endl;
+        std::cout<<"Refresh Mode :"<<refresh_mode_cycle_per_pch[pch_idx]<<" ("<<(100*refresh_mode_cycle_per_pch[pch_idx]/m_clk)<<" %)"<<std::endl;
+
+        if(read_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Read Mode Util     :"<<busy_read_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_read_mode_cycle_per_pch[pch_idx]/read_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
+        if(write_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Write Mode Util    :"<<busy_write_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_write_mode_cycle_per_pch[pch_idx]/write_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
+        if(prefetch_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Prefetch Mode Util :"<<busy_prefetch_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_prefetch_mode_cycle_per_pch[pch_idx]/prefetch_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
+        if(refresh_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Refresh Mode Util  :"<<busy_refresh_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_refresh_mode_cycle_per_pch[pch_idx]/refresh_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
+      }
+      */
+
+      
       return;
     }
 
