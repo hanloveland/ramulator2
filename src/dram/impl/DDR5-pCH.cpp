@@ -1,7 +1,7 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
 
-// #define PRINT_DEBUG
+#define PRINT_DEBUG
 
 #ifdef PRINT_DEBUG
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)
@@ -294,8 +294,57 @@ class DDR5PCH : public IDRAM, public Implementation {
     );
 
     inline static constexpr ImplDef m_ndp_status = {
-      "idle", "run", "barrier", "wait_done", "done"
-   };
+      "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"
+    };
+
+    // inline static constexpr ImplDef m_ndp_inst_op = {
+    //   "LOAD", "LOAD_ADD", "LOAD_MUL", "ADD", "MUL", "V_RED",  "S_RED", "MAC",
+    //   "T_ADD", "T_MUL", "T_V_RED", "T_S_RED", "T_MAC", 
+    //   "WBD", "BARRIER", "EXIT"
+    // };
+
+  //  inline static const ImplLUT m_ndp_inst_op_translate = LUT (
+  //   m_ndp_inst_op, int, {
+  //     {"LOAD"     ,0 }, 
+  //     {"LOAD_ADD" ,1 }, 
+  //     {"LOAD_MUL" ,2 }, 
+  //     {"ADD"      ,3 }, 
+  //     {"MUL"      ,4 }, 
+  //     {"V_RED"    ,5 },  
+  //     {"S_RED"    ,6 }, 
+  //     {"MAC"      ,7},
+  //     {"T_ADD"    ,16 }, 
+  //     {"T_MUL"    ,17 }, 
+  //     {"T_V_RED"  ,18 }, 
+  //     {"T_S_RED"  ,19 }, 
+  //     {"T_MAC"    ,20 }, 
+  //     {"WBD"      ,32 }, 
+  //     {"BARRIER"  ,33 }, 
+  //     {"EXIT"     ,34 }
+  //   }
+  // );
+  inline static const std::map<std::string, int> m_ndp_inst_op = {
+    {"LOAD"           ,0 }, 
+    {"LOAD_ADD"       ,1 }, 
+    {"LOAD_MUL"       ,2 }, 
+    {"ADD"            ,3 }, 
+    {"MUL"            ,4 }, 
+    {"V_RED"          ,5 },  
+    {"S_RED"          ,6 }, 
+    {"MAC"            ,7 },
+    {"SCALE_ADD"      ,8 },
+    {"T_ADD"          ,16 }, 
+    {"T_MUL"          ,17 }, 
+    {"T_V_RED"        ,18 }, 
+    {"T_S_RED"        ,19 }, 
+    {"T_MAC"          ,20 }, 
+    {"WBD"            ,32 }, 
+    {"BARRIER"        ,48 }, 
+    {"EXIT"           ,49 },    
+    {"SELF_EXEC_ON"   ,50 },    
+    {"SELF_EXEC_OFF"  ,51 }    
+  };  
+   
 
   public:
     struct Node : public DRAMNodeBase<DDR5PCH> {
@@ -351,6 +400,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     std::vector<int>                    ndp_pc_per_pch;
     std::vector<std::vector<Inst_Slot>> ndp_inst_slot_per_pch; 
 
+    int m_num_ndp_inst_slot;
     // MC -> RCD -> BD Clock
     std::vector<std::vector<int>>                   pipe_ndp_latency_per_pch;
     std::vector<std::vector<int>>                   pipe_ndp_cmd_per_pch;
@@ -416,42 +466,123 @@ class DDR5PCH : public IDRAM, public Implementation {
         for(int ch=0;ch<m_num_channels;ch++) {
           for(int pch=0;pch<m_num_pseudochannel;pch++) {
             int pch_idx = ch*m_num_pseudochannel + pch;
+            
+            // self Execution Mode
+            if((ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec") || 
+                ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_done") || 
+                ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_barrier")) && 
+                ndp_inst_slot_per_pch[pch_idx].size() != 0) {                  
+                // Check whether the opcode is T_*
+                if(ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_ADD") || 
+                   ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_MUL") ||
+                   ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_V_RED") ||
+                   ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_S_RED") ||
+                   ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_MAC")) {
+                  if(ndp_inst_slot_per_pch[pch_idx][0].opsize == ndp_inst_slot_per_pch[pch_idx][0].cnt) {
+                    ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + 0);
+                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, " Remove Done Request (self_exec)!!");   
+                  } else {
+                    ndp_inst_slot_per_pch[pch_idx][0].cnt++;
+                  }
+                } else {
+                  throw std::runtime_error("Invalid NDP Command during self exec mode!");
+                }
+                
+            }                               
 
             // Fetch Instruction from instruction memory
-            if(ndp_status_per_pch[pch_idx] == m_ndp_status("run")) {              
-              if(ndp_inst_slot_per_pch[pch_idx].size() < 16) {
+            if(ndp_status_per_pch[pch_idx] == m_ndp_status("run")) {     
+              // NDP Status: RUN         
+              if(ndp_inst_slot_per_pch[pch_idx].size() < m_num_ndp_inst_slot) {
+
                 std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
                 Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
-                if(inst.opcode == 48) {
+
+                if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("barrier");
                   DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> barrier"); 
-                } else if(inst.opcode == 49) {
+                } 
+                else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("wait_done");
-                } else {
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> wait_done"); 
+                } 
+                else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_ON")) {
+                  ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_wait");
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_wait"); 
+                } 
+                else {                  
                   ndp_inst_slot_per_pch[pch_idx].push_back(inst);
-                }
+                }  
                 ndp_pc_per_pch[pch_idx]++;
               }                            
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("barrier")) {
+              // NDP Status: Barrier
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("run");
                 DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status barrier -> run"); 
               }
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("wait_done")) {
+              // NDP Status: Wait DONE
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("done");
                 DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status wait_done -> done"); 
               }
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {
-              
-            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+              // NDP Status: Wait DONE
 
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+              // NDP Status: idle
+
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_wait")) {
+              // NDP Status: Self NDP Execution Wait Until Previous Request all done 
+              if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec");
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_wait -> self_exec"); 
+              }
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec")) {
+              // NDP Status: Self Exeuction Mode until SELF_EXEC_OFF
+
+              if(ndp_inst_slot_per_pch[pch_idx].size() < m_num_ndp_inst_slot) {
+
+                std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
+                Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
+
+                if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
+                  ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_barrier");
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec -> self_exec_barrier"); 
+                } 
+                else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
+                  throw std::runtime_error("Not Allowed during self_exec");
+                } 
+                else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_OFF")) {
+                  ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_done");
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_done"); 
+                } 
+                else {                  
+                  ndp_inst_slot_per_pch[pch_idx].push_back(inst);
+                }  
+                ndp_pc_per_pch[pch_idx]++;
+              }   
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_done")) {
+              // NDP Status: Self Exeuction Done Mode until Previous Request are all completed
+              if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                ndp_status_per_pch[pch_idx] = m_ndp_status("run");
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_done -> run"); 
+              }
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_barrier")) {
+              // NDP Status: Self Exeuction Barrier until Previous Request are all completed and transit to self_exec mode
+              if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec");
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_barrier -> self_exec"); 
+              }
             }
 
+            
+            
             if(ndp_valid_per_pch[pch_idx]) {
               ndp_valid_per_pch[pch_idx] =  false;
-              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string(" Receive : ") + std::string(m_commands(ndp_cmd_per_pch[pch_idx]))));                                              
-              
+              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string(" Receive : ") + std::string(m_commands(ndp_cmd_per_pch[pch_idx]))));                                                 
+              // NDP DB Access
               if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
                 if(ndp_addr_per_pch[pch_idx][m_levels["row"]] != ndp_access_row) {
                   throw std::runtime_error("Invalid Address to access NDP!");
@@ -966,6 +1097,15 @@ class DDR5PCH : public IDRAM, public Implementation {
       uint64_t id     = (inst >> 48) & 0x7;
       uint64_t bg     = (inst >> 45) & 0x7;
       uint64_t bk     = (inst >> 43) & 0x3;
+      if (opcode == m_ndp_inst_op.at("T_ADD") ||
+          opcode == m_ndp_inst_op.at("T_MUL") ||
+          opcode == m_ndp_inst_op.at("T_V_RED") ||
+          opcode == m_ndp_inst_op.at("T_S_RED") ||
+          opcode == m_ndp_inst_op.at("T_MAC")) {
+        // NDP Self Execution Mode Increase Opsize x 2 (Each Instruction take two cycle)
+        opsize = (opsize+1)*2 - 1;
+      }
+      
       std::cout<<"decoding opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<std::endl;
       return Inst_Slot(true,opcode,opsize,id,bg,bk);
     };
@@ -1050,7 +1190,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
       
       m_use_prefetch = param<bool>("use_db_fetch").default_val(false);
-
+      m_num_ndp_inst_slot = param<int>("ndp_inst_slot").default_val(4);
       pre_wr_cnt_per_ch.resize(num_channels,0);
       post_wr_cnt_per_ch.resize(num_channels,0);
             
@@ -1636,7 +1776,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         double channel_socket_dq_energy = (double) num_socket_trans * (double) (16 * 4) * (double) ((m_channel_width+m_parity_width)/4) * socket_dq_energy/ 1E3;
         double channel_onboard_dq_energy = (double) num_on_board_trans * (double) (16) * (double) (m_channel_width+m_parity_width) * on_board_dq_energy / 1E3;
         // access 64 bit for on buffer
-        double channel_access_buf_energy = (double) num_access_buf_trans * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_board_dq_energy / 1E3;
+        double channel_access_buf_energy = (double) num_access_buf_trans * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_buffer_energy / 1E3;
         double chanenl_socket_dq_power = channel_socket_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double chanenl_onboard_dq_power = channel_onboard_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double channel_access_buf_power = channel_access_buf_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);

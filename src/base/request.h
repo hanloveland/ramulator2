@@ -104,15 +104,16 @@ struct AccInst_Slot {
   int row = -1;
   int col = -1;
   int id = -1;
+  int etc = -1;
   int cnt = 0;
 
   AccInst_Slot() : 
     valid(false), cnt(0) {};
 
     AccInst_Slot(bool is_valid, int _opcode, int _opsize, int _ch, int _pch, int _bg,
-                 int _bk, int _row, int _col, int _id) : 
+                 int _bk, int _row, int _col, int _id, int _etc) : 
     valid(is_valid), opcode(_opcode), opsize(_opsize), ch(_ch), pch(_pch), bg(_bg), 
-    bk(_bk), row(_row), col(_col), id(_id), cnt(0)  {};
+    bk(_bk), row(_row), col(_col), id(_id), etc(_etc), cnt(0)  {};
 };
 
 }        // namespace Ramulator

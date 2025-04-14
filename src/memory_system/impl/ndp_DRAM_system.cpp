@@ -4,6 +4,8 @@
 #include "addr_mapper/addr_mapper.h"
 #include "dram/dram.h"
 
+#define NDP_DEBUG
+
 namespace Ramulator {
 
 class NDPDRAMSystem final : public IMemorySystem, public Implementation {
@@ -25,6 +27,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       NDP_IDLE,
       NDP_RUN,
       NDP_BAR,
+      NDP_WAIT_RES,
+      NDP_WAIT,
       NDP_DONE
     };
     NDP_CTRL_STATUS                    ndp_ctrl_status;
@@ -54,6 +58,20 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
     int num_channels = -1;
     int num_pseudochannel = -1;
+
+    int ndp_wait_cnt = -1;
+    int ndp_wait_cycle = -1;
+    // NDP Access Instruction Opcode
+    std::map<std::string, int> m_ndp_access_inst_op = {
+      {"RD",         0},
+      {"WR",         1},
+      {"BAR",        2},
+      {"WAIT_RES",   3},
+      {"LOOP_START", 4},
+      {"LOOP_END",   5},
+      {"WAIT",       6},
+      {"DONE",       15}      
+    };
   public:
     void init() override { 
       Logger_t m_logger;
@@ -141,6 +159,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       register_stat(s_num_read_requests).name("total_num_read_requests");
       register_stat(s_num_write_requests).name("total_num_write_requests");
       register_stat(s_num_other_requests).name("total_num_other_requests");
+
+      // Each DIMM has 2 Channel (Ramulator 2 Channel --> One DIMM and Two Sub-Channel)
+      
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override { }
@@ -236,7 +257,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // Generate NDP EXEC REQ and Send to MCs
             if(ndp_access_slot_idx >= ndp_access_inst_slots.size()) ndp_access_slot_idx = 0;
 
-            Request req = Request(0,Request::Type::Read);
+            bool is_read;
+            if (ndp_access_inst_slots[ndp_access_slot_idx].opcode == m_ndp_access_inst_op.at("RD")) 
+              is_read = true;
+            else if (ndp_access_inst_slots[ndp_access_slot_idx].opcode == m_ndp_access_inst_op.at("WR")) 
+              is_read = false;
+            else 
+              throw std::runtime_error("Invalid NDP Access Instruction during.. NDP Access");
+            
+            Request req = Request(0,is_read ? Request::Type::Read : Request::Type::Write);
             m_addr_mapper->apply(req);
             req.addr_vec[m_dram->m_levels("channel")]       = ndp_access_inst_slots[ndp_access_slot_idx].ch;
             req.addr_vec[m_dram->m_levels("pseudochannel")] = ndp_access_inst_slots[ndp_access_slot_idx].pch;
@@ -248,12 +277,12 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             req.is_ndp_req                                  = true;
 
             bool issue_req;
-            #ifdef NDP_DEBUG
-            std::cout<<"[NDP_MEM_SYS] Send MC :";
-            m_dram->print_req(req);
-            #endif 
             issue_req = m_controllers[ndp_access_inst_slots[ndp_access_slot_idx].ch]->send(req);      
             if(issue_req) {
+              #ifdef NDP_DEBUG
+              std::cout<<"[NDP_MEM_SYS] Send MC :";
+              m_dram->print_req(req);
+              #endif 
               if(ndp_access_inst_slots[ndp_access_slot_idx].cnt == ndp_access_inst_slots[ndp_access_slot_idx].opsize) {
                 // Remove Done Request
                 ndp_access_inst_slots.erase(ndp_access_inst_slots.begin() + ndp_access_slot_idx);
@@ -275,16 +304,28 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               std::cout<<"[NDP_MEM_SYS] NDP_CTRL_PC: "<<ndp_ctrl_pc<<std::endl;
               #endif 
               AccInst_Slot access_inst = ndp_access_infos[ndp_ctrl_pc];
-              if(access_inst.opcode == 3) {
+              if(access_inst.opcode == m_ndp_access_inst_op.at("BAR")) {
                 ndp_ctrl_status = NDP_BAR;
                 #ifdef NDP_DEBUG
                 std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_BAR"<<std::endl;
                 #endif
-              } else if(access_inst.opcode == 15) {
+              } else if(access_inst.opcode == m_ndp_access_inst_op.at("DONE")) {
                 ndp_ctrl_status = NDP_DONE;
                 #ifdef NDP_DEBUG
                 std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_DONE"<<std::endl;
                 #endif
+              } else if(access_inst.opcode == m_ndp_access_inst_op.at("WAIT_RES")) {
+                ndp_ctrl_status = NDP_WAIT_RES;
+                #ifdef NDP_DEBUG
+                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> WAIT_RES"<<std::endl;
+                #endif        
+              } else if(access_inst.opcode == m_ndp_access_inst_op.at("WAIT")) {
+                ndp_ctrl_status = NDP_WAIT;
+                ndp_wait_cnt   = 0;
+                ndp_wait_cycle = access_inst.etc;                
+                #ifdef NDP_DEBUG
+                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_WAIT ("<<ndp_wait_cycle<<")"<<std::endl;
+                #endif                         
               } else {
                 ndp_access_inst_slots.push_back(access_inst);
               }
@@ -313,7 +354,21 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_DONE --> NDP_IDLE"<<std::endl;
               #endif
             }
+          } else if(ndp_ctrl_status == NDP_WAIT_RES) {
+            // Not Imple..
+          } else if(ndp_ctrl_status == NDP_WAIT) {
+            // Wait Fixed Latency
+            if(ndp_wait_cnt == ndp_wait_cycle) {
+              ndp_ctrl_status = NDP_RUN;
+              #ifdef NDP_DEUBG
+              std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_WAIT --> NDP_RUN"<<std::endl;
+              #endif
+            } else {
+              ndp_wait_cnt++;
+            }           
           }
+
+
         }
       }
       //
@@ -350,8 +405,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         // NDP Control 
         if(req.type_id == Request::Type::Write) {
           #ifdef NDP_DEBUG
-          std::cout<<"[HSNU] payload [0]:"<<req.m_payload[0]<<std::endl;
-          std::cout<<"[HSNU] payload [1]:"<<req.m_payload[1]<<std::endl;
+          std::cout<<"[HSNU] [SCH0][PCH0]:"<<req.m_payload[0]<<std::endl;
+          std::cout<<"[HSNU] [SCH0][PCH1]:"<<req.m_payload[1]<<std::endl;
+          std::cout<<"[HSNU] [SCH0][PCH2]:"<<req.m_payload[2]<<std::endl;
+          std::cout<<"[HSNU] [SCH0][PCH3]:"<<req.m_payload[3]<<std::endl;
+          std::cout<<"[HSNU] [SCH1][PCH0]:"<<req.m_payload[4]<<std::endl;
+          std::cout<<"[HSNU] [SCH1][PCH1]:"<<req.m_payload[5]<<std::endl;
+          std::cout<<"[HSNU] [SCH1][PCH2]:"<<req.m_payload[6]<<std::endl;
+          std::cout<<"[HSNU] [SCH1][PCH3]:"<<req.m_payload[7]<<std::endl;
           #endif 
 
           if(req.m_payload[0] == 1) {
@@ -376,6 +437,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
               for(int i=0;i<issue_ndp_start.size();i++) {
                 if(((req.m_payload[1]>>i) & 0x1) == 0x1) issue_ndp_start[i] = false;
+                else                                     issue_ndp_start[i] = true;
               }              
               
               #ifdef NDP_DEBUG
@@ -429,14 +491,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       uint64_t row    = (inst >> 25) & 0x3FFFF;
       uint64_t col    = (inst >> 18) & 0x7F;
       uint64_t id     = (inst >> 15) & 0x7;
+      uint64_t etc    = (inst      ) & 0x7FFF;
       std::cout<<"acc inst decoding opcode "<<opcode<<" opsize "<<opsize<<" ch "<<ch<<" pch "<<pch<<" bg "<<bg;
-      std::cout<<" bk "<<bk<<" row "<<row<<" col "<<col<<" id "<<id<<std::endl;
-      return AccInst_Slot(true,opcode,opsize,ch,pch,bg,bk,row,col,id);      
+      std::cout<<" bk "<<bk<<" row "<<row<<" col "<<col<<" id "<<id<<" etc "<<etc<<std::endl;
+      return AccInst_Slot(true,opcode,opsize,ch,pch,bg,bk,row,col,id,etc);      
     }
 
     void print_acc_inst(const AccInst_Slot& slot) {
       std::cout<<"acc inst opcode "<<slot.opcode<<" opsize "<<slot.opsize<<" ch "<<slot.ch<<" pch "<<slot.pch<<" bg "<<slot.bg;
-      std::cout<<" bk "<<slot.bk<<" row "<<slot.row<<" col "<<slot.col<<" id "<<slot.id<<std::endl;      
+      std::cout<<" bk "<<slot.bk<<" row "<<slot.row<<" col "<<slot.col<<" id "<<slot.id<<" etc "<<slot.etc<<std::endl;      
     }
 };
   
