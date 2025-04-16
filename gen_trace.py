@@ -60,6 +60,7 @@ ndp_acc_inst_opcode = {
 input_size_list = {
     "8K" :  8192,
     "32K":  32768,
+    "64K":  65536,
     "128K": 131072,
     "512K": 524288,
     "8M": 8388608
@@ -140,7 +141,57 @@ def dump_ndp_acc_inst(f, inst_list):
             data_array[j] = inst_list[it*8+j]       
         write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_BUF_BG, HSNU_CTR_BUF_BK, NDP_ROW, it),data_array)
 
+def dump_ndp_acc_inst_2d(f, inst_list, start_col):
+    # Generation Write Request for NDP Access Instruction
+    all_acc_inst_empty = False
+    col_addr = start_col
+    while not all_acc_inst_empty:
+        none_acc_inst = True
+        for ch in range(2):
+            for pch in range(4):  
+                idx = ch * 4 + pch          
+                # Check Each Inst List is Empty or not
+                num_remain_inst = len(inst_list[idx])
+                if num_remain_inst != 0:
+                    none_acc_inst = False
+                    data_array = [0] * 8
+                    # Make 64B payload
+                    if num_remain_inst >= 8:
+                        for i in range(8):
+                            data_array[i] = inst_list[idx].pop(0)
+                    else :
+                        for i in range(num_remain_inst):
+                            data_array[i] = inst_list[idx].pop(0)  
 
+                    # Write trace
+                    write_trace(f,'ST',encode_address(ch, pch, 0, HSNU_CTR_BUF_BG, HSNU_CTR_BUF_BK, NDP_ROW, col_addr),data_array)
+
+                    # Increase Column Address
+                    col_addr+=1
+                    if col_addr == 128 :
+                        col_addr = 0
+
+
+        if none_acc_inst:
+            all_acc_inst_empty = True
+
+
+def dump_ndp_inst(f, inst_list, ch, pch):
+    # Generation Write Request for NDP Access Instruction
+    num_inst = len(inst_list)
+    it = int(num_inst/8)
+    remain = int(num_inst)%8
+    data_array = [0] * 8
+    for i in range(it):
+        for j in range(8):
+            data_array[j] = inst_list[i*8+j]
+        write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, i),data_array)
+
+    if remain != 0:
+        data_array = [0] * 8
+        for j in range(remain):
+            data_array[j] = inst_list[it*8+j]       
+        write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, it),data_array)
 '''
     AXPBY     : Z = aX + bY
     AXPBYPCZ  : W = aX + bB + zZ
@@ -157,7 +208,7 @@ def dump_ndp_acc_inst(f, inst_list):
 
 def axpby_pch(f, input_size):
     '''
-        input_size: 8K, 32K, 128K, 512K, 8M
+        input_size: 8K, 32K, 64K, 128K, 512K, 8M
         data memory: 32KB
         Z = aX + bY
         --- Iteration InputSize/8K -------
@@ -169,64 +220,61 @@ def axpby_pch(f, input_size):
         WBD: 8KB
         ---
         Input: 8K
-        BG0/BG1 -> BG2
-        ROW:5000
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
         COL:0-127 
-
-        input: 32K
-        BG0, BG1, BG2, BG2
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127         
         
     '''
-    iteration = input_size_list[input_size]/8192
-    data_array = [0] * 8
+    iteration = int(input_size_list[input_size]/8192)
+    if iteration > 8:
+        num_working_bg = 8
+    else:
+        num_working_bg = iteration
+    print(num_working_bg)
+    ndp_inst_list = []
     for ch in range(2):
         for pch in range(4):
-            data_array[0] = inst(ndp_inst_opcode["LOAD_MUL"],127,0,0,0)
-            data_array[1] = inst(ndp_inst_opcode["SCALE_ADD"],127,0,1,0)
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0))
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0))       
             # data_array[2] = inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0)
             # data_array[3] = inst(ndp_inst_opcode["T_ADD"],127,0,0,0)
             # data_array[4] = inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0)
-            data_array[2] = inst(ndp_inst_opcode["WBD"],127,0,2,0)
-            data_array[4] = inst(ndp_inst_opcode["EXIT"],0,0,0,0)
-            write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,2,bg,0))                      
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0))
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+            # write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
 
-    data_array = [0] * 8
-    acc_inst_list = []
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(2):
+        for pch in range(4):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
     # Start NDP ops (HSNU-Ctrl Access Info Buffer)
     # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
     for ch in range(2):
         for pch in range(4):    
-            acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,0,0,5000,0,0,0))
-    acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-    for ch in range(2):
-        for pch in range(4):    
-            acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,1,0,5000,0,0,0))    
-    acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-    for ch in range(2):
-        for pch in range(4):    
-            acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,2,0,5000,0,0,0)) 
-    acc_inst_list.append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-    dump_ndp_acc_inst(f, acc_inst_list)
+            idx = ch * 4 + pch
+            for bg in range(num_working_bg):
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,5000,0,0,0))            
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            for bg in range(num_working_bg):
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,6000,0,1,0))               
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            for bg in range(num_working_bg):
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,7000,0,2,0))             
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
-
-    # write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_BUF_BG, HSNU_CTR_BUF_BK, NDP_ROW, 0),data_array)
-    # data_array[0] = acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0)
-    # data_array[1] = acc_inst(ndp_acc_inst_opcode["RD"],127,0,0,1,0,5000,0,0,0)
-    # data_array[2] = acc_inst(ndp_acc_inst_opcode["RD"],127,0,1,1,0,5000,0,0,0)
-    # data_array[3] = acc_inst(ndp_acc_inst_opcode["RD"],127,0,2,1,0,5000,0,0,0)
-    # data_array[4] = acc_inst(ndp_acc_inst_opcode["RD"],127,0,3,1,0,5000,0,0,0)
-    # data_array[5] = acc_inst(ndp_acc_inst_opcode["RD"],127,1,0,1,0,5000,0,0,0)
-    # data_array[6] = acc_inst(ndp_acc_inst_opcode["RD"],127,1,1,1,0,5000,0,0,0)
-    # data_array[7] = acc_inst(ndp_acc_inst_opcode["RD"],127,1,2,1,0,5000,0,0,0)
-    # write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_BUF_BG, HSNU_CTR_BUF_BK, NDP_ROW, 1),data_array)
-    # data_array[7] = acc_inst(ndp_acc_inst_opcode["RD"],127,1,3,1,0,5000,0,0,0)
-
-    # data_array[2] = acc_inst(ndp_acc_inst_opcode["RD"],127,0,0,1,0,5000,0,0,0)
-    # data_array[3] = acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0)
-    # data_array[4] = acc_inst(ndp_acc_inst_opcode["WR"],127,0,0,2,0,5000,0,0,0)
-    # data_array[5] = acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0)
-    # data_array[6] = 0
-    # data_array[7] = 0
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    # deprecated..
+    # dump_ndp_acc_inst(f, acc_inst_list)
     return 
 # acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,1152)
 
@@ -237,70 +285,15 @@ def generate_trace(filename, num_instructions=1000, seed=None):
 
     with open(filename, 'w') as f:
         data_array = [0] * 8
-        # Write NDP Instruction
-        # for i in range(128):
-        # col = i
-        # random.choice(['LD', 'ST'])
 
-        # 무작위 DRAM 주소 구성 요소 생성
-        # instr_type = 'ST'
-        # # Write Instruction Memory
-        # channel        = 0
-        # pseudo_channel = 0
-        # rank           = 0
-        # bg             = 4
-        # bank           = 3
-        # row            = 65535 
-        # data_array[0] = inst(0,127,0,0,0)
-        # data_array[1] = inst(48,0,0,0,0)
-        # data_array[2] = inst(1,127,0,0,0) 
-        # data_array[3] = inst(49,0,0,0,0) 
-        # # encoding phyisical address and write memory access trace
-        # write_trace(f,instr_type,encode_address(0, 0, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(0, 1, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(0, 2, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(0, 3, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(1, 0, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(1, 1, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(1, 2, rank, bg, bank, row, 0),data_array)
-        # write_trace(f,instr_type,encode_address(1, 3, rank, bg, bank, row, 0),data_array)
-        axpby_pch(f,"8K")
-        # data_array = [0] * 8
-        # Start NDP ops (HSNU-Ctrl Access Info Buffer)
-        # data_array[0] = acc_inst(0,127,0,0,0,0,1000,0,0)
-        # data_array[1] = acc_inst(0,127,0,1,0,0,1000,0,0)
-        # data_array[2] = acc_inst(0,127,0,2,0,0,1000,0,0)
-        # data_array[3] = acc_inst(0,127,0,3,0,0,1000,0,0)
-        # data_array[4] = acc_inst(0,127,1,0,0,0,1000,0,0)
-        # data_array[5] = acc_inst(0,127,1,1,0,0,1000,0,0)
-        # data_array[6] = acc_inst(0,127,1,2,0,0,1000,0,0)
-        # data_array[7] = acc_inst(0,127,1,3,0,0,1000,0,0)
-        # Start NDP ops (HSNU-Ctrl Reg)
-        # write_trace(f,'ST',encode_address(0, 0, 0, 6, 3, 65535, 0),data_array)
-        # data_array = [0] * 8
-        # Start NDP ops (HSNU-Ctrl Access Info Buffer)
-        # data_array[0] = acc_inst(3,0,0,0,0,0,0,0,0)
-        # data_array[1] = acc_inst(0,127,0,0,0,0,1001,0,0)
-        # data_array[2] = acc_inst(0,127,0,1,0,0,1001,0,0)
-        # data_array[3] = acc_inst(0,127,0,2,0,0,1001,0,0)
-        # data_array[4] = acc_inst(0,127,0,3,0,0,1001,0,0)
-        # data_array[5] = acc_inst(0,127,1,0,0,0,1001,0,0)
-        # data_array[6] = acc_inst(0,127,1,1,0,0,1001,0,0)
-        # data_array[7] = acc_inst(0,127,1,2,0,0,1001,0,0)
-        # Start NDP ops (HSNU-Ctrl Reg)
-        # write_trace(f,'ST',encode_address(0, 0, 0, 6, 3, 65535, 1),data_array)      
+        axpby_pch(f,"64K")
 
-        # data_array = [0] * 8
-        # Start NDP ops (HSNU-Ctrl Access Info Buffer)
-        # data_array[0] = acc_inst(0,127,1,3,0,0,1001,0,0)
-        # data_array[1] = acc_inst(15,0,0,0,0,0,0,0,0)
-        # Start NDP ops (HSNU-Ctrl Reg)
-        # write_trace(f,'ST',encode_address(0, 0, 0, 6, 3, 65535, 2),data_array) 
-
-        # NDP Start 
-        data_array[0] = 1
-        # NDP pch mask (2channelx4pseduo_channel --> MAX 8 channel x 8 pseduo_channe)
-        data_array[1] = 0xFF
+        # NDP Start (only Ch0PCH0)
+        for ch in range(2):
+            for pch in range(4):  
+                idx = ch * 4 + pch     
+                data_array[idx] = 1   
+        
         write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
 
     print(f"Generated memory traces in '{filename}'.")
