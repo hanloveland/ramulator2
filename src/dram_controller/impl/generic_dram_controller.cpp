@@ -759,9 +759,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
 
     bool is_empty_ndp_req() override {    
-      return false;
+      return true;
      }        
 
+     bool is_empty_ndp_req(int pch_idx) override {
+      return true;
+    }         
 };
   
 }   // namespace Ramulator

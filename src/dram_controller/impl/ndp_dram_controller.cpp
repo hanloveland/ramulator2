@@ -82,6 +82,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     size_t s_num_issue_reads = 0;
     size_t s_num_issue_writes = 0;
     float s_effective_bandwidth = 0; 
+    float s_max_effective_bandwidth = 0; 
 
     std::vector<size_t> s_num_trans_per_pch;
     std::vector<size_t> s_num_refresh_cc_per_pch;
@@ -124,6 +125,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     int num_ndp_rd_req;
     int num_ndp_wr_req;
     std::vector<int> num_ndp_wr_req_per_pch;
+    std::vector<int> num_ndp_rd_req_per_pch;
 
     // Round-Robin Vector
     std::vector<int> rr_pch_idx;
@@ -205,6 +207,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       register_stat(s_dq_bandwidth).name("dq_bandwidth_{}", m_channel_id);
       register_stat(s_max_bandwidth).name("max_bandwidth_{}", m_channel_id);
       register_stat(s_effective_bandwidth).name("s_effective_bandwidth_{}", m_channel_id);
+      register_stat(s_max_effective_bandwidth).name("s_max_effective_bandwidth_{}", m_channel_id);
 
       num_pseudochannel = m_dram->get_level_size("pseudochannel");  
 
@@ -215,6 +218,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_wr_prefetch_buffers.resize(num_pseudochannel,ReqBuffer());
       m_is_write_mode_per_pch.resize(num_pseudochannel,false);
       num_ndp_wr_req_per_pch.resize(num_pseudochannel,0);
+      num_ndp_rd_req_per_pch.resize(num_pseudochannel,0);
       prefetch_mode_before_ref_per_ch.resize(num_pseudochannel,false);
 
       for(int i=0; i<num_pseudochannel; i++) {
@@ -351,18 +355,19 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }      
 
         if(req.is_ndp_req) {
-          if(req.type_id == Request::Type::Read) num_ndp_rd_req++;
+          if(req.type_id == Request::Type::Read) {
+            num_ndp_rd_req++;
+            num_ndp_rd_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
+          }
           else {
             num_ndp_wr_req++;
             num_ndp_wr_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
           }          
-          // std::cout<<"["<<m_clk<<"][DRAMCtrl] Get NDP Request: ";
-          // m_dram->print_req(req);     
         }
       }
       // if(is_success) {
-      //   std::cout<<"[NDP_DRAM_CTRL] Get Request ";
-      //   m_dram->print_req(req);
+        // std::cout<<"[NDP_DRAM_CTRL] Get Request ";
+        // m_dram->print_req(req);
       // }
       return is_success;
     };
@@ -636,7 +641,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         
         if(false/* && req_it->addr_vec[0] == 0 && req_it->addr_vec[1] == 1*/) {
 
-          std::cout<<"["<<(m_clk-pre_clk)<<"] ";
+          std::cout<<"["<<(m_clk)<<"] ";
           std::cout<<" Ramined Req (active_buf/read_buf/write_buf/rd_pre_buf/wr_pre_buf/pending) "<<(m_active_buffer.size())<<" / "
                                                                                          <<m_read_buffers[req_it->addr_vec[psuedo_ch_idx]].size()<<" / "
                                                                                          <<m_write_buffers[req_it->addr_vec[psuedo_ch_idx]].size()<<" / "
@@ -680,7 +685,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {
           if(req_it->is_ndp_req) {
-            if(req_it->type_id == Request::Type::Read) num_ndp_rd_req--;
+            if(req_it->type_id == Request::Type::Read) {
+              num_ndp_rd_req--;
+              num_ndp_rd_req_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
+            }
             else {
               num_ndp_wr_req--;
               num_ndp_wr_req_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
@@ -1172,6 +1180,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }
       s_effective_bandwidth = ((float)(total_transfer_data/8)/(float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024*1024*1012);
 
+      // Max Effective Bandwidth (except refresh)
+      float refresh_ratio = ((float)m_dram->m_timing_vals("nRFC1")/(float)m_dram->m_timing_vals("nREFI"));
+      s_max_effective_bandwidth = s_max_bandwidth * (float)num_pseudochannel * (1.0 - refresh_ratio);      
+      
       /*
       for(int pch_idx=0;pch_idx<num_pseudochannel;pch_idx++) {
         std::cout<<"Read Mode :"<<read_mode_cycle_per_pch[pch_idx]<<" ("<<(100*read_mode_cycle_per_pch[pch_idx]/m_clk)<<" %)"<<std::endl;
@@ -1184,7 +1196,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         if(prefetch_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Prefetch Mode Util :"<<busy_prefetch_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_prefetch_mode_cycle_per_pch[pch_idx]/prefetch_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
         if(refresh_mode_cycle_per_pch[pch_idx] !=0) std::cout<<"Refresh Mode Util  :"<<busy_refresh_mode_cycle_per_pch[pch_idx]<<" ("<<(100*busy_refresh_mode_cycle_per_pch[pch_idx]/refresh_mode_cycle_per_pch[pch_idx])<<" %)"<<std::endl;
       }
-      */
+      */     
 
       
       return;
@@ -1209,6 +1221,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(num_ndp_rd_req == 0 && num_ndp_wr_req == 0) return true;
       else                                           return false;
     }
+
+    bool is_empty_ndp_req(int pch_idx) override {
+      if(num_ndp_rd_req_per_pch[pch_idx] == 0 && num_ndp_wr_req_per_pch[pch_idx] == 0) return true;
+      else                                                                             return false;
+    }    
 
     void update_rr_pch_idx() {
       // Shift Round-Robin Pseudo Channel Index
