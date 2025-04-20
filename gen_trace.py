@@ -1,13 +1,37 @@
 
-CHANNEL_BITS    = 1    # 2 Channel
-PCHANNEL_BITS   = 2    # 4 Pseudo Channel  
-RANK_BITS       = 0    # 1 Rank
-BANKGROUP_BITS  = 3    # 8 Bank Group  
-BANK_BITS       = 2    # 4 Bank   
-ROW_BITS        = 16   # 64K Row
-COLUMN_BITS     = 11 - 4   # 2K Column (1KB/8B=128)
-BURST_SIZE      = 64   # Prefetch Size 64
-GRANULARITY     = 6    # 64B 
+import math
+import os
+import shutil
+
+NUM_CHANNEL = 2
+NUM_PSEUDOCHANNEL = 4
+NUM_RANK = 4
+NUM_BANKGROUP = 8
+NUM_BANK = 4
+NUM_ROW = 65536
+NUM_COL = 128 # 1KB/8B
+
+CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))                 # 2 Channel
+PCHANNEL_BITS   = int(math.log2(NUM_PSEUDOCHANNEL))           # 4 Pseudo Channel  
+RANK_BITS       = 0                                           # 1 Rank
+BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))               # 8 Bank Group  
+BANK_BITS       = int(math.log2(NUM_BANK))                    # 4 Bank   
+ROW_BITS        = int(math.log2(NUM_ROW))                     # 64K Row
+COLUMN_BITS     = int(math.log2(NUM_COL))                     # 11 - 4 # 2K Column (1KB/8B=128)
+BURST_SIZE      = 64                                          # Prefetch Size 64
+GRANULARITY     = int(math.log2(BURST_SIZE))                  # 64B 
+
+NORMAL_CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))          # 2 Channel
+NORMAL_RANK_BITS       = int(math.log2(NUM_RANK))             # 4 Rank
+NORMAL_BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))        # 8 Bank Group  
+NORMAL_BANK_BITS       = int(math.log2(NUM_BANK))             # 4 Bank   
+NORMAL_ROW_BITS        = int(math.log2(NUM_ROW))              # 64K Row
+NORMAL_COLUMN_BITS     = int(math.log2(BURST_SIZE))           # 2K Column (1KB/8B=128)
+NORMAL_BURST_SIZE      = 64                                   # Prefetch Size 64
+NORMAL_GRANULARITY     = int(math.log2(NORMAL_BURST_SIZE))    # 64B 
+
+NORMAL_SCALE_FACTOR = 4 #  PCH per CH 
+
 MAX_INST        = 1024 # 8K/8B
 NDP_ROW         = 65535
 NDP_CTRL_BK     = 3
@@ -22,7 +46,8 @@ HSNU_CTR_BUF_BK = 3
 HSNU_CTR_BUF_BG = 6
 PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
 # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
-
+NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
+# NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
 ndp_inst_opcode = {
     "LOAD"           :0,
     "LOAD_ADD"       :1,
@@ -42,7 +67,8 @@ ndp_inst_opcode = {
     "BARRIER"        :48,
     "EXIT"           :49,
     "SELF_EXEC_ON"   :50,
-    "SELF_EXEC_OFF"  :51
+    "SELF_EXEC_OFF"  :51,
+    "LOOP"           :52
 }
 
 ndp_acc_inst_opcode = {
@@ -57,7 +83,7 @@ ndp_acc_inst_opcode = {
     "DONE"       :15
 }
 
-input_size_list = {
+input_size_byte_list = {
     "8K" :  8192,
     "32K":  32768,
     "64K":  65536,
@@ -66,9 +92,30 @@ input_size_list = {
     "8M": 8388608
 }
 
+input_size_list = [
+    "8K",
+    "32K",
+    "64K",
+    "128K",
+    "512K",
+    "8M"
+]
+
+workload_list = {
+    "AXPBY",
+    "AXPBYPCZ",
+    "AXPY",
+    "COPY",
+    "XMY",
+    "DOT",
+    "SCAL",
+    "GEMV"
+}
+
 def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
     """
         ROCoBaBgRaPcCH
+        RoBaBgRaCoPcCH
     """
     address = 0
     global PCH_ADDRESS_SCHEME
@@ -94,19 +141,55 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         address = address << GRANULARITY
     return address
 
+def encode_normal_address(channel, rank, bg, bank, row, col):
+    """
+        RoCoBaRaCh
+        RoBaRaCoCh        
+    """
+    address = 0
+    global NORMAL_ADDRESS_SCHEME
+    if NORMAL_ADDRESS_SCHEME == "RoCoBaRaCh":
+        address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
+        address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS)
+        address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS)
+        address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS)
+        address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
+        address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS+NORMAL_COLUMN_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY
+    if NORMAL_ADDRESS_SCHEME == "RoBaRaCoCh":
+        address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
+        address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS)
+        address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS)
+        address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS)
+        address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS)
+        address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY
+    return address
+
 def write_trace(f, instr_type, address, data_array):
     if instr_type == 'ST':
         f.write(f"{instr_type} 0x{address:016X} 0x{data_array[0]:016X} 0x{data_array[1]:016X} 0x{data_array[2]:016X} 0x{data_array[3]:016X} 0x{data_array[4]:016X} 0x{data_array[5]:016X} 0x{data_array[6]:016X} 0x{data_array[7]:016X}\n")
     else:
         f.write(f"{instr_type} 0x{address:016X}\n")
 
-def inst(opcode,opsize,id,bg,bk):
+def write_normal_trace(f, instr_type, address):
+    if instr_type == 'ST':
+        f.write(f"{instr_type} 0x{address:016X}\n")
+    else:
+        f.write(f"{instr_type} 0x{address:016X}\n")
+
+def inst(opcode,opsize,id,bg,bk,op1,op2,op3):
     inst_64bit = 0
     inst_64bit |= (opcode & 0x3f) << 58
     inst_64bit |= (opsize & 0x7f) << 51
     inst_64bit |= (id & 0x7) << 48
     inst_64bit |= (bg & 0x7) << 45
     inst_64bit |= (bk & 0x3) << 43
+    if opcode == ndp_inst_opcode["LOOP"]:
+        inst_64bit |= (op1 & 0x3FF) << 16
+        inst_64bit |= (op2 & 0x1FF)     
     return inst_64bit
 
 # Access Type (4) / Opsize (7)/ Channel(3) / Pseudo-Channel(2) / BG (3) / BK (3) / ROW (18) / COL (7) / ID (3) / Reserved
@@ -170,6 +253,7 @@ def dump_ndp_acc_inst_2d(f, inst_list, start_col):
                     col_addr+=1
                     if col_addr == 128 :
                         col_addr = 0
+                        print("Warning - Over nl-req buf cap.")
 
 
         if none_acc_inst:
@@ -209,7 +293,7 @@ def dump_ndp_inst(f, inst_list, ch, pch):
 def axpby_pch(f, input_size):
     '''
         input_size: 8K, 32K, 64K, 128K, 512K, 8M
-        data memory: 32KB
+        data memory: 32KB-> Max 4 Row
         Z = aX + bY
         --- Iteration InputSize/8K -------
         LOAD_MUL: 8KB
@@ -226,27 +310,48 @@ def axpby_pch(f, input_size):
         COL:0-127         
         
     '''
-    iteration = int(input_size_list[input_size]/8192)
-    if iteration > 8:
-        num_working_bg = 8
+    num_row = int(input_size_byte_list[input_size]/8192)
+    if num_row > 4:
+        num_working_bg = 4
+        iteration = int(num_row / 4)
     else:
-        num_working_bg = iteration
-    print(num_working_bg)
-    ndp_inst_list = []
+        num_working_bg = num_row
+        iteration      = 1
+
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
     for ch in range(2):
         for pch in range(4):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))       
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,2,bg,0,0,0,0))                      
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
             # data_array[2] = inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0)
             # data_array[3] = inst(ndp_inst_opcode["T_ADD"],127,0,0,0)
             # data_array[4] = inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0)
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,2,bg,0))                      
-            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0))
-            dump_ndp_inst(f,ndp_inst_list,ch,pch)
             # write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(2):
+        for pch in range(4):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
 
     # Make 2-D NDL-Launch Request Inst
     acc_inst_list = [[ ]]
@@ -260,42 +365,301 @@ def axpby_pch(f, input_size):
     for ch in range(2):
         for pch in range(4):    
             idx = ch * 4 + pch
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,5000,0,0,0))            
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,6000,0,1,0))               
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,7000,0,2,0))             
+            for i in range(iteration):
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
     # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
     dump_ndp_acc_inst_2d(f,acc_inst_list,0)
        
-    # deprecated..
-    # dump_ndp_acc_inst(f, acc_inst_list)
     return 
-# acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,1152)
 
+# AXPBYPCZ  : W = aX + bB + zZ
+def axpbypcz_pch(f, input_size):
+    '''
+        input_size: 8K, 32K, 64K, 128K, 512K, 8M
+        data memory: 32KB-> Max 4 Row
+        Z = W = aX + bB + zZ
+        --- Iteration InputSize/8K -------
+        LOAD_MUL: 8KB
+        SCALE_ADD: 8KB
+        SCALE_ADD: 8KB
+        BARRIER 
+        WBD: 8KB
+        ---
+        Input X: 8K
+        BG0-7/ROW5000
+        Input B: 8K
+        BG0-7/ROW6000
+        Input Z: 8K
+        BG0-7/ROW7000 
+        Output W
+        BG0-7/ROW8000       
+        
+    '''
+    num_row = int(input_size_byte_list[input_size]/8192)
+    if num_row > 8:
+        num_working_bg = 8
+        iteration = int(num_row / 8)
+    else:
+        num_working_bg = num_row
+        iteration      = 1
 
-def generate_trace(filename, num_instructions=1000, seed=None):
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
+    for ch in range(2):
+        for pch in range(4):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            if num_working_bg > 4:
+                for bg in range(4):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))
+                for bg in range(4):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))       
+                for bg in range(4):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,bg,0,0,0,0))       
+                for bg in range(4):          
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,bg,0,0,0,0))        
+                for bg in range(4):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,(4+bg),0,0,0,0))
+                for bg in range(4):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,(4+bg),0,0,0,0))       
+                for bg in range(4):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,(4+bg),0,0,0,0))       
+                for bg in range(4):          
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,(4+bg),0,0,0,0))                                   
+            else: 
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))       
+                for bg in range(num_working_bg):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))               
+                for bg in range(num_working_bg):                
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,bg,0,0,0,0))   
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,bg,0,0,0,0))   
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+            # data_array[2] = inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0)
+            # data_array[3] = inst(ndp_inst_opcode["T_ADD"],127,0,0,0)
+            # data_array[4] = inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0)
+            # write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(2):
+        for pch in range(4):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(2):
+        for pch in range(4):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(2):
+        for pch in range(4):    
+            idx = ch * 4 + pch
+            for i in range(iteration):
+                if(num_working_bg>4):
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(7000+i),0,2,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(8000+i),0,3,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(7000+i),0,2,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                    for bg in range(4):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,(4+bg),0,(8000+i),0,3,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                else: 
+                    for bg in range(num_working_bg):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(num_working_bg):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    for bg in range(num_working_bg):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(7000+i),0,2,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                    for bg in range(num_working_bg):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(8000+i),0,3,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return 
+
+def axpby_normal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        Z = aX + bY
+        --- Iteration InputSize/8K -------
+        Read X
+        Read Y
+
+        BK0/BG0-BG7: Vector X
+        BK1/BG0-BG7: Vector Y
+        ROW5000        
+    '''
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
+    src_Y_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
+    des_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+
+    for _ in range(num_rd):
+        write_normal_trace(f,'LD',src_X_addr)
+        write_normal_trace(f,'LD',src_Y_addr)
+        src_X_addr+=BURST_SIZE
+        src_Y_addr+=BURST_SIZE
+    for _ in range(num_rd):
+        write_normal_trace(f,'ST',des_Z_addr)        
+        des_Z_addr+=BURST_SIZE
+
+# AXPBYPCZ  : W = aX + bB + zZ
+def axpbypcz_bormal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        W = aX + bB + zZ
+        --- Iteration InputSize/8K -------
+        Read X
+        Read Y
+        Read Z
+
+        Write W      
+    ''' 
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
+    src_B_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
+    src_Z_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
+    des_W_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+
+    for _ in range(num_rd):
+        write_normal_trace(f,'LD',src_X_addr)
+        write_normal_trace(f,'LD',src_B_addr)
+        write_normal_trace(f,'LD',src_Z_addr)
+        src_X_addr+=BURST_SIZE
+        src_B_addr+=BURST_SIZE
+        src_Z_addr+=BURST_SIZE
+    for _ in range(num_rd):
+        write_normal_trace(f,'ST',des_W_addr)        
+        des_W_addr+=BURST_SIZE    
+
+def generate_trace(workload, size,output_path='',is_ndp_ops=True):
     # if seed is not None:
     #     #random.seed(seed)
 
-    with open(filename, 'w') as f:
-        data_array = [0] * 8
+    file_name = "none.txt"
+    if workload in workload_list:
+        file_name = workload + ".txt"
+    else:
+        print("Error: Not Valid Workload")
+        exit(1)
 
-        axpby_pch(f,"64K")
+    if size in input_size_list:
+        file_name = size + "_" + file_name
+    else:
+        print("Error: Wrong Input Size")
+        exit(1)
 
-        # NDP Start (only Ch0PCH0)
-        for ch in range(2):
-            for pch in range(4):  
-                idx = ch * 4 + pch     
-                data_array[idx] = 1   
-        
-        write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+    if is_ndp_ops:
+        file_name = "ndp_" + file_name
+    else: 
+        file_name = "non_ndp_" + file_name
+    
+    file_name = output_path + "/" + file_name
+    # Size: 8K, 32K, 64K, 128K, 512K, 8M
+    # workload: "AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT", "SCAL", "GEMV"
+    with open(file_name, 'w') as f:      
+        if is_ndp_ops:
+            if workload == "AXPBY":
+                axpby_pch(f,size)
+            elif workload == "AXPBYPCZ":
+                axpbypcz_pch(f,size)
+            else:
+                print("Error: Not Implemented Workload")
+                exit(1)
+        else:
+            if workload == "AXPBY":
+                axpby_normal(f,size)
+            elif workload == "AXPBYPCZ":
+                axpbypcz_bormal(f,size)
+            else:
+                print("Error: Not Implemented Workload")
+                exit(1)
 
-    print(f"Generated memory traces in '{filename}'.")
+    print(f"Generated memory traces in '{file_name}'.")
 
-generate_trace("memory_trace.txt", num_instructions=64, seed=123)
+def crete_folder(folder_path):
+    if not os.path.exists(folder_path):
+        os.mkdir(folder_path)
+
+if __name__ == '__main__':
+    print(" ========================================================================  ")
+    print(" Generate NDP Workload  ")    
+    print(" ========================================================================  ")
+
+
+    # generate_trace("AXPBYPCZ", "512K","trace/ndp",is_ndp_ops=True)
+    # exit(1)
+    # make generated trace output path 
+    ndp_trace_path = "trace/ndp"
+    non_ndp_trace_path = "trace/non_ndp"
+
+    shutil.rmtree("trace")
+    crete_folder("trace")
+    crete_folder(ndp_trace_path)
+    crete_folder(non_ndp_trace_path)
+
+    print(" - NDP Workload Path: ",ndp_trace_path)
+    print(" - Non-NDP Workload Path: ",non_ndp_trace_path)
+
+    for size in input_size_list:
+        generate_trace("AXPBY", size,ndp_trace_path,is_ndp_ops=True)
+        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True)
+
+    for size in input_size_list:
+        generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
+        generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
