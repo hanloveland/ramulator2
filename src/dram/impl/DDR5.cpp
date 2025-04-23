@@ -928,12 +928,17 @@ class DDR5 : public IDRAM, public Implementation {
       Lambdas::Power::Rank::finalize_rank<DDR5>(rank_node, 0, AddrVec_t(), m_clk);
 
       size_t num_bankgroups = m_organization.count[m_levels["bankgroup"]];
+      size_t num_banks = m_organization.count[m_levels["bank"]];
+      int num_dev_per_rank = (m_channel_width+m_parity_width)/m_organization.dq;         
 
       auto TS = [&](std::string_view timing) { return m_timing_vals(timing); };
       auto VE = [&](std::string_view voltage) { return m_voltage_vals(voltage); };
       auto CE = [&](std::string_view current) { return m_current_vals(current); };
 
       double tCK_ns = (double) TS("tCK_ps") / 1000.0;
+
+      double one_bank_idd3N = (CE("IDD3N") - CE("IDD2N"))/(num_bankgroups * num_banks);
+      double one_bank_ipp3N = (CE("IPP3N") - CE("IPP2N"))/(num_bankgroups * num_banks);
 
       // V * mA * ns / 1E3 --> fJ
       rank_stats.act_background_energy = (VE("VDD") * CE("IDD3N") + VE("VPP") * CE("IPP3N")) 
@@ -943,7 +948,7 @@ class DDR5 : public IDRAM, public Implementation {
                                             * rank_stats.idle_cycles * tCK_ns / 1E3;
 
 
-      double act_cmd_energy  = (VE("VDD") * (CE("IDD0") - CE("IDD3N")) + VE("VPP") * (CE("IPP0") - CE("IPP3N"))) 
+      double act_cmd_energy  = (VE("VDD") * (CE("IDD0") - one_bank_idd3N) + VE("VPP") * (CE("IPP0") - one_bank_ipp3N)) 
                                       * rank_stats.cmd_counters[m_cmds_counted("ACT")] * TS("nRAS") * tCK_ns / 1E3;
 
       double pre_cmd_energy  = (VE("VDD") * (CE("IDD0") - CE("IDD2N")) + VE("VPP") * (CE("IPP0") - CE("IPP2N"))) 
@@ -961,13 +966,25 @@ class DDR5 : public IDRAM, public Implementation {
       double rfm_cmd_energy = (VE("VDD") * (CE("IDD0") - CE("IDD3N")) + VE("VPP") * (CE("IPP0") - CE("IPP3N"))) * num_bankgroups
                                       * rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb") * tCK_ns / 1E3;
 
-      rank_stats.total_background_energy = rank_stats.act_background_energy + rank_stats.pre_background_energy;
-      rank_stats.total_cmd_energy = act_cmd_energy 
+      #ifdef DEBUG_POWER
+        std::cout<<"act_cmd_energy  : "<<act_cmd_energy<<std::endl;
+        std::cout<<"pre_cmd_energy  : "<<pre_cmd_energy<<std::endl;
+        std::cout<<"rd_cmd_energy   : "<<rd_cmd_energy<<std::endl;
+        std::cout<<"wr_cmd_energy   : "<<wr_cmd_energy<<std::endl;
+        std::cout<<"ref_cmd_energy  : "<<ref_cmd_energy<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[ACT]  : "<<rank_stats.cmd_counters[m_cmds_counted("ACT")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[PRE]  : "<<rank_stats.cmd_counters[m_cmds_counted("PRE")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[RD]  : "<<rank_stats.cmd_counters[m_cmds_counted("RD")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[WR]  : "<<rank_stats.cmd_counters[m_cmds_counted("WR")]<<std::endl;
+      #endif 
+
+      rank_stats.total_background_energy = num_dev_per_rank * (rank_stats.act_background_energy + rank_stats.pre_background_energy);
+      rank_stats.total_cmd_energy = ( act_cmd_energy 
                                     + pre_cmd_energy 
                                     + rd_cmd_energy
                                     + wr_cmd_energy 
                                     + ref_cmd_energy
-                                    + rfm_cmd_energy;
+                                    + rfm_cmd_energy) * num_dev_per_rank;
 
       rank_stats.total_energy = rank_stats.total_background_energy + rank_stats.total_cmd_energy;
 
@@ -979,12 +996,12 @@ class DDR5 : public IDRAM, public Implementation {
       s_total_rfm_cycles[rank_stats.rank_id] = rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb");
 
       // nJ / ns 
-      int num_dev_per_rank = (m_channel_width+m_parity_width)/m_organization.dq;         
+      
       double background_power = rank_stats.total_background_energy / ((double)m_clk * tCK_ns);
       double command_power = rank_stats.total_cmd_energy / ((double)m_clk * tCK_ns);
-      double total_power = (background_power + command_power) * (double) num_dev_per_rank;
-      s_total_background_power += (background_power * (double) num_dev_per_rank);
-      s_total_cmd_power        += (command_power * (double) num_dev_per_rank);
+      double total_power = (background_power + command_power);
+      s_total_background_power += (background_power);
+      s_total_cmd_power        += (command_power);
       s_total_power            += total_power;
       std::cout<<"["<<rank_stats.rank_id<<"] Power Report"<<std::endl;
       std::cout<<" - Background Energy (nJ) : "<<rank_stats.total_background_energy<<std::endl;
