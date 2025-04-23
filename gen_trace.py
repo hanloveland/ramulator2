@@ -48,6 +48,8 @@ PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
 # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
 NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
 # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
+# NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
+
 ndp_inst_opcode = {
     "LOAD"           :0,
     "LOAD_ADD"       :1,
@@ -144,7 +146,8 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
 def encode_normal_address(channel, rank, bg, bank, row, col):
     """
         RoCoBaRaCh
-        RoBaRaCoCh        
+        RoBaRaCoCh
+        RoRaCoBaCh        
     """
     address = 0
     global NORMAL_ADDRESS_SCHEME
@@ -166,6 +169,15 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
+    if NORMAL_ADDRESS_SCHEME == "RoRaCoBaCh":
+        address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
+        address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS)
+        address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS)
+        address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
+        address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS+NORMAL_COLUMN_BITS)
+        address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY        
     return address
 
 def write_trace(f, instr_type, address, data_array):
@@ -276,6 +288,35 @@ def dump_ndp_inst(f, inst_list, ch, pch):
         for j in range(remain):
             data_array[j] = inst_list[it*8+j]       
         write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, it),data_array)
+
+
+def gen_normal_req_from_row(f,start_row,num_req,req_type):
+    cnt_req = 0
+    done = False
+    for ro in range(NUM_ROW):
+        for rk in range(NUM_RANK):        
+            for ba in range(NUM_BANK):
+                for co in range(NUM_COL): 
+                    for bg in range(NUM_BANKGROUP):
+                        for ch in range(NUM_CHANNEL):
+                            write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                            cnt_req+=1
+                            if cnt_req == num_req:
+                                done = True
+                            
+                            if done == True:
+                                break
+                        if done == True:
+                            break    
+                    if done == True:
+                        break 
+                if done == True:
+                    break
+            if done == True:
+                break
+        if done == True:
+            break        
+
 '''
     AXPBY     : Z = aX + bY
     AXPBYPCZ  : W = aX + bB + zZ
@@ -540,26 +581,62 @@ def axpby_normal(f, input_size):
         Read X
         Read Y
 
-        BK0/BG0-BG7: Vector X
-        BK1/BG0-BG7: Vector Y
+        Vector X: Row 5000
+        Vector Y: Row 6000
+        Vector Z: Row 7000
         ROW5000        
     '''
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
-    src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
-    src_Y_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
-    des_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+    # src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
+    # src_Y_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
+    # des_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+    # NUM_CHANNEL
+    # NUM_RANK
+    # NUM_BANKGROUP
+    # NUM_BANK
+    # NUM_COL
+    # encode_normal_address(channel, rank, bg, bank, row, col)
 
-    for _ in range(num_rd):
-        write_normal_trace(f,'LD',src_X_addr)
-        write_normal_trace(f,'LD',src_Y_addr)
-        src_X_addr+=BURST_SIZE
-        src_Y_addr+=BURST_SIZE
-    for _ in range(num_rd):
-        write_normal_trace(f,'ST',des_Z_addr)        
-        des_Z_addr+=BURST_SIZE
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'LD')
+    gen_normal_req_from_row(f,7000,num_rd,'ST')
+    # cnt_req = 0
+    # done = 0
+    # for ro in range(NUM_ROW):
+    #     for rk in range(NUM_RANK):        
+    #         for ba in range(NUM_BANK):
+    #             for co in range(NUM_COL): 
+    #                 for bg in range(NUM_BANKGROUP):
+    #                     for ch in range(NUM_CHANNEL):
+    #                         write_normal_trace(f,'LD',encode_normal_address(ch, rk, bg, ba, 5000+ro, co))
+    #                         cnt_req+=1
+    #                         if cnt_req == num_rd:
+    #                             done = 1
+                            
+    #                         if done == 1:
+    #                             break
+    #                     if done == 1:
+    #                         break    
+    #                 if done == 1:
+    #                     break 
+    #             if done == 1:
+    #                 break
+    #         if done == 1:
+    #             break
+    #     if done == 1:
+    #         break    
+            
+    # for _ in range(num_rd):
+    #     write_normal_trace(f,'LD',src_X_addr)
+    #     write_normal_trace(f,'LD',src_Y_addr)
+    #     src_X_addr+=BURST_SIZE
+    #     src_Y_addr+=BURST_SIZE
+    # for _ in range(num_rd):
+    #     write_normal_trace(f,'ST',des_Z_addr)        
+    #     des_Z_addr+=BURST_SIZE
 
 # AXPBYPCZ  : W = aX + bB + zZ
-def axpbypcz_bormal(f, input_size):
+def axpbypcz_normal(f, input_size):
     '''
         input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
         W = aX + bB + zZ
@@ -571,21 +648,26 @@ def axpbypcz_bormal(f, input_size):
         Write W      
     ''' 
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
-    src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
-    src_B_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
-    src_Z_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
-    des_W_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+    # src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
+    # src_B_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
+    # src_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
+    # des_W_addr = encode_normal_address(0, 0, 0, 0, 8000, 0)
 
-    for _ in range(num_rd):
-        write_normal_trace(f,'LD',src_X_addr)
-        write_normal_trace(f,'LD',src_B_addr)
-        write_normal_trace(f,'LD',src_Z_addr)
-        src_X_addr+=BURST_SIZE
-        src_B_addr+=BURST_SIZE
-        src_Z_addr+=BURST_SIZE
-    for _ in range(num_rd):
-        write_normal_trace(f,'ST',des_W_addr)        
-        des_W_addr+=BURST_SIZE    
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'LD')
+    gen_normal_req_from_row(f,7000,num_rd,'LD')
+    gen_normal_req_from_row(f,8000,num_rd,'ST')
+
+    # for _ in range(num_rd):
+    #     write_normal_trace(f,'LD',src_X_addr)
+    #     write_normal_trace(f,'LD',src_B_addr)
+    #     write_normal_trace(f,'LD',src_Z_addr)
+    #     src_X_addr+=BURST_SIZE
+    #     src_B_addr+=BURST_SIZE
+    #     src_Z_addr+=BURST_SIZE
+    # for _ in range(num_rd):
+    #     write_normal_trace(f,'ST',des_W_addr)        
+    #     des_W_addr+=BURST_SIZE    
 
 def generate_trace(workload, size,output_path='',is_ndp_ops=True):
     # if seed is not None:
@@ -625,7 +707,7 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True):
             if workload == "AXPBY":
                 axpby_normal(f,size)
             elif workload == "AXPBYPCZ":
-                axpbypcz_bormal(f,size)
+                axpbypcz_normal(f,size)
             else:
                 print("Error: Not Implemented Workload")
                 exit(1)
