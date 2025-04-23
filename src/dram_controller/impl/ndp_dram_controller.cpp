@@ -100,16 +100,23 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<int> db_prefetch_rd_cnt_per_pch;
     std::vector<int> db_prefetch_wr_cnt_per_pch;
 
-    uint32_t s_num_pre_wr = 0;
+    uint32_t s_num_act      = 0;
+    uint32_t s_num_rd       = 0;
+    uint32_t s_num_wr       = 0;
+    uint32_t s_num_pre      = 0;
+    
+    uint32_t s_num_p_act    = 0;
+    uint32_t s_num_pre_wr   = 0;
     uint32_t s_num_post_wr  = 0;
-    uint32_t s_num_pre_rd = 0;
+    uint32_t s_num_pre_rd   = 0;
     uint32_t s_num_post_rd  = 0;    
-    uint32_t s_num_act  = 0;
-    uint32_t s_num_pre  = 0;
-    uint32_t s_num_p_act  = 0;
-    uint32_t s_num_p_pre  = 0;    
-    uint32_t s_num_rd = 0;
-    uint32_t s_num_wr = 0; 
+    uint32_t s_num_p_pre    = 0;    
+
+    uint32_t s_num_ndp_dram_rd = 0; 
+    uint32_t s_num_ndp_dram_wr = 0; 
+    uint32_t s_num_ndp_db_rd   = 0; 
+    uint32_t s_num_ndp_db_wr   = 0; 
+
     float s_cmd_io_util = 0.0;
     uint32_t cmd_io_cc = 0; 
 
@@ -265,6 +272,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       register_stat(s_num_p_pre).name("s_num_p_pre_{}", m_channel_id);
       register_stat(s_num_rd).name("s_num_rd_{}", m_channel_id);
       register_stat(s_num_wr).name("s_num_wr_{}", m_channel_id);      
+      register_stat(s_num_ndp_dram_rd).name("s_num_ndp_dram_rd_{}", m_channel_id);      
+      register_stat(s_num_ndp_dram_wr).name("s_num_ndp_dram_wr_{}", m_channel_id);      
+      register_stat(s_num_ndp_db_rd).name("s_num_ndp_db_rd_{}", m_channel_id);      
+      register_stat(s_num_ndp_db_wr).name("s_num_ndp_db_wr_{}", m_channel_id);                                  
 
       register_stat(s_read_prefetch_queue_len).name("s_read_prefetch_queue_len_{}", m_channel_id);    
       register_stat(s_write_prefetch_queue_len).name("s_write_prefetch_queue_len_{}", m_channel_id);    
@@ -596,13 +607,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             s_wide_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(8);
         }
 
-        if(req_it->command == m_dram->m_commands("ACT")) s_num_act++;
-        if(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("PREA")) s_num_pre++;
-        if(req_it->command == m_dram->m_commands("P_ACT")) s_num_p_act++;
-        if(req_it->command == m_dram->m_commands("P_PRE")) s_num_p_pre++;
-        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_rd++;
-        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_wr++;
-
+        if(req_it->command == m_dram->m_commands("ACT"))                                                                  s_num_act++;
+        if(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("PREA"))                 s_num_pre++;
+        if(req_it->command == m_dram->m_commands("P_ACT"))                                                                s_num_p_act++;
+        if(req_it->command == m_dram->m_commands("P_PRE"))                                                                s_num_p_pre++;
+        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA"))                   s_num_rd++;
+        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA"))                   s_num_wr++;
+        if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA")) s_num_ndp_dram_rd++;
+        if(req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) s_num_ndp_dram_wr++;
+        if(req_it->command == m_dram->m_commands("NDP_DB_RD"))                                                            s_num_ndp_db_rd++;
+        if(req_it->command == m_dram->m_commands("NDP_DB_WR"))                                                            s_num_ndp_db_wr++;              
 
         if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) s_num_issue_reads++;
         if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR"))  s_num_issue_writes++;
