@@ -1,7 +1,7 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
 
-#define PRINT_DEBUG
+// #define PRINT_DEBUG
 
 #ifdef PRINT_DEBUG
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)

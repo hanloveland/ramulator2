@@ -4,7 +4,7 @@
 #include "addr_mapper/addr_mapper.h"
 #include "dram/dram.h"
 
-#define NDP_DEBUG
+// #define NDP_DEBUG
 
 #ifdef NDP_DEBUG
 #define DEBUG_PRINT(clk, unit_str, dimm_id, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] DIMM["<<dimm_id<<"] PCH["<<pch<<"] "<<msg<<std::endl; } while(0)
@@ -818,8 +818,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       uint64_t col    = (inst >> 18) & 0x7F;
       uint64_t id     = (inst >> 15) & 0x7;
       uint64_t etc    = (inst      ) & 0x7FFF;
-      std::cout<<"acc inst decoding opcode "<<opcode<<" opsize "<<opsize<<" ch "<<ch<<" pch "<<pch<<" bg "<<bg;
-      std::cout<<" bk "<<bk<<" row "<<row<<" col "<<col<<" id "<<id<<" etc "<<etc<<std::endl;
+      #ifdef NDP_DEBUG
+        std::cout<<"acc inst decoding opcode "<<opcode<<" opsize "<<opsize<<" ch "<<ch<<" pch "<<pch<<" bg "<<bg;
+        std::cout<<" bk "<<bk<<" row "<<row<<" col "<<col<<" id "<<id<<" etc "<<etc<<std::endl;
+      #endif 
       return AccInst_Slot(true,opcode,opsize,ch,pch,bg,bk,row,col,id,etc);      
     }
 

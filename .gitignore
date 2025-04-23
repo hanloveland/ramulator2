@@ -7,3 +7,4 @@ autobuild.sh
 *.trace
 *.log
 log/*
+trace/*
