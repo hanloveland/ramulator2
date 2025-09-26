@@ -226,6 +226,14 @@ class RoRaBaCoCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+//DDR5-pCH
+// RoBaRaCoPcCh
+// RoCoBaRaPcCh
+// RoRaCoBaPcCh
+// RoRabkCoBgPcCh
+
+// Ch/PCH/Rank/BankGroup/Bank/Row/Col
+// 0   1   2       3      4    5   6
 class RoBaRaCoPcCh final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoBaRaCoPcCh, "RoBaRaCoPcCh", "Applies a RoBaRaCoPcCh mapping to the address.");
 
@@ -254,6 +262,8 @@ class RoBaRaCoPcCh final : public LinearMapperBase, public Implementation {
 };
 
 //DDR5-pCH
+// Ch/PCH/nI/WI/Rank/BankGroup/Bank/Row/Col
+// 0   1  2  3   4       5      6   7  8
 class RoCoBaRaPcCh final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoCoBaRaPcCh, "RoCoBaRaPcCh", "Applies a RoCoBaRaPcCh mapping to the address.");
 
@@ -295,6 +305,81 @@ class RoCoBaRaPcCh final : public LinearMapperBase, public Implementation {
       // Address --> Ro/Bg/Bo/Ra/Co/Pc/Ch
     }
 };
+
+//DDR5-pCH
+// Ch/PCH/nI/WI/Rank/BankGroup/Bank/Row/Col
+// 0   1  2  3   4       5      6   7  8
+class RoRaCoBaPcCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoRaCoBaPcCh, "RoRaCoBaPcCh", "Applies a RoRaCoBaPcCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> pCh 
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> nI
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);            
+      // Address --> wI
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);                  
+      // Address --> BG
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> BK
+      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
+      // Address --> COL
+      req.addr_vec[8] = slice_lower_bits(addr, m_addr_bits[8]);
+      // Address --> Rank (PCh has only 1 Rank)
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);      
+      // Address --> ROW
+      req.addr_vec[7] = slice_lower_bits(addr, m_addr_bits[7]);
+
+    }
+};
+
+// Ch/PCH/nI/WI/Rank/BankGroup/Bank/Row/Col
+// 0   1  2  3   4       5      6   7  8
+class RoRabkCoBgPcCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoRabkCoBgPcCh, "RoRabkCoBgPcCh", "Applies a RoRabkCoBgPcCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> pCh 
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> nI
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);            
+      // Address --> wI
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);                  
+      // Address --> BG
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> COL
+      req.addr_vec[8] = slice_lower_bits(addr, m_addr_bits[8]);
+      // Address --> BK
+      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
+      // Address --> Rank (PCh has only 1 Rank)
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);      
+      // Address --> ROW
+      req.addr_vec[7] = slice_lower_bits(addr, m_addr_bits[7]);
+    }
+};
+
 
 
 class MOP4CLXOR final : public LinearMapperBase, public Implementation {

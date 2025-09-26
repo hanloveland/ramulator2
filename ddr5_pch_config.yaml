@@ -48,6 +48,8 @@ MemorySystem:
     plugins:
 
   AddrMapper:
-    impl: RoCoBaRaPcCh
+    impl: RoRaCoBaPcCh
+    # impl: RoRabkCoBgPcCh    
     # impl: RoBaRaCoPcCh
+    # impl: RoCoBaRaPcCh
     
