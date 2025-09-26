@@ -899,7 +899,8 @@ class DDR5 : public IDRAM, public Implementation {
                        m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
         }
         // DQ Power (nJ)
-        double dq_energy = num_trans * 16 * (m_channel_width+m_parity_width) * (socket_dq_energy + on_board_dq_energy) / 1E3;
+        // 16: Burst Length 
+        double dq_energy = (double)num_trans * (double)(16 * (m_channel_width+m_parity_width)) * (socket_dq_energy + on_board_dq_energy) / 1E3;
         double dq_power = dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         std::cout<<"["<<num_channels<<"] Channel DQ Power Report"<<std::endl;
         std::cout<<" - DQ Energy (nJ) : "<<dq_energy<<std::endl;

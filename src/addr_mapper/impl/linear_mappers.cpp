@@ -94,10 +94,12 @@ class RoBaRaCoCh final : public LinearMapperBase, public Implementation {
       for (int i = 1; i <= m_row_bits_idx; i++) {
         req.addr_vec[i] = slice_lower_bits(addr, m_addr_bits[i]);
       }
-      // Address --> Ro/Bg/Bo/Ra/Co/Ch
+      // Address --> Ro/Bk/Bg/Ra/Co/Ch
     }
 };
 
+// Ch/Rank/BankGroup/Bank/Row/Col
+// 0   1       2       3   4   5
 class RoCoBaRaCh final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoCoBaRaCh, "RoCoBaRaCh", "Applies a RoCoBaRaCh mapping to the address.");
 
@@ -128,6 +130,8 @@ class RoCoBaRaCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+// Ch/Rank/BankGroup/Bank/Row/Col
+// 0   1       2       3   4   5
 class RoCoRaBaCh final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoCoRaBaCh, "RoCoRaBaCh", "Applies a RoCoRaBaCh mapping to the address.");
 
@@ -148,9 +152,9 @@ class RoCoRaBaCh final : public LinearMapperBase, public Implementation {
       // Address --> BK
       req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);
       // Address --> Ra
-      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);    
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);    
       // Address --> COL
-      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
       // Address --> RO
       req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);                
 
@@ -158,6 +162,8 @@ class RoCoRaBaCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+// Ch/Rank/BankGroup/Bank/Row/Col
+// 0   1       2       3   4   5
 class RoRaCoBaCh final : public LinearMapperBase, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoRaCoBaCh, "RoRaCoBaCh", "Applies a RoRaCoBaCh mapping to the address.");
 
@@ -178,13 +184,45 @@ class RoRaCoBaCh final : public LinearMapperBase, public Implementation {
       // Address --> BK
       req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);
       // Address --> COL
-      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
       // Address --> Ra
-      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);    
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);    
       // Address --> RO
       req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);                
 
       // Address --> Ro/Bg/Bo/Ra/Co/Ch
+    }
+};
+
+// Ch/Rank/BankGroup/Bank/Row/Col
+// 0   1       2       3   4   5
+class RoRaBaCoCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, RoRaBaCoCh, "RoRaBaCoCh", "Applies a RoRaBaCoCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> COL
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> BG
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);
+      // Address --> BK
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);
+      // Address --> Ra
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);    
+      // Address --> RO
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);                
+
+      // Address --> Ro/Ra/Ba/Bg/Co/Ch
     }
 };
 
