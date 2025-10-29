@@ -3,24 +3,31 @@ import math
 import os
 import shutil
 
+# 1 (x4), 2 (x8), 4 (x16)
+DRAM_SCALING=1
+
+# Default :  DRAM_SCALING=1
 NUM_CHANNEL = 2
 NUM_PSEUDOCHANNEL = 4
-NUM_RANK = 4
+NUM_RANK = 4 # Basline DRAM
 NUM_BANKGROUP = 8
 NUM_BANK = 4
 NUM_ROW = 65536
-NUM_COL = 128 # 1KB/8B
+NUM_COL = 128 # 1KB/8B    
+NDP_ACC_GRA = 1 # Same with Normal Access
 
+# DBX Address Mapping 
 CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))                 # 2 Channel
 PCHANNEL_BITS   = int(math.log2(NUM_PSEUDOCHANNEL))           # 4 Pseudo Channel  
 RANK_BITS       = 0                                           # 1 Rank
-BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))               # 8 Bank Group  
+BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))               # 4 or 8 Bank Group  
 BANK_BITS       = int(math.log2(NUM_BANK))                    # 4 Bank   
 ROW_BITS        = int(math.log2(NUM_ROW))                     # 64K Row
 COLUMN_BITS     = int(math.log2(NUM_COL))                     # 11 - 4 # 2K Column (1KB/8B=128)
 BURST_SIZE      = 64                                          # Prefetch Size 64
 GRANULARITY     = int(math.log2(BURST_SIZE))                  # 64B 
 
+# Normal Addrss Mapping Not Change 
 NORMAL_CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))          # 2 Channel
 NORMAL_RANK_BITS       = int(math.log2(NUM_RANK))             # 4 Rank
 NORMAL_BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))        # 8 Bank Group  
@@ -34,21 +41,35 @@ NORMAL_SCALE_FACTOR = 4 #  PCH per CH
 
 MAX_INST        = 1024 # 8K/8B
 NDP_ROW         = 65535
-NDP_CTRL_BK     = 3
-NDP_CTRL_BG     = 5
-NDP_INS_MEM_BK  = 3
-NDP_INS_MEM_BG  = 4
-NDP_DAT_MEM_BK  = 3
-NDP_DAT_MEM_BG  = 3
+
+# DBX Addres Space 
+# Host-side NDP Controller Address Space (BG,BK)
 HSNU_CTR_REG_BK = 3
 HSNU_CTR_REG_BG = 7
+# Host-side NDP Access Information Buffer Address Space (BG,BK)
 HSNU_CTR_BUF_BK = 3
 HSNU_CTR_BUF_BG = 6
+# DIMM-side NDP Contrller Address Space (BG,BK)
+NDP_CTRL_BK     = 3
+NDP_CTRL_BG     = 5
+# Address Space of NDP Instruction Memory on NDP Unit  (BG,BK)
+NDP_INS_MEM_BK  = 3 
+NDP_INS_MEM_BG  = 4 
+# Address Space of NDP Data Memory on NDP Unit  (BG,BK)
+NDP_DAT0_MEM_BK = 3
+NDP_DAT0_MEM_BG = 3 # BG0-BG3
+NDP_DAT1_MEM_BK = -1 # Not Used when DRAM x4 
+NDP_DAT1_MEM_BG = -1 # Not Used when DRAM x4 
+NDP_DAT2_MEM_BK = -1 # Not Used when DRAM x4 
+NDP_DAT2_MEM_BG = -1 # Not Used when DRAM x4 
+NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4 
+NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
+
 PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
 # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
-NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
+# NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
 # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
-# NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
+NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
 
 ndp_inst_opcode = {
     "LOAD"           :0,
@@ -88,19 +109,35 @@ ndp_acc_inst_opcode = {
 input_size_byte_list = {
     "8K" :  8192,
     "32K":  32768,
-    "64K":  65536,
     "128K": 131072,
     "512K": 524288,
+    "2M": 2097152,
     "8M": 8388608
 }
 
 input_size_list = [
     "8K",
     "32K",
-    "64K",
     "128K",
     "512K",
+    "2M",
     "8M"
+]
+
+mat_input_size_byte_list = {
+    "8K" :  8192,
+    "16K":  16384,
+    "32K": 32768,
+    "64K": 65536,
+    "128K": 131072,
+}
+
+mat_input_size_list = [
+    "8K",
+    "16K",
+    "32K",
+    "64K",
+    "128K",
 ]
 
 workload_list = {
@@ -113,6 +150,147 @@ workload_list = {
     "SCAL",
     "GEMV"
 }
+
+def config_scale_factor(scaling_factor):
+    global NUM_CHANNEL
+    global NUM_PSEUDOCHANNEL
+    global NUM_BANKGROUP
+    global NUM_BANK
+    global NUM_ROW
+    global NUM_COL
+    global NDP_ACC_GRA    
+    if scaling_factor == 1:
+        NUM_CHANNEL = 2
+        NUM_PSEUDOCHANNEL = 4
+        NUM_BANKGROUP = 8
+        NUM_BANK = 4
+        NUM_ROW = 65536
+        NUM_COL = 128 # 1KB/8B    
+        NDP_ACC_GRA = 1 # Same with Normal Access
+    elif scaling_factor == 2:
+        NUM_CHANNEL = 2
+        NUM_PSEUDOCHANNEL = 4
+        NUM_BANKGROUP = 8
+        NUM_BANK = 4
+        NUM_ROW = 65536
+        NUM_COL = 128 # 1KB/128B
+        NDP_ACC_GRA = 2 # 2x then normal access
+    elif scaling_factor == 4:
+        NUM_CHANNEL = 2
+        NUM_PSEUDOCHANNEL = 4
+        NUM_BANKGROUP = 4
+        NUM_BANK = 4
+        NUM_ROW = 65536
+        NUM_COL = 256 # 2KB/8B
+        NDP_ACC_GRA = 4 # 4x then normal access
+    else:
+        print(f"Error: Wrong DRAM Type {scaling_factor}")
+        exit(1)    
+
+    global CHANNEL_BITS
+    global PCHANNEL_BITS
+    global BANKGROUP_BITS
+    global BANK_BITS
+    global ROW_BITS
+    global COLUMN_BITS
+
+    CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))                 
+    PCHANNEL_BITS   = int(math.log2(NUM_PSEUDOCHANNEL))           
+    BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))               
+    BANK_BITS       = int(math.log2(NUM_BANK))                    
+    ROW_BITS        = int(math.log2(NUM_ROW))                     
+    COLUMN_BITS     = int(math.log2(NUM_COL))             
+
+    # Host-side NDP Controller Address Space (BG,BK)
+    global HSNU_CTR_REG_BK
+    global HSNU_CTR_REG_BG
+    # Host-side NDP Access Information Buffer Address Space (BG,BK)
+    global HSNU_CTR_BUF_BK
+    global HSNU_CTR_BUF_BG
+    # DIMM-side NDP Contrller Address Space (BG,BK)
+    global NDP_CTRL_BK
+    global NDP_CTRL_BG
+    # Address Space of NDP Instruction Memory on NDP Unit  (BG,BK)
+    global NDP_INS_MEM_BK
+    global NDP_INS_MEM_BG
+    # Address Space of NDP Data Memory on NDP Unit  (BG,BK)
+    global NDP_DAT0_MEM_BK
+    global NDP_DAT0_MEM_BG
+    global NDP_DAT1_MEM_BK
+    global NDP_DAT1_MEM_BG
+    global NDP_DAT2_MEM_BK
+    global NDP_DAT2_MEM_BG
+    global NDP_DAT3_MEM_BK
+    global NDP_DAT3_MEM_BG
+    if scaling_factor == 1:
+        # Host-side NDP Controller Address Space (BG,BK)
+        HSNU_CTR_REG_BK = 3
+        HSNU_CTR_REG_BG = 7
+        # Host-side NDP Access Information Buffer Address Space (BG,BK)
+        HSNU_CTR_BUF_BK = 3
+        HSNU_CTR_BUF_BG = 6
+        # DIMM-side NDP Contrller Address Space (BG,BK)
+        NDP_CTRL_BK     = 3
+        NDP_CTRL_BG     = 5
+        # Address Space of NDP Instruction Memory on NDP Unit  (BG,BK)
+        NDP_INS_MEM_BK  = 3 
+        NDP_INS_MEM_BG  = 4 
+        # Address Space of NDP Data Memory on NDP Unit  (BG,BK)
+        NDP_DAT0_MEM_BK = 3
+        NDP_DAT0_MEM_BG = 3 # BG0-BG3
+        NDP_DAT1_MEM_BK = -1 # Not Used when DRAM x4 
+        NDP_DAT1_MEM_BG = -1 # Not Used when DRAM x4 
+        NDP_DAT2_MEM_BK = -1 # Not Used when DRAM x4 
+        NDP_DAT2_MEM_BG = -1 # Not Used when DRAM x4 
+        NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4 
+        NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
+    elif scaling_factor == 2:
+        # Host-side NDP Controller Address Space (BG,BK)
+        HSNU_CTR_REG_BK = 3
+        HSNU_CTR_REG_BG = 7
+        # Host-side NDP Access Information Buffer Address Space (BG,BK)
+        HSNU_CTR_BUF_BK = 3
+        HSNU_CTR_BUF_BG = 6
+        # DIMM-side NDP Contrller Address Space (BG,BK)
+        NDP_CTRL_BK     = 3
+        NDP_CTRL_BG     = 5
+        # Address Space of NDP Instruction Memory on NDP Unit  (BG,BK)
+        NDP_INS_MEM_BK  = 3 
+        NDP_INS_MEM_BG  = 4 
+        # Address Space of NDP Data Memory on NDP Unit  (BG,BK)
+        NDP_DAT0_MEM_BK = 3
+        NDP_DAT0_MEM_BG = 3 # BG0-BG3
+        NDP_DAT1_MEM_BK = 2 
+        NDP_DAT1_MEM_BG = 3 # BG0-BG3
+        NDP_DAT2_MEM_BK = -1 
+        NDP_DAT2_MEM_BG = -1 
+        NDP_DAT3_MEM_BK = -1 
+        NDP_DAT3_MEM_BG = -1 
+    elif scaling_factor == 4:
+        # Host-side NDP Controller Address Space (BG,BK)
+        HSNU_CTR_REG_BK = 3
+        HSNU_CTR_REG_BG = 3
+        # Host-side NDP Access Information Buffer Address Space (BG,BK)
+        HSNU_CTR_BUF_BK = 3
+        HSNU_CTR_BUF_BG = 2
+        # DIMM-side NDP Contrller Address Space (BG,BK)
+        NDP_CTRL_BK     = 3
+        NDP_CTRL_BG     = 1
+        # Address Space of NDP Instruction Memory on NDP Unit  (BG,BK)
+        NDP_INS_MEM_BK  = 3 
+        NDP_INS_MEM_BG  = 0 
+        # Address Space of NDP Data Memory on NDP Unit  (BG,BK)
+        NDP_DAT0_MEM_BK = 2
+        NDP_DAT0_MEM_BG = 3 # BG0-BG3
+        NDP_DAT1_MEM_BK = 2 
+        NDP_DAT1_MEM_BG = 3 # BG0-BG3
+        NDP_DAT2_MEM_BK = 1 
+        NDP_DAT2_MEM_BG = 3 # BG0-BG3
+        NDP_DAT3_MEM_BK = 1 
+        NDP_DAT3_MEM_BG = 3 # BG0-BG3
+    else:
+        print("Error: Wrong DRAM Type")
+        exit(1)             
 
 def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
     """
@@ -192,6 +370,7 @@ def write_normal_trace(f, instr_type, address):
     else:
         f.write(f"{instr_type} 0x{address:016X}\n")
 
+# NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
 def inst(opcode,opsize,id,bg,bk,op1,op2,op3):
     inst_64bit = 0
     inst_64bit |= (opcode & 0x3f) << 58
@@ -242,8 +421,8 @@ def dump_ndp_acc_inst_2d(f, inst_list, start_col):
     col_addr = start_col
     while not all_acc_inst_empty:
         none_acc_inst = True
-        for ch in range(2):
-            for pch in range(4):  
+        for ch in range(int(NUM_CHANNEL)):
+            for pch in range(int(NUM_PSEUDOCHANNEL)):  
                 idx = ch * 4 + pch          
                 # Check Each Inst List is Empty or not
                 num_remain_inst = len(inst_list[idx])
@@ -265,15 +444,13 @@ def dump_ndp_acc_inst_2d(f, inst_list, start_col):
                     col_addr+=1
                     if col_addr == 128 :
                         col_addr = 0
-                        print("Warning - Over nl-req buf cap.")
-
 
         if none_acc_inst:
             all_acc_inst_empty = True
 
 
 def dump_ndp_inst(f, inst_list, ch, pch):
-    # Generation Write Request for NDP Access Instruction
+    # Generation Write Request for NDP Instruction (DIMM-side)
     num_inst = len(inst_list)
     it = int(num_inst/8)
     remain = int(num_inst)%8
@@ -317,6 +494,49 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
         if done == True:
             break        
 
+def cal_it(input_size, scaling):
+    if scaling == 4:
+        row_size = 8192 * 2
+    else:
+        row_size = 8192
+
+    # Max opsize varies depending on the scaling factor
+    if scaling == 1:
+        opsize = 127
+    else:
+        opsize = 63
+
+    # Input Size에 따라, 필요한 Row size 및 Working Bank Group이 다름. 
+    num_row = int(input_size_byte_list[input_size]/row_size)
+    if scaling == 1:
+        # Data Memory 용량에 의해 최대 동작 가능한 Row Size 4
+        if num_row > 4:
+            num_working_bg = 4
+            iteration = int(num_row / 4)
+        else:
+            num_working_bg = num_row
+            iteration      = 1
+    elif scaling == 2:
+        # 최대 동작 가능한 Row size 8 (Data memory 증가로 인해 증가)
+        if num_row > 4:
+            num_working_bg = 4
+            iteration = int(num_row / 4)
+        else:
+            num_working_bg = num_row
+            iteration      = 1
+    elif scaling == 4:
+        # 최대 동작 가능한 Row size 4 (Bank Group 크기 4)
+        if num_row > 4:
+            num_working_bg = 4
+            iteration = int(num_row / 4)
+        elif num_row == 0:
+            num_working_bg = 1
+            iteration      = 1
+            opsize         = 31           
+        else:
+            num_working_bg = num_row
+            iteration      = 1   
+    return iteration, num_working_bg, opsize
 '''
     AXPBY     : Z = aX + bY
     AXPBYPCZ  : W = aX + bB + zZ
@@ -331,48 +551,44 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
     
 '''
 
-def axpby_pch(f, input_size):
+# Scaling Factor: 1 (x4), 2 (x8), 4 (x16)
+def axpby_pch(f, input_size, scaling):
     '''
-        input_size: 8K, 32K, 64K, 128K, 512K, 8M
-        data memory: 32KB-> Max 4 Row
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
         Z = aX + bY
+        Scaling Factor 1 (x4)
+        row size: 8K
+        data memory: 32KB-> Max 4 Row
         --- Iteration InputSize/8K -------
-        LOAD_MUL: 8KB
-        LOAD_MUL: 8KB
-        BARRIER (SELF_EXEC_ON)
-        T_ADD: 8KB
-        BARRIER (SELF_EXEC_OFF)
+        LOAD_MUL:  8KB
+        BARRIER 
+        SCALE_ADD: 8KB
+        BARRIER 
         WBD: 8KB
         ---
         Input: 8K
         BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 
+        COL:0-127 or 0-63
         BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127         
-        
+        COL:0-127 or 0-63                 
     '''
-    num_row = int(input_size_byte_list[input_size]/8192)
-    if num_row > 4:
-        num_working_bg = 4
-        iteration = int(num_row / 4)
-    else:
-        num_working_bg = num_row
-        iteration      = 1
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
     # Max NDP Instruction 8KB/8B=1K
-    for ch in range(2):
-        for pch in range(4):
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,0,0,0,0))       
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,2,bg,0,0,0,0))                      
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -380,15 +596,11 @@ def axpby_pch(f, input_size):
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
-            # data_array[2] = inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0)
-            # data_array[3] = inst(ndp_inst_opcode["T_ADD"],127,0,0,0)
-            # data_array[4] = inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0)
-            # write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
 
     # Generate NDP Start Request 
     data_array = [0] * 8
-    for ch in range(2):
-        for pch in range(4):  
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
             idx = ch * 4 + pch     
             data_array[idx] = 1   
     
@@ -397,24 +609,24 @@ def axpby_pch(f, input_size):
     # Make 2-D NDL-Launch Request Inst
     acc_inst_list = [[ ]]
     acc_inst_list_num = [[ ]]
-    for ch in range(2):
-        for pch in range(4):    
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
             acc_inst_list.append([])
             acc_inst_list_num.append(0)
     # Start NDP ops (HSNU-Ctrl Access Info Buffer)
     # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
-    for ch in range(2):
-        for pch in range(4):    
-            idx = ch * 4 + pch
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(7000+i),0,2,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -427,14 +639,18 @@ def axpby_pch(f, input_size):
     return 
 
 # AXPBYPCZ  : W = aX + bB + zZ
-def axpbypcz_pch(f, input_size):
+def axpbypcz_pch(f, input_size, scaling):
     '''
-        input_size: 8K, 32K, 64K, 128K, 512K, 8M
-        data memory: 32KB-> Max 4 Row
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
         Z = W = aX + bB + zZ
+        x4  DRAM: data memory: 32KB  -> Max 4 Row
+        x8  DRAM: data memory: 64KB  -> Max 8 Row
+        x16 DRAM: data memory: 128KB -> Max 4 Row (max bank group)
         --- Iteration InputSize/8K -------
         LOAD_MUL: 8KB
+        BARRIER 
         SCALE_ADD: 8KB
+        BARRIER 
         SCALE_ADD: 8KB
         BARRIER 
         WBD: 8KB
@@ -449,48 +665,26 @@ def axpbypcz_pch(f, input_size):
         BG0-7/ROW8000       
         
     '''
-    num_row = int(input_size_byte_list[input_size]/8192)
-    if num_row > 8:
-        num_working_bg = 8
-        iteration = int(num_row / 8)
-    else:
-        num_working_bg = num_row
-        iteration      = 1
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
     # Max NDP Instruction 8KB/8B=1K
-    for ch in range(2):
-        for pch in range(4):
+    # NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            if num_working_bg > 4:
-                for bg in range(4):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))
-                for bg in range(4):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))       
-                for bg in range(4):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,bg,0,0,0,0))       
-                for bg in range(4):          
-                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,bg,0,0,0,0))        
-                for bg in range(4):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,(4+bg),0,0,0,0))
-                for bg in range(4):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,(4+bg),0,0,0,0))       
-                for bg in range(4):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,(4+bg),0,0,0,0))       
-                for bg in range(4):          
-                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,(4+bg),0,0,0,0))                                   
-            else: 
-                for bg in range(num_working_bg):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],127,0,bg,0,0,0,0))       
-                for bg in range(num_working_bg):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,1,bg,0,0,0,0))               
-                for bg in range(num_working_bg):                
-                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],127,2,bg,0,0,0,0))   
-                for bg in range(num_working_bg):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],127,3,bg,0,0,0,0))   
+            jump_pc = len(ndp_inst_list) 
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))       
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,0,0,0,0))               
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,2,bg,0,0,0,0))   
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,0,0,0,0))   
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -498,16 +692,12 @@ def axpbypcz_pch(f, input_size):
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
-            # data_array[2] = inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0)
-            # data_array[3] = inst(ndp_inst_opcode["T_ADD"],127,0,0,0)
-            # data_array[4] = inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0)
-            # write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, 0),data_array)
 
     # Generate NDP Start Request 
     data_array = [0] * 8
-    for ch in range(2):
-        for pch in range(4):  
-            idx = ch * 4 + pch     
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch     
             data_array[idx] = 1   
     
     write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
@@ -515,54 +705,28 @@ def axpbypcz_pch(f, input_size):
     # Make 2-D NDL-Launch Request Inst
     acc_inst_list = [[ ]]
     acc_inst_list_num = [[ ]]
-    for ch in range(2):
-        for pch in range(4):    
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
             acc_inst_list.append([])
             acc_inst_list_num.append(0)
     # Start NDP ops (HSNU-Ctrl Access Info Buffer)
     # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
-    for ch in range(2):
-        for pch in range(4):    
-            idx = ch * 4 + pch
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
-                if(num_working_bg>4):
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(7000+i),0,2,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(8000+i),0,3,0))             
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(5000+i),0,0,0))            
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(6000+i),0,1,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,(4+bg),0,(7000+i),0,2,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
-                    for bg in range(4):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,(4+bg),0,(8000+i),0,3,0))             
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
-                else: 
-                    for bg in range(num_working_bg):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(5000+i),0,0,0))            
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(num_working_bg):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(6000+i),0,1,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    for bg in range(num_working_bg):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],127,ch,pch,bg,0,(7000+i),0,2,0))               
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
-                    for bg in range(num_working_bg):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],127,ch,pch,bg,0,(8000+i),0,3,0))             
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(7000+i),0,2,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(8000+i),0,3,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
     # Reshape 2-D NDL-Lauch Request Lists to 1-D List
@@ -572,6 +736,630 @@ def axpbypcz_pch(f, input_size):
     dump_ndp_acc_inst_2d(f,acc_inst_list,0)
        
     return 
+
+# AXPY      : Y = aY + X
+def axpy_pch(f, input_size, scaling):
+    '''
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        Z = aX + Y
+        Scaling Factor 1 (x4)
+        row size: 8K
+        data memory: 32KB-> Max 4 Row
+        --- Iteration InputSize/8K -------
+        LOAD_MUL:  8KB
+        BARRIER 
+        SCALE_ADD: 8KB
+        BARRIER 
+        WBD: 8KB
+        ---
+        Input: 8K
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63                 
+    '''
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["ADD"],opsize,1,bg,0,0,0,0))       
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
+            for i in range(iteration):
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return     
+
+# COPY      : Y = X
+def copy_pch(f, input_size, scaling):
+    '''
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        Z = X
+        Scaling Factor 1 (x4)
+        row size: 8K
+        data memory: 32KB-> Max 4 Row
+        --- Iteration InputSize/8K -------
+        LOAD_MUL:  8KB
+        BARRIER 
+        WBD: 8KB
+        ---
+        Input: 8K
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63                 
+    '''
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
+            for i in range(iteration):
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return 
+
+
+# XMY       : Y = X ⨀ Y
+def xmy_pch(f, input_size, scaling):
+    '''
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        Z = X ⨀ Y
+        Scaling Factor 1 (x4)
+        row size: 8K
+        data memory: 32KB-> Max 4 Row
+        --- Iteration InputSize/8K -------
+        LOAD:  8KB
+        BARRIER 
+        MAC: 8KB
+        BARRIER
+        V_REC
+        BARRIER 
+        WBD: 8KB
+        ---
+        Input: 8K
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63                 
+    '''
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["MUL"],opsize,1,bg,0,0,0,0))       
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
+            for i in range(iteration):
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return     
+
+# DOT       : c = X·Y
+def dot_pch(f, input_size, scaling):
+    '''
+        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        Z = X·Y
+        Scaling Factor 1 (x4)
+        row size: 8K
+        data memory: 32KB-> Max 4 Row
+        --- Iteration -------
+        LOAD -> BARRIER -> MAC (Partial Sum; 2 x num_working_bg) -> BARRIER -> 
+        SELF_EXEC_ON -> 
+        (if num_working_bg > 1) T_V_RED x (2xnum_working_bg) -> T_ADD -> T_S_RED
+        SELF_EXEC_OFF ->
+        WBD 1 
+        ---
+        Input: 8K
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63                 
+    '''
+
+    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+
+    # Input_size x 8 pch 
+    print(f"Working Bank Group: {num_working_bg}")
+    print(f"Iteration: {iteration}")
+    # Max NDP Instruction 8KB/8B=1K
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            for bg in range(num_working_bg):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+            for bg in range(num_working_bg):                
+                ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,1,bg,0,0,0,0))    
+            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))  
+            if num_working_bg > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["T_V_RED"],(2*num_working_bg),0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))  
+            ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],0,0,0,0,0,0,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))  
+            ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],0,0,0,0,0,0,0))  
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))   
+            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
+            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,0,0,0,0))                      
+            if iteration > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            if(len(ndp_inst_list) >= 1024):
+                print("Error: Over NDP Instruction Memory")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
+            for i in range(iteration):
+                # LOAD
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                # MAC
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                # for bg in range(num_working_bg):
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,100))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],0,ch,pch,0,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Error: Over NDP Instruction Memory")
+        exit(1)    
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return     
+
+# GEMV       : Z = GEMV
+
+def gemv_pch(f, input_size, scaling):
+    '''
+        input_size (vector): 8KB(4K), 16KB(8K), 32KB(16K), 64KB(32K), 128KB(64K)
+        Matrix Size(elements); 4K x 4K, 8K x 8K, 16K x 16K, ..
+        Tile Size = ch x pch x BG?       
+        Z = GEMV
+        Scaling Factor 1, 2, 4
+        row size: 8K or 16K
+        Need Tiling 
+        data memory: 32KB-> Max 4 Row
+        --- Iteration (Big Tile)-------
+        LOAD (Partial Vector)-> BARRIER -> 
+        MAC (Partial Sum; 2 x num_working_bg) x # of Tiles (Vertical)
+
+        WBD 1 
+        ---
+        Input: 8K
+        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63
+        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
+        COL:0-127 or 0-63                 
+    '''
+    # Based on the number of elements 
+    # Each Element is FP16 (2B)
+    if scaling == 4:
+        row_size = 8192
+        n_bg = 4
+    else:
+        row_size = 4096
+        n_bg = 8
+
+    # Data Memory Size: 32KB, 64KB, 128KB
+    # elements per access 
+    # x4:32, x8;64, x16; 128    
+    if scaling == 1:
+        max_p_vec_size  =  8192
+        n_per_acc = 32
+    elif scaling == 2:
+        max_p_vec_size  =  8192 * 2
+        n_per_acc = 64 
+    else:
+        max_p_vec_size  =  8192 * 4
+        n_per_acc = 128 
+
+    vec_size = int(mat_input_size_byte_list[input_size]/2)        
+
+    if scaling == 1:
+        opsize = 127
+    else:
+        opsize = 63
+
+    # Partial Vector Size
+    if max_p_vec_size > vec_size:
+        p_vec_size = vec_size
+        col_tile = 1
+    else:
+        p_vec_size = max_p_vec_size
+        col_tile = int(vec_size/p_vec_size)
+
+    # Require n_row for partial vector
+    if row_size > p_vec_size:
+            n_row_p_vec = 1
+    else:
+        n_row_p_vec = int(p_vec_size / row_size)
+
+    # each tile size 
+    if scaling == 4:
+        # BG x CH x PCH 
+        n_tile_row = n_bg * int(NUM_CHANNEL) * int(NUM_PSEUDOCHANNEL)
+    else: 
+        # BG x CH x PCH
+        n_tile_row = n_bg * int(NUM_CHANNEL) * int(NUM_PSEUDOCHANNEL)
+    n_tile_col = p_vec_size
+
+    # Tile Block Row (nTile)
+    tmp0 = n_row_p_vec * n_bg
+    if col_tile > 1:
+        tmp0 = tmp0 * 2
+    tmp1 = int(1024/tmp0)
+    if tmp1 >= 256:
+        n_tile_block_row = 256
+    elif tmp1 >= 128:
+        n_tile_block_row = 128
+    elif tmp1 >= 64:
+        n_tile_block_row = 64
+    elif tmp1 >= 32:
+        n_tile_block_row = 32
+    elif tmp1 >= 16:
+        n_tile_block_row = 16
+    else:
+        print("Error: too small n_tile_block_row")
+        exit(1)      
+
+    if col_tile > 1:
+        tmp2 = n_tile_block_row * n_row_p_vec * n_bg * 2
+    else:
+        tmp2 = n_tile_block_row * n_row_p_vec * n_bg
+    
+    if tmp2 > 1000:
+        n_tile_block_row = int(n_tile_block_row / 2)
+    # n_tile_block_row * n_row_p_vec * n_bg * 1 or 2 < 1024 
+    # Iteration Tile Block 
+    iteration_tile_block = int(vec_size/n_tile_block_row/n_tile_row)
+    # results vector colum size (block)
+    # n_tile_block_row*n_tile_row/(n_ch * n_pch)
+    n_partial_y =  n_tile_block_row*n_bg
+    # Vector Reduction --> 2 Partial Sum
+    post_n_it = int(int(n_partial_y) / (opsize + 1))
+    if post_n_it > n_bg:
+        print("Error.. wrong assumption post_n_it is less then n_bg")
+    opsize_v_rec = opsize
+    # if opsize_v_rec > 127:
+    #     print(f"Error: {opsize_v_rec} Over Opsize (128)")
+    #     exit(1)        
+    # Scalare Reduction --> 32 or 64 or 128 --> 1
+    opsize_s_rec = opsize_v_rec
+    if scaling == 1:
+        opsize_follow_s_rec = -1
+    else:
+        opsize_follow_s_rec = opsize_s_rec
+    
+    opsize_wbd = int(n_partial_y / n_per_acc)
+
+    # Tile Size 
+    # iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    extra_delay = 20
+    self_exec_delay = post_n_it * ((2 * opsize_v_rec) + extra_delay) + post_n_it * (2 * opsize_v_rec + extra_delay) + post_n_it * (2 * opsize_s_rec + extra_delay)
+    if opsize_follow_s_rec != -1:
+        self_exec_delay = post_n_it * (2 * opsize_follow_s_rec + extra_delay)
+
+    #  NDP clocks run four times slower than regular clocks.
+    self_exec_delay = self_exec_delay * 4
+    
+    # Input_size x 8 pch 
+    print(f"vec_size:                {vec_size}")
+    print(f"max_p_vec_size:          {max_p_vec_size}")
+    print(f"p_vec_size:              {p_vec_size}")
+    print(f"col_tile:                {col_tile}")
+    print(f"n_row_p_vec:             {n_row_p_vec}")
+    print(f"n_tile_row:              {n_tile_row}")
+    print(f"n_tile_col:              {n_tile_col}")
+    print(f"iteration_tile_block:    {iteration_tile_block}")
+    print(f"self_exec_delay:         {self_exec_delay}")
+    print(f"post_n_it:               {post_n_it}")
+    print(f"opsize_v_rec:            {opsize_v_rec}")    
+    print(f"opsize_s_rec:            {opsize_s_rec}")    
+    print(f"opsize_follow_s_rec:     {opsize_follow_s_rec}")    
+    print(f"opsize_wbd:              {opsize_wbd}")
+    
+    # Write DRAM (Vector Data)
+    n_wr_dram_row = int(vec_size/row_size)
+    for ro in range(n_wr_dram_row):
+        for co in range(int(NUM_COL)):
+            for ch in range(int(NUM_CHANNEL)):
+               for pch in range(int(NUM_PSEUDOCHANNEL)):   
+                   for bg in range(n_row_p_vec):
+                       write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, 0, 1000 + ro, co))           
+        
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
+            ndp_inst_list = []
+            jump_pc = len(ndp_inst_list)
+            # Block-level GEMV
+            # Load Partial Vector to Data Memory
+            for bg in range(n_row_p_vec):
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+            # MAC Operation 
+            for _ in range(n_tile_block_row):
+                # Each Tile GEMV
+                for _ in range(n_row_p_vec): 
+                    for bg in range(n_bg):                
+                        ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))
+            # Column-wise gemv ops
+            if col_tile > 1:
+                for bg in range(n_row_p_vec):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                for _ in range(n_tile_block_row):
+                    for _ in range(n_row_p_vec):
+                        for bg in range(n_bg):                
+                            ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))                
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            # Partial-Sum Vector 
+            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))
+            for bg in range(post_n_it):
+                ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            # Scalar Reduction
+            for bg in range(post_n_it):
+                ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            if opsize_follow_s_rec != -1:
+                for bg in range(post_n_it):            
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
+            # WBD
+            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,0,0,0,0)) 
+
+            if iteration_tile_block > 1:
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration_tile_block,jump_pc,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+
+            if(len(ndp_inst_list) >= 1024):
+                print(f"Error: Over NDP Instruction Memory {len(ndp_inst_list)}")
+                exit(1)
+            dump_ndp_inst(f,ndp_inst_list,ch,pch)
+
+    # Generate NDP Start Request 
+    data_array = [0] * 8
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):  
+            idx = ch * 4 + pch     
+            data_array[idx] = 1   
+    
+    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
+    # Make 2-D NDL-Launch Request Inst
+    acc_inst_list = [[ ]]
+    acc_inst_list_num = [[ ]]
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            acc_inst_list.append([])
+            acc_inst_list_num.append(0)
+    # Start NDP ops (HSNU-Ctrl Access Info Buffer)
+    # Type / Opsize/ Channel/ Pseudo-Channel/ BG/ BK / ROW/ COL/ ID / Reserved
+    for ch in range(int(NUM_CHANNEL)):
+        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+            idx = ch * int(NUM_PSEUDOCHANNEL) + pch
+            for i in range(iteration_tile_block):
+                # Load Partial Vector
+                for bg in range(n_row_p_vec):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                # MAC Operation 
+                for t_tile in range(n_tile_block_row):
+                    # Each Tile GEMV
+                    for n_row in range(n_row_p_vec):                 
+                        for bg in range(n_bg):
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if col_tile > 1:
+                    # Load Partial Vector
+                    for bg in range(n_row_p_vec):
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                    # MAC Operation 
+                    for t_tile in range(n_tile_block_row):
+                        # Each Tile GEMV
+                        for n_row in range(n_row_p_vec):                 
+                            for bg in range(n_bg):
+                                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
+                             
+                # Wait Self Execution (N-Cycle)
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,self_exec_delay)) #self_exec_delay
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,0,(7000+i),0,0,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
+
+    # Reshape 2-D NDL-Lauch Request Lists to 1-D List
+    if(len(acc_inst_list) >= 1024):
+        print("Warning: Over NDP Access Request Memory")
+    dump_ndp_acc_inst_2d(f,acc_inst_list,0)
+       
+    return         
 
 def axpby_normal(f, input_size):
     '''
@@ -669,7 +1457,7 @@ def axpbypcz_normal(f, input_size):
     #     write_normal_trace(f,'ST',des_W_addr)        
     #     des_W_addr+=BURST_SIZE    
 
-def generate_trace(workload, size,output_path='',is_ndp_ops=True):
+def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor=-1):
     # if seed is not None:
     #     #random.seed(seed)
 
@@ -680,26 +1468,54 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True):
         print("Error: Not Valid Workload")
         exit(1)
 
-    if size in input_size_list:
-        file_name = size + "_" + file_name
+    if workload == "GEMV":
+        if size in mat_input_size_list:
+            file_name = size + "_" + file_name        
+        else:
+            print("Error: Wrong Input Size")
+            exit(1)
     else:
-        print("Error: Wrong Input Size")
-        exit(1)
+        if size in input_size_list:
+            file_name = size + "_" + file_name
+        else:
+            print("Error: Wrong Input Size")
+            exit(1)
 
     if is_ndp_ops:
-        file_name = "ndp_" + file_name
+        if scaling_factor == 1:
+            file_name = "ndp_4x_" +  file_name 
+        elif scaling_factor == 2: 
+            file_name = "ndp_8x_" +  file_name 
+        elif scaling_factor == 4: 
+            file_name = "ndp_16x_" +  file_name 
+        else:
+            print("Error: Wrong Input Size")
+            exit(1)
     else: 
         file_name = "non_ndp_" + file_name
     
+    # Set Address Mapping Scheme 
+    config_scale_factor(scaling_factor)
+
     file_name = output_path + "/" + file_name
-    # Size: 8K, 32K, 64K, 128K, 512K, 8M
+    # Size: "8K","32K","128K","512K","2M","8M" (GEMV: 8K, 16K, 32K, 64K, 128K)
     # workload: "AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT", "SCAL", "GEMV"
     with open(file_name, 'w') as f:      
         if is_ndp_ops:
             if workload == "AXPBY":
-                axpby_pch(f,size)
+                axpby_pch(f,size,scaling_factor)
             elif workload == "AXPBYPCZ":
-                axpbypcz_pch(f,size)
+                axpbypcz_pch(f,size,scaling_factor)
+            elif workload == "AXPY":
+                axpy_pch(f,size,scaling_factor)          
+            elif workload == "COPY":
+                copy_pch(f,size,scaling_factor)          
+            elif workload == "XMY":
+                xmy_pch(f,size,scaling_factor)                                    
+            elif workload == "DOT":
+                dot_pch(f,size,scaling_factor)  
+            elif workload == "GEMV":
+                gemv_pch(f,size,scaling_factor)                                            
             else:
                 print("Error: Not Implemented Workload")
                 exit(1)
@@ -712,7 +1528,7 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True):
                 print("Error: Not Implemented Workload")
                 exit(1)
 
-    print(f"Generated memory traces in '{file_name}'.")
+    print(f"-> Generated memory traces in '{file_name}'.")
 
 def crete_folder(folder_path):
     if not os.path.exists(folder_path):
@@ -723,9 +1539,6 @@ if __name__ == '__main__':
     print(" Generate NDP Workload  ")    
     print(" ========================================================================  ")
 
-
-    # generate_trace("AXPBYPCZ", "512K","trace/ndp",is_ndp_ops=True)
-    # exit(1)
     # make generated trace output path 
     ndp_trace_path = "trace/ndp"
     non_ndp_trace_path = "trace/non_ndp"
@@ -739,9 +1552,30 @@ if __name__ == '__main__':
     print(" - Non-NDP Workload Path: ",non_ndp_trace_path)
 
     for size in input_size_list:
-        generate_trace("AXPBY", size,ndp_trace_path,is_ndp_ops=True)
-        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True)
+        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
+        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
+        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)
+        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
+        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
+        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
+        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
+        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
+        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)        
+        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
+        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
+        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)     
+        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
+        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
+        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)                
+        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
+        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
+        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
 
-    for size in input_size_list:
-        generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
-        generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
+    for size in mat_input_size_list:
+        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
+        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
+        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
+        
+    # for size in input_size_list:
+    #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
+    #     generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
