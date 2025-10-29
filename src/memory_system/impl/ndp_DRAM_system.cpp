@@ -1097,7 +1097,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt == pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opsize) {
           // Remove Done Request
           pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].begin() + slot_idx);
-          DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "One NL-Req Done! Remove from addresss Generator Slot");
+          std::string msg = std::string(" One NL-Req Done! Remove from addresss Generator Slot (Remained ") + std::to_string(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size()) + std::string(" inst)");
+          DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, msg);
         } else {
           pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt++;
           pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col++;

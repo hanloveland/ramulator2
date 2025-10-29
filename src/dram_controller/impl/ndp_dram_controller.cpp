@@ -2,6 +2,13 @@
 #include "memory_system/memory_system.h"
 
 // #define PRINT_DB_CNT
+// #define PRINT_DEBUG
+
+#ifdef PRINT_DEBUG
+#define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)
+#else
+#define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do {} while(0)
+#endif
 
 namespace Ramulator {
 
@@ -347,9 +354,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         if (req.type_id == Request::Type::Read) {
           // RD, RDA, NDP_DB_RD, NDP_DRAM_RD
           is_success = m_read_buffers[req.addr_vec[psuedo_ch_idx]].enqueue(req);
+          std::string msg = std::string(" Insert RD Request to read_buffer ( ") + std::to_string(req.addr) + std::string(" )");
+          DEBUG_PRINT(m_clk, "Memory Controller", -1, -1, msg);          
         } else if (req.type_id == Request::Type::Write) {
           // WR, WRA, NDP_DB_WR, NDP_DRAM_WR
           is_success = m_write_buffers[req.addr_vec[psuedo_ch_idx]].enqueue(req);       
+          std::string msg = std::string(" Insert WR Request to write_buffer ( ") + std::to_string(req.addr) + std::string(" )");
+          DEBUG_PRINT(m_clk, "Memory Controller", -1, -1, msg);                    
         } else {
           throw std::runtime_error("Invalid request type!");
         }
@@ -747,6 +758,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             buffer->remove(req_it);
             // is_success = m_prefetched_buffer.enqueue(new_req);
             is_success = m_wr_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].enqueue(new_req);
+            std::string msg = std::string(" Remove Request from Buffer ") + std::to_string(buffer->size()) + std::string(")");
+            DEBUG_PRINT(m_clk, "Memory Controller", -1, -1, msg);              
             // std::cout<<"[NDP_DRAM_CTRL] Generate POST_WR and Enqueue to WR_PREFETCH_BUFFER"<<std::endl;
             if(!is_success) {
               throw std::runtime_error("Fail to enque to m_wr_prefetch_buffers");
@@ -762,6 +775,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             bool is_success = false;              
 
             buffer->remove(req_it);
+            std::string msg = std::string(" Remove Request from Buffer (remained ") + std::to_string(buffer->size()) + std::string(" )");
+            DEBUG_PRINT(m_clk, "Memory Controller", -1, -1, msg);              
             // is_success = m_prefetched_buffer.enqueue(new_req);
             is_success = m_rd_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].enqueue(new_req);
             if(!is_success) {
@@ -769,6 +784,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             }                    
           } else {
             buffer->remove(req_it);
+            std::string msg = std::string(" Remove Request from Buffer (remained ") + std::to_string(buffer->size()) + std::string(" )");
+            DEBUG_PRINT(m_clk, "Memory Controller", -1, -1, msg);            
           }
         } else {
           if (m_dram->m_command_meta(req_it->command).is_opening) {

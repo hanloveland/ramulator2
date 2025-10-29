@@ -611,7 +611,9 @@ class DDR5PCH : public IDRAM, public Implementation {
 
               if(ndp_inst_slot_per_pch[pch_idx].size() < m_num_ndp_inst_slot) {
 
-                // std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
+                #ifdef PRINT_DEBUG
+                std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
+                #endif
                 Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
 
                 if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
@@ -690,7 +692,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string("NDP status : ") + std::string(m_ndp_status(ndp_status_per_pch[pch_idx]))));                                              
                               throw std::runtime_error("NDP Unit start when is not idle");
                             } else {
-                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch,"Start NDP Operation");                                              
+                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");           
                               ndp_status_per_pch[pch_idx] = m_ndp_status("run");
                             }
                           }                        
@@ -699,7 +701,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                     } else {
                       // Return NDP Status to Host
                       ndp_rd_config_reg_per_pch[pch_idx].push_back(ndp_status_per_pch[pch_idx]);
-                      // std::cout<<"DRAM["<<pch_idx<<"] NDP Status :"<<ndp_status_per_pch[pch_idx]<<std::endl;
+                      std::string msg = std::string(" Read NDP CONF REG: ") + std::to_string(ndp_status_per_pch[pch_idx]);
+                      DEBUG_PRINT(m_clk, "NDP Unit", -1, pch_idx,msg);  
                     }
 
                   } else if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ins_mem_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ins_mem_access_bg) {
@@ -860,6 +863,8 @@ class DDR5PCH : public IDRAM, public Implementation {
             pipe_ndp_addr_per_pch[pch_idx].erase(pipe_ndp_addr_per_pch[pch_idx].begin());
             pipe_ndp_id_per_pch[pch_idx].erase(pipe_ndp_id_per_pch[pch_idx].begin());
             pipe_ndp_payload_valid_per_pch[pch_idx].erase(pipe_ndp_payload_valid_per_pch[pch_idx].begin());
+            std::string msg = std::string(" DB Send NDP Request to NDP Unit! (Remained in Pipe ") + std::to_string(pipe_ndp_latency_per_pch[pch_idx].size()) + std::string(" inst)");
+            DEBUG_PRINT(m_clk, "NDP Unit", -1, pch_idx, msg);  
             // std::cout<<"["<<m_clk<<"] CH["<<ndp_addr_per_pch[pch_idx][m_levels["channel"]]<<"] PCH["<<ndp_addr_per_pch[pch_idx][m_levels["pseudochannel"]];
             // std::cout<<"] ISSUE COMMAND from DB to NDP : "<<m_commands(ndp_cmd_per_pch[pch_idx])<<std::endl;
           }
@@ -929,7 +934,9 @@ class DDR5PCH : public IDRAM, public Implementation {
       pipe_ndp_latency_per_pch[pch_idx].push_back(10);
       pipe_ndp_cmd_per_pch[pch_idx].push_back(command);
       pipe_ndp_addr_per_pch[pch_idx].push_back(addr_vec);      
-      pipe_ndp_id_per_pch[pch_idx].push_back(thread_id);      
+      pipe_ndp_id_per_pch[pch_idx].push_back(thread_id);    
+      std::string msg = std::string(" Issue NDP Command to DIMM : ") + std::string(m_commands.at(command));
+      DEBUG_PRINT(m_clk, "Memory Controller", addr_vec[m_levels["channel"]], addr_vec[m_levels["pseudochannel"]], msg);          
     }
 
     int get_ndp_response(int ch_id, int pch_id) override {
@@ -953,7 +960,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         return false;
       } else {
         // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"        
-        if(ndp_status == m_ndp_status("idle") || ndp_status == m_ndp_status("run") || ndp_status == m_ndp_status("done")) {
+        if(ndp_status == m_ndp_status("idle") || ndp_status == m_ndp_status("run") || ndp_status == m_ndp_status("done") || ndp_status == m_ndp_status("wait_done")) {
           return true;
         } else {
           return false;
