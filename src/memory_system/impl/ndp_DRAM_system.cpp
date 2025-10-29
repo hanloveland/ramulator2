@@ -5,6 +5,7 @@
 #include "dram/dram.h"
 
 // #define NDP_DEBUG
+#define DIMM_LVL_BUF
 
 #ifdef NDP_DEBUG
 #define DEBUG_PRINT(clk, unit_str, dimm_id, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] DIMM["<<dimm_id<<"] PCH["<<pch<<"] "<<msg<<std::endl; } while(0)
@@ -53,10 +54,13 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     };
     // DIMM-level request buffer 
     std::vector<std::vector<uint64_t>>                    dimm_lvl_req_buffer;
+    std::vector<std::vector<std::vector<uint64_t>>>       pch_lvl_req_buffer;
     std::vector<std::vector<uint64_t>>                    dimm_lvl_req_pch_addr;
-    int                                                   m_max_req_buffer_cap;
+    int                                                   m_max_req_buffer_cap_per_dimm;
+    int                                                   m_max_req_buffer_cap_per_pch;
     // PCH-level Status Reg pch_lvl_hsnc_status[DIMM_ID][PCH_ID]
     std::vector<std::vector<NDP_CTRL_STATUS>>             pch_lvl_hsnc_status;
+    std::vector<std::vector<bool>>                        pch_lvl_polling;
     // PCH-level REQ slot pch_lvl_hsnc_nl_req_slot[DIMM_ID][PCH_ID][SLOT_IDX]
     std::vector<std::vector<std::vector<uint64_t>>>       pch_lvl_hsnc_nl_req_slot;
     int                                                   pch_lvl_hsnc_nl_req_slot_max;
@@ -70,6 +74,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     // PCH-level HSNC Fixed Latency Wait [DIMM_ID][PCH_ID]
     std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_gen_wait_cnt;
     std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_gen_wait_cycle;    
+    std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_empty_cnt;   
+    std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_wait_cnt;   
+
+    std::vector<std::vector<std::vector<int>>>            pch_hsnc_status_cnt;
 
     bool                                                  all_ndp_idle;
     bool                                                  all_nl_req_buffer_empty;
@@ -148,7 +156,49 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       // NDP Controller Address
       ndp_ctrl_row = (m_dram->get_level_size("row") - 1);
-      if(m_dram->m_organization.dq == 16) {
+      if(m_dram->m_ndp_scaling == 1) {
+        // x4 DRAM
+        ndp_ctrl_bk     = 3;
+        ndp_ctrl_bg     = 7;
+        ndp_ctrl_buf_bk = 3;
+        ndp_ctrl_buf_bg = 6;
+        // x4 DRAM with 8BG and 4 BK per BG
+        db_ndp_ctrl_access_bk      = 3;
+        db_ndp_ctrl_access_bg      = 5;
+        db_ndp_ins_mem_access_bk   = 3;
+        db_ndp_ins_mem_access_bg   = 4;
+        db_ndp_dat_mem_access_bk   = 3;
+        db_ndp_dat_mem_access_bg   = 3; // BG0-BG3        
+      } else if(m_dram->m_ndp_scaling == 2) {
+        // x8 DRAM
+        ndp_ctrl_bk     = 3;
+        ndp_ctrl_bg     = 7;
+        ndp_ctrl_buf_bk = 3;
+        ndp_ctrl_buf_bg = 6;
+        // x8 DRAM with 8BG and 4 BK per BG
+        db_ndp_ctrl_access_bk      = 3;
+        db_ndp_ctrl_access_bg      = 5;
+        db_ndp_ins_mem_access_bk   = 3;
+        db_ndp_ins_mem_access_bg   = 4;
+        db_ndp_dat_mem_access_bk   = 3; // BK2-BK3
+        db_ndp_dat_mem_access_bg   = 3; // BG0-BG3        
+      } else if(m_dram->m_ndp_scaling == 4) {
+        // x16 DRAM
+        ndp_ctrl_bk     = 3;
+        ndp_ctrl_bg     = 3;
+        ndp_ctrl_buf_bk = 3;
+        ndp_ctrl_buf_bg = 2;
+        // x16 DRAM with 4BG and 4 BK per BG
+        db_ndp_ctrl_access_bk      = 3;
+        db_ndp_ctrl_access_bg      = 1;
+        db_ndp_ins_mem_access_bk   = 3;
+        db_ndp_ins_mem_access_bg   = 0;
+        db_ndp_dat_mem_access_bk   = 2; // BK1-BK2
+        db_ndp_dat_mem_access_bg   = 3; // BG0-BG3
+      } else {
+        throw std::runtime_error("Wrong NDP Scaling Factor!!!");
+      }
+      if(m_dram->m_ndp_scaling == 4) {
         ndp_ctrl_bk     = 3;
         ndp_ctrl_bg     = 3;
         ndp_ctrl_buf_bk = 3;
@@ -161,17 +211,6 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         db_ndp_dat_mem_access_bk   = 2;
         db_ndp_dat_mem_access_bg   = 3; // BG0-BG3
       } else {
-        ndp_ctrl_bk     = 3;
-        ndp_ctrl_bg     = 7;
-        ndp_ctrl_buf_bk = 3;
-        ndp_ctrl_buf_bg = 6;
-        // x4/x8 DRAM with 8BG and 4 BK per BG
-        db_ndp_ctrl_access_bk      = 3;
-        db_ndp_ctrl_access_bg      = 5;
-        db_ndp_ins_mem_access_bk   = 3;
-        db_ndp_ins_mem_access_bg   = 4;
-        db_ndp_dat_mem_access_bk   = 2;
-        db_ndp_dat_mem_access_bg   = 3; // BG0-BG3        
       }
 
       m_logger->info(" NDP Address Configuration");
@@ -183,7 +222,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       row_addr_idx  = m_dram->m_levels("row");
       bg_addr_idx   = m_dram->m_levels("bankgroup");
       bk_addr_idx   = m_dram->m_levels("bank");
-      col_addr_idx   = m_dram->m_levels("column");
+      col_addr_idx  = m_dram->m_levels("column");
 
       // deprecated code
       /*
@@ -260,10 +299,13 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       // Each DIMM has 1K (128x8) Element (MAX)
       dimm_lvl_req_buffer.resize(m_num_dimm,std::vector<uint64_t>(0,0));
       dimm_lvl_req_pch_addr.resize(m_num_dimm,std::vector<uint64_t>(0,0));
-      m_max_req_buffer_cap = 1024;
+      pch_lvl_req_buffer.resize(m_num_dimm,std::vector<std::vector<uint64_t>>(m_num_subch*num_pseudochannel,std::vector<uint64_t>(0,0)));
+      m_max_req_buffer_cap_per_dimm = 1024;
+      m_max_req_buffer_cap_per_pch = m_max_req_buffer_cap_per_dimm / (m_num_subch*num_pseudochannel);
 
       // PCH_level Host-Side NDP Controller
       pch_lvl_hsnc_status.resize(m_num_dimm,std::vector<NDP_CTRL_STATUS>(m_num_subch*num_pseudochannel,NDP_IDLE));      
+      pch_lvl_polling.resize(m_num_dimm,std::vector<bool>(m_num_subch*num_pseudochannel,false));      
 
       // nl-req slot at each pch Fixed to 8 (64B/64)
       pch_lvl_hsnc_nl_req_slot_max = 16;      
@@ -278,7 +320,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       // Address Generator Wait Counter and Wait Cycle
       pch_lvl_hsnc_nl_addr_gen_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,-1));
-      pch_lvl_hsnc_nl_addr_gen_wait_cycle.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,-1));      
+      pch_lvl_hsnc_nl_addr_gen_wait_cycle.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,-1));    
+      pch_lvl_hsnc_nl_addr_empty_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
+      pch_lvl_hsnc_nl_addr_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
+      pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<int>>(m_num_subch*num_pseudochannel,std::vector<int>(8,0)));     
+    
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override { }
@@ -335,22 +381,52 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       }
 
       // Loop All DIMM 
+      
       bool dimm_lvl_buf_empty = true;
-      for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-        // Check to send nl-req to target pch 
-        if(!dimm_lvl_req_pch_addr[dimm_id].empty()) {
-          dimm_lvl_buf_empty = false;
-          int pch_id = dimm_lvl_req_pch_addr[dimm_id][0];
-          // if target pch is empty, fetch nl-req to target pch hsnc
-          if((pch_lvl_hsnc_nl_req_slot_max - pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size()) >= 8) {
-            for(int i=0;i<8;i++) {
-              pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].push_back(dimm_lvl_req_buffer[dimm_id][0]);
-              // std::cout<<" nl_buf -> nl_req_slot :"<<std::hex<<dimm_lvl_req_buffer[dimm_id][0]<<std::endl;
-              // remove 8 nl-req from dimm_lvl_req_buffer 
-              dimm_lvl_req_buffer[dimm_id].erase(dimm_lvl_req_buffer[dimm_id].begin() + 0);
+      #ifdef DIMM_LVL_BUF
+        // DIMM-level Address Buffer
+        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+          // Check to send nl-req to target pch 
+          if(!dimm_lvl_req_pch_addr[dimm_id].empty()) {
+            dimm_lvl_buf_empty = false;
+            int pch_id = dimm_lvl_req_pch_addr[dimm_id][0];
+            // if target pch is empty, fetch nl-req to target pch hsnc
+            if((pch_lvl_hsnc_nl_req_slot_max - pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size()) >= 8) {
+              for(int i=0;i<8;i++) {
+                pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].push_back(dimm_lvl_req_buffer[dimm_id][0]);
+                // std::cout<<" nl_buf -> nl_req_slot :"<<std::hex<<dimm_lvl_req_buffer[dimm_id][0]<<std::endl;
+                // remove 8 nl-req from dimm_lvl_req_buffer 
+                dimm_lvl_req_buffer[dimm_id].erase(dimm_lvl_req_buffer[dimm_id].begin() + 0);
+              }
+              // remove target pch idx from dimm_lvl_req_pch_addr
+              dimm_lvl_req_pch_addr[dimm_id].erase(dimm_lvl_req_pch_addr[dimm_id].begin() + 0);
             }
-            // remove target pch idx from dimm_lvl_req_pch_addr
-            dimm_lvl_req_pch_addr[dimm_id].erase(dimm_lvl_req_pch_addr[dimm_id].begin() + 0);
+          } 
+        }
+      #else
+        // PCH-level Address Buffer
+        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+          // Check to send nl-req to target pch 
+          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+            if(!pch_lvl_req_buffer[dimm_id][pch_id].empty()) {
+              dimm_lvl_buf_empty = false;
+              // if((pch_lvl_hsnc_nl_req_slot_max - pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size()) >= 8) {
+              if((pch_lvl_hsnc_nl_req_slot_max > pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size())) {
+                // for(int i=0;i<8;i++) {
+                  pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].push_back(pch_lvl_req_buffer[dimm_id][pch_id][0]);
+                  // remove 8 nl-req from pch_lvl_req_buffer 
+                  pch_lvl_req_buffer[dimm_id][pch_id].erase(pch_lvl_req_buffer[dimm_id][pch_id].begin() + 0);
+                // }              
+              }
+            }
+          }
+        }            
+      #endif       
+
+      for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+        for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+          if(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].empty()) {
+            pch_lvl_hsnc_nl_addr_empty_cnt[dimm_id][pch_id]++;
           }
         }
       }
@@ -370,7 +446,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // NDP Status: NDP IDLE 
 
             // Do Nothing!!
-
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_IDLE]++;
           } // NDP Status: NDP IDLE End
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_ISSUE_START) {
             // NDP Status: NDP_ISSUE_START
@@ -397,7 +473,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_ISSUE_START to NDP_BEFORE_RUN");
               }
             }
-
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_ISSUE_START]++;
           } // NDP Status: NDP_ISSUE_START END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_BEFORE_RUN) {
             // NDP Status: NDP_BEFORE_RUN 
@@ -408,6 +484,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_BEFORE_RUN to NDP_RUN");
             }
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BEFORE_RUN]++;
           } // NDP Status: NDP_BEFORE_RUN END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_RUN) {
             // NDP Status: NDP_RUN 
@@ -429,10 +506,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT_RES;
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT_RES");                
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("WAIT")) {
-                pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT_RES;
+                pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT;
                 pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = 0;
                 pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = nl_req.etc;              
-                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT");
+                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT");                
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("DONE")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_DONE;
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_DONE");
@@ -446,7 +523,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 throw std::runtime_error("Invalid NDP-Lanuch Request Opcode!!");                
               }           
             }           
-
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_RUN]++;
           } // NDP Status: NDP_RUN END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_BAR) {
             // NDP Status: NDP_BAR 
@@ -461,25 +538,61 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             
             // send NDP Request from NDP-lanuch Request and send to read/write queue of memory controller
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
-
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BAR]++;
           } // NDP Status: NDP_BAR END          
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_WAIT_RES) {
             // NDP Status: NDP_WAIT_RES 
 
             throw std::runtime_error("NDP_WAIT_RES Not Implemented!!");
-
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT_RES]++;
           } // NDP Status: NDP_WAIT_RES END             
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_WAIT) {
+            pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]++;
             // NDP Status: NDP_WAIT 
             if(pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] == pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id]) {
-              pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
-              DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_WAIT to NDP_RUN");
-              pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = -1;
-              pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = -1;
+              // Issue NDP RD for CONF_REG 
+              int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
+              int pch_id_per_subch = pch_id%num_pseudochannel;                
+              if(pch_lvl_polling[dimm_id][pch_id]) {
+                // issued NDP Polling Request and Wait
+                int ndp_status = m_controllers[ch_id]->get_config_reg_resp(pch_id_per_subch);
+                
+                // If the ndp_status is capable of issuing a new reques
+                if(ndp_status == -1) {
+                  // Wait More Time to get response
+                } else if(m_dram->is_ndp_issuable(ndp_status)) {
+                  // std::cout<<"["<<m_clk<<"] HSNC NDP_WAIT --> to NDP_RUN"<<dimm_id<<"/ "<<pch_id<<std::endl;
+                  pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
+                  DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_WAIT to NDP_RUN");
+                  pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = -1;
+                  pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = -1;
+                  pch_lvl_polling[dimm_id][pch_id] = false;
+                } else {
+                  // Need more time for NDP unit to issue new request and reset pch_lvl_polling to false
+                  // std::cout<<"["<<m_clk<<"] HSNC NDP is not Ready (reissue NDP RD CONF REG)"<<dimm_id<<"/ "<<pch_id<<std::endl;
+                  pch_lvl_polling[dimm_id][pch_id] = false;
+                  pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]   = 0;
+                  pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = 64*10;                  
+                }
+                
+              } else {
+                Request req = Request(0,Request::Type::Read);
+                m_addr_mapper->apply(req);
+                req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
+                req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
+                req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
+                req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
+                req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
+                req.is_ndp_req = true;
+                if(m_controllers[ch_id]->send(req)) {
+                  pch_lvl_polling[dimm_id][pch_id] = true;
+                  // std::cout<<"["<<m_clk<<"] HSNC Issue NDP RD CONFG REQ "<<dimm_id<<" / "<<pch_id<<std::endl;
+                }                
+              }                            
             } else {
               pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]++;
             }          
-            
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT]++;
           } // NDP Status: NDP_WAIT END               
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_DONE) {
             // NDP Status: NDP_DONE 
@@ -494,7 +607,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             
             // send NDP Request from NDP-lanuch Request and send to read/write queue of memory controller
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
-            
+            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_DONE]++;
           } // NDP Status: NDP_WAIT END
         } // LOOP-PCH END
       } // LOOP-DIMM END
@@ -759,32 +872,41 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         if(req.type_id == Request::Type::Write) {
           // Each DIMM has two Channel (i.e., sub-channel)
           int dimm_id = req.addr_vec[0]/2;
-          if(dimm_lvl_req_buffer[dimm_id].size() < m_max_req_buffer_cap) {
-            // Each Channel has four pseudo-channels
-            int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];
-            DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "NDP Ctrl nl-req from host");
-            dimm_lvl_req_pch_addr[dimm_id].push_back(pch_id);
-            for(uint32_t i=0;i<req.m_payload.size();i++) {
-              dimm_lvl_req_buffer[dimm_id].push_back(req.m_payload[i]);
-              // std::cout<<"host -> nl_req_buf : 0x"<<std::hex<<req.m_payload[i]<<std::endl;
+          int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];                    
+          #ifdef DIMM_LVL_BUF
+            // DIMM-level Request Buffer          
+            if(dimm_lvl_req_buffer[dimm_id].size() < m_max_req_buffer_cap_per_dimm) {
+              // Each Channel has four pseudo-channels
+              DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "NDP Ctrl nl-req from host");
+              dimm_lvl_req_pch_addr[dimm_id].push_back(pch_id);
+              for(uint32_t i=0;i<req.m_payload.size();i++) {
+                dimm_lvl_req_buffer[dimm_id].push_back(req.m_payload[i]);
+                // std::cout<<"host -> nl_req_buf : 0x"<<std::hex<<req.m_payload[i]<<std::endl;
+              }
+
+              all_nl_req_buffer_empty = false;
+              return true;
+            } else {
+              // dimm_level req_buffer is full
+              return false;
             }
+          #else 
+            // PCH-level Request Buffer 
+            if((m_max_req_buffer_cap_per_pch - pch_lvl_req_buffer[dimm_id][pch_id].size()) >= 8) {
+              // Each Channel has four pseudo-channels
+              DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "NDP Ctrl nl-req from host");            
+              for(uint32_t i=0;i<req.m_payload.size();i++) {
+                pch_lvl_req_buffer[dimm_id][pch_id].push_back(req.m_payload[i]);
+                // std::cout<<"host -> nl_req_buf : 0x"<<std::hex<<req.m_payload[i]<<std::endl;
+              }
 
-            all_nl_req_buffer_empty = false;
-            return true;
-          } else {
-            // dimm_level req_buffer is full
-            return false;
-          }
-
-          // Deprecated Code
-          /*
-          if(req.m_payload.size() > 0) {
-            for(uint32_t i=0;i<req.m_payload.size();i++) {
-              ndp_access_infos[req.addr_vec[col_addr_idx]*8 + i] = decode_acc_inst(req.m_payload[i]);
-            }
-          }
-          */
-
+              all_nl_req_buffer_empty = false;
+              return true;
+            } else {
+              // dimm_level req_buffer is full
+              return false;
+            }        
+          #endif       
         } else {
           // Read Access Req? 
           throw std::runtime_error("Not Allow NL-Req Buffer Read (Not Implemented)");
@@ -802,7 +924,110 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       }
 
       if(all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty) {
+        int m_num_dimm   = num_channels / 2;
+        int m_num_subch  = 2;
+        int num_pseudochannel = m_dram->get_level_size("pseudochannel");         
         std::cout<<"["<<m_clk<<"] [NDP_DRAM_System] All Request Done!!! (+NDP Ops)"<<std::endl;
+
+        std::cout<<"NDP Request Launch Empty Count ([DIMM][PCH])"<<std::endl;
+        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_empty_cnt[dimm_id][pch_id]<<std::endl;
+          }
+        }
+
+        std::cout<<"NDP Request Address Generation Block Count"<<std::endl;
+        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]<<std::endl;
+          }
+        }        
+        
+        std::cout<<"Host-NDP Ctrl Status Stats (total cycle: "<<m_clk<<")"<<std::endl;
+        std::cout<<"   - Each PCH per DIMM"<<std::endl;        
+        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+        for(int ndp_stat=0;ndp_stat<8;ndp_stat++) {
+          switch (ndp_stat)
+          {
+          case 0:
+            std::cout<<"[NDP_IDLE]            | ";          
+            break;          
+          case 1:            
+            std::cout<<"[NDP_ISSUE_START]     | ";
+            break;
+          case 2:            
+            std::cout<<"[NDP_BEFORE_RUN]      | ";
+            break;
+          case 3:                        
+            std::cout<<"[NDP_RUN]             | ";
+            break;
+            case 4:                                    
+            std::cout<<"[NDP_BAR]             | ";
+            break;
+          case 5:
+            std::cout<<"[NDP_WAIT_RES]        | ";
+            break;
+          case 6:
+            std::cout<<"[NDP_WAIT]            | ";
+            break;
+          case 7:
+            std::cout<<"[NDP_DONE]            | ";
+            break;
+          default:
+            break;
+          }
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                std::cout<<pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat];
+                if(pch_id != (m_num_subch*num_pseudochannel - 1))
+                  std::cout<<" | ";
+            }
+          }
+          std::cout<<std::endl;              
+        }          
+        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+        for(int ndp_stat=0;ndp_stat<8;ndp_stat++) {
+          switch (ndp_stat)
+          {
+          case 0:
+            std::cout<<"[NDP_IDLE]            | ";          
+            break;          
+          case 1:            
+            std::cout<<"[NDP_ISSUE_START]     | ";
+            break;
+          case 2:            
+            std::cout<<"[NDP_BEFORE_RUN]      | ";
+            break;
+          case 3:                        
+            std::cout<<"[NDP_RUN]             | ";
+            break;
+          case 4:                                    
+            std::cout<<"[NDP_BAR]             | ";
+            break;
+          case 5:
+            std::cout<<"[NDP_WAIT_RES]        | ";
+            break;
+          case 6:
+            std::cout<<"[NDP_WAIT]            | ";
+            break;
+          case 7:
+            std::cout<<"[NDP_DONE]            | ";
+            break;
+          default:
+            break;
+          }
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                float val = (float)pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat] / (float)m_clk;
+                std::cout<<val;
+                if(pch_id != (m_num_subch*num_pseudochannel - 1))
+                  std::cout<<" | ";
+            }
+          }
+          std::cout<<std::endl;  
+        }          
+        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;            
+        
       }
       return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
     }

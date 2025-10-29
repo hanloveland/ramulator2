@@ -425,6 +425,14 @@ class DDR5 : public IDRAM, public Implementation {
     void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload) override {
     }
 
+    int get_ndp_response(int ch_id, int pch_id) override {
+      return 0;
+    }
+
+    bool is_ndp_issuable(int ndp_status) override {
+      return false;
+    }
+
   private:
     void set_organization() {
       // Channel width

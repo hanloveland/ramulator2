@@ -24,14 +24,14 @@ MemorySystem:
       channel: 2
       rank: 4
     timing:
-      preset: DDR5_3200AN 
+      preset: DDR5_4800B
     RFM:
       BRC: 0  
-    drampower_enable: false
+    drampower_enable: true
     voltage:
       preset: Default
     current:
-      preset: Default
+      preset: DDR5_4800x4
 
   Controller:
     impl: Generic
@@ -46,10 +46,10 @@ MemorySystem:
     plugins:
 
   AddrMapper:
-    impl: ChRaBaRoCo
+    # impl: ChRaBaRoCo
     # impl: RoCoBaRaCh
     # impl: RoBaRaCoCh
     # impl: RoCoRaBaCh
-    # impl: RoRaCoBaCh
+    impl: RoRaCoBaCh
     # impl: RoRaBaCoCh      
     

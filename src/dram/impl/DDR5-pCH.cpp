@@ -21,16 +21,19 @@ class DDR5PCH : public IDRAM, public Implementation {
     // Add pCH-NI (narrow-I/O == Off-PCB I/O) and pCH-WI (Wide-I/O == On-PCB I/O)
     // pCH-nI and PCH-wI must be 1
     inline static const std::map<std::string, Organization> org_presets = {
-      //   name         density   DQ   Ch pCH nI wI Ra Bg Ba   Ro     Co
-      {"DDR5_8Gb_x4",   {8<<10,   4,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<11}}},
-      {"DDR5_8Gb_x8",   {8<<10,   8,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<10}}},
-      {"DDR5_8Gb_x16",  {8<<10,   16, {1, 1,  1, 1, 1, 4, 2,   1<<16, 1<<10}}},
-      {"DDR5_16Gb_x4",  {16<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<11}}},
-      {"DDR5_16Gb_x8",  {16<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<10}}},
-      {"DDR5_16Gb_x16", {16<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<16, 1<<10}}},
-      {"DDR5_32Gb_x4",  {32<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<11}}},
-      {"DDR5_32Gb_x8",  {32<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<10}}},
-      {"DDR5_32Gb_x16", {32<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<17, 1<<10}}},
+      //   name             density  DQ   Ch pCH nI wI Ra Bg Ba   Ro     Co
+      {"DDR5_8Gb_x4",      {8<<10,   4,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<11}}},
+      {"DDR5_8Gb_x8",      {8<<10,   8,  {1, 1,  1, 1, 1, 8, 2,   1<<16, 1<<10}}},
+      {"DDR5_8Gb_x16",     {8<<10,   16, {1, 1,  1, 1, 1, 4, 2,   1<<16, 1<<10}}},
+      {"DDR5_16Gb_x4",     {16<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<11}}},
+      {"DDR5_16Gb_x8",     {16<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<10}}},
+      {"DDR5_16Gb_x16",    {16<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<16, 1<<10}}},
+      {"DDR5_16Gb_DBX_x4", {16<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<11}}},
+      {"DDR5_16Gb_DBX_x8", {16<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<16, 1<<11}}},
+      {"DDR5_16Gb_DBX_x16",{16<<10,  4,  {1, 1,  1, 1, 1, 4, 4,   1<<16, 1<<12}}},      
+      {"DDR5_32Gb_x4",     {32<<10,  4,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<11}}},
+      {"DDR5_32Gb_x8",     {32<<10,  8,  {1, 1,  1, 1, 1, 8, 4,   1<<17, 1<<10}}},
+      {"DDR5_32Gb_x16",    {32<<10,  16, {1, 1,  1, 1, 1, 4, 4,   1<<17, 1<<10}}},
 
       // {"DDR5_64Gb_x4",  {64<<10,  4,  {1, 1, 8, 4, 1<<18, 1<<11}}},
       // {"DDR5_64Gb_x8",  {64<<10,  8,  {1, 1, 8, 4, 1<<18, 1<<10}}},
@@ -384,7 +387,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     int m_num_banks;             
     bool m_use_pch;
     bool m_use_prefetch;
-
+    int dq_scaling;
     std::vector<bool> m_high_pri_prefetch;
     std::vector<int>  m_db_prefetch_mode;
 
@@ -424,31 +427,51 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     // ndp_op_cnt_per_pch[PCH_ID][OP]
     std::vector<std::vector<uint64_t>>               ndp_op_cnt_per_pch;
+    std::vector<std::vector<int>>                    ndp_rd_config_reg_per_pch;
 
     /*
-      x4/x8 DRAM: 8BG,4BK per BG --> 32 BK
-      CHx/PCHx/BK3/BG7/ROW(Highest Row): HSNC-Ctrl Reg
-      CHx/PCHx/BK3/BG6/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
-      CHv/PCHv/BK3/BG5/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
-      CHv/PCHv/BK3/BG4/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
-      CHv/PCHv/BK3/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK3/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK2/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
-      CHv/PCHv/BK1/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
-      CHv/PCHv/BK0/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
-      x16 DRAM: 4BG,4BK per BG --> 16 BK
-      CHx/PCHx/BK3/BG3/ROW(Highest Row): HSNC-Ctrl Reg
-      CHx/PCHx/BK3/BG2/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
-      CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
-      CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
-      CHv/PCHv/BK2/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK2/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK2/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK2/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
-      CHv/PCHv/BK1/BG0-BG3/ROW(Highest Row)/COL0-127: Reserved
-      CHv/PCHv/BK0/BG0-BG3/ROW(Highest Row)/COL0-127: Reserved    
+      x4 DRAM: 8BG,4BK per BG --> 32 BK with 128 COL
+        - CHx/PCHx/BK3/BG7/ROW(Highest Row): HSNC-Ctrl Reg
+        - CHx/PCHx/BK3/BG6/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
+        - CHv/PCHv/BK3/BG5/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
+        - CHv/PCHv/BK3/BG4/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
+        - CHv/PCHv/BK3/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+        - CHv/PCHv/BK3/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+        - CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+        - CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/32KB)
+        - CHv/PCHv/BK2/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+        - CHv/PCHv/BK1/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+        - CHv/PCHv/BK0/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+      x8 DRAM: 8BG,4BK per BG --> 32 BK with 128 COL
+        - CHx/PCHx/BK3/BG7/ROW(Highest Row): HSNC-Ctrl Reg
+        - CHx/PCHx/BK3/BG6/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
+        - CHv/PCHv/BK3/BG5/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
+        - CHv/PCHv/BK3/BG4/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
+        - CHv/PCHv/BK3/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK3/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK2/BG4-BG7/ROW(Highest Row)/COL0-127: Reserved
+        - CHv/PCHv/BK2/BG3/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK2/BG2/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK2/BG1/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)
+        - CHv/PCHv/BK2/BG0/ROW(Highest Row)/COL0-127: Data Memory (8KB/64KB)      
+        - CHv/PCHv/BK1/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved
+        - CHv/PCHv/BK0/BG0-BG7/ROW(Highest Row)/COL0-127: Reserved      
+      x16 DRAM: 4BG,4BK per BG --> 16 BK with 256 COL
+        - CHx/PCHx/BK3/BG3/ROW(Highest Row): HSNC-Ctrl Reg
+        - CHx/PCHx/BK3/BG2/ROW(Highest Row)/COL0-127: HSNC-AccessInfo Buf
+        - CHv/PCHv/BK3/BG1/ROW(Highest Row)/COL0-127: DSNU-Ctrl Reg (8KB) 
+        - CHv/PCHv/BK3/BG0/ROW(Highest Row)/COL0-127: Inst Memory (8KB/8KB)
+        - CHv/PCHv/BK2/BG3/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK2/BG2/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK2/BG1/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK2/BG0/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK1/BG3/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK1/BG2/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK1/BG1/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)
+        - CHv/PCHv/BK1/BG0/ROW(Highest Row)/COL0-255: Data Memory (16KB/128KB)        
+        - CHv/PCHv/BK0/BG0-BG3/ROW(Highest Row)/COL0-127: Reserved    
     */
   /************************************************
    *                 RFM Related
@@ -588,7 +611,7 @@ class DDR5PCH : public IDRAM, public Implementation {
 
               if(ndp_inst_slot_per_pch[pch_idx].size() < m_num_ndp_inst_slot) {
 
-                std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
+                // std::cout<<"["<<m_clk<<"] CH["<<ch<<"] PCH["<<pch<<"] - ";
                 Inst_Slot inst = decoding_inst(ins_mem_per_pch[pch_idx][ndp_pc_per_pch[pch_idx]]);
 
                 if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
@@ -673,6 +696,10 @@ class DDR5PCH : public IDRAM, public Implementation {
                           }                        
                         }
                       } 
+                    } else {
+                      // Return NDP Status to Host
+                      ndp_rd_config_reg_per_pch[pch_idx].push_back(ndp_status_per_pch[pch_idx]);
+                      // std::cout<<"DRAM["<<pch_idx<<"] NDP Status :"<<ndp_status_per_pch[pch_idx]<<std::endl;
                     }
 
                   } else if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ins_mem_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ins_mem_access_bg) {
@@ -728,6 +755,13 @@ class DDR5PCH : public IDRAM, public Implementation {
                       if(is_find) break;
                     }
                     if(!is_find) {
+                      // Print NDP Instruction Slot 
+                      for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
+                        std::cout<<"decoding opcode "<<ndp_inst_slot_per_pch[pch_idx][i].opcode<<" opsize "<<ndp_inst_slot_per_pch[pch_idx][i].opsize<<
+                        " id "<<ndp_inst_slot_per_pch[pch_idx][i].id<<" bg "<<ndp_inst_slot_per_pch[pch_idx][i].bg<<
+                        " cnt "<<ndp_inst_slot_per_pch[pch_idx][i].cnt<<
+                        " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
+                       }                                            
                       throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
@@ -763,7 +797,15 @@ class DDR5PCH : public IDRAM, public Implementation {
                       if(is_find) break;
                     }
                     if(!is_find) {
-                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
+                      // Print NDP Instruction Slot 
+                      std::cout<<"NDP Status : "<<ndp_status_per_pch[pch_idx]<<std::endl;
+                      for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
+                        std::cout<<"decoding opcode "<<ndp_inst_slot_per_pch[pch_idx][i].opcode<<" opsize "<<ndp_inst_slot_per_pch[pch_idx][i].opsize<<
+                        " id "<<ndp_inst_slot_per_pch[pch_idx][i].id<<" bg "<<ndp_inst_slot_per_pch[pch_idx][i].bg<<
+                        " cnt "<<ndp_inst_slot_per_pch[pch_idx][i].cnt<<
+                        " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
+                       }                      
+                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM WR!!");
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
@@ -888,6 +930,35 @@ class DDR5PCH : public IDRAM, public Implementation {
       pipe_ndp_cmd_per_pch[pch_idx].push_back(command);
       pipe_ndp_addr_per_pch[pch_idx].push_back(addr_vec);      
       pipe_ndp_id_per_pch[pch_idx].push_back(thread_id);      
+    }
+
+    int get_ndp_response(int ch_id, int pch_id) override {
+      // NDP-related Code
+      // "NDP_DRAM_RD", "NDP_DRAM_WR", "NDP_DRAM_RDA", "NDP_DRAM_WRA", "NDP_DB_RD",   "NDP_DB_WR",
+      int pch_idx = ch_id*num_pseudo_ch + pch_id;
+      if(ndp_rd_config_reg_per_pch[pch_idx].size() != 0) {
+        if(ndp_rd_config_reg_per_pch[pch_idx].size() > 1) {
+          throw std::runtime_error("NDP Response Enable one One Request!!");
+        }
+        int resp = ndp_rd_config_reg_per_pch[pch_idx][0];
+        ndp_rd_config_reg_per_pch[pch_idx].erase(ndp_rd_config_reg_per_pch[pch_idx].begin());      
+        return resp;
+      } else {
+        return -1;
+      }
+    }
+
+    bool is_ndp_issuable(int ndp_status) override {
+      if(ndp_status == - 1) {
+        return false;
+      } else {
+        // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"        
+        if(ndp_status == m_ndp_status("idle") || ndp_status == m_ndp_status("run") || ndp_status == m_ndp_status("done")) {
+          return true;
+        } else {
+          return false;
+        }
+      }
     }
 
     void check_future_action(int command, const AddrVec_t& addr_vec) {
@@ -1185,7 +1256,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         pc   = (inst >> 0) & 0x1ff;
       }
       #ifdef PRINT_DEBUG
-      std::cout<<"decoding opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<" loop "<<loop<<" pc "<<pc<<std::endl;
+      std::cout<<"decoding ["<<std::hex<<inst<<"] - opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<" loop "<<loop<<" pc "<<pc<<std::endl;
       #endif 
       return Inst_Slot(true,opcode,opsize,id,bg,bk,loop,pc);
     };
@@ -1272,7 +1343,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       if (auto dq = param_group("org").param<int>("dq").optional()) {
         m_organization.dq = *dq;
       }
-
+      
       for (int i = 0; i < m_levels.size(); i++){
         auto level_name = m_levels(i);
         if (auto sz = param_group("org").param<int>(level_name).optional()) {
@@ -1324,6 +1395,11 @@ class DDR5PCH : public IDRAM, public Implementation {
  
       need_be_open_per_bank.resize(num_channels,std::vector<bool>(num_pseudochannel * num_bankgroups * num_banks, false));
 
+      dq_scaling = 1;
+      int real_num_dq_on_dimm = param_group("org").param<int>("real_dq").default_val(4);
+      if(real_num_dq_on_dimm == 8)       dq_scaling = 2;
+      else if(real_num_dq_on_dimm == 16) dq_scaling = 4;       
+
       if(num_ranks != 1) {
         throw ConfigurationError("The number of pseudo-channel DRAM ranks ({}) cannot be greater than “1”.!", num_ranks);
       }
@@ -1372,28 +1448,39 @@ class DDR5PCH : public IDRAM, public Implementation {
       pipe_ndp_payload_per_pch.resize(num_channels*num_pseudochannel,std::vector<std::vector<uint64_t>>(0,std::vector<uint64_t>(0,0)));      
 
       ndp_access_row          = (m_organization.count[m_levels["row"]] - 1);
-      if(m_organization.dq == 16) {
+      if(real_num_dq_on_dimm == 16) {
         //x16 DRAM with 4BG and 4BK per BG
+        m_ndp_scaling           = 4;
         ndp_ctrl_access_bk      = 3;
         ndp_ctrl_access_bg      = 1;
         ndp_ins_mem_access_bk   = 3;
         ndp_ins_mem_access_bg   = 0;
         ndp_dat_mem_access_bk   = 2;
         ndp_dat_mem_access_bg   = 3; // BG0-BG3
-      } else {
-        // x4/x8 DRAM with 8BG and 4 BK per BG
+      } else if(real_num_dq_on_dimm == 8) {
+        // x8 DRAM: 8BG,4BK per BG --> 32 BK with 128 COL
+        m_ndp_scaling           = 2;
         ndp_ctrl_access_bk      = 3;
         ndp_ctrl_access_bg      = 5;
         ndp_ins_mem_access_bk   = 3;
         ndp_ins_mem_access_bg   = 4;
-        ndp_dat_mem_access_bk   = 2;
+        ndp_dat_mem_access_bk   = 3; // BK2-3
+        ndp_dat_mem_access_bg   = 3; // BG0-BG3      
+      } else {
+        // x4 DRAM with 8BG and 4 BK per BG
+        m_ndp_scaling           = 1;
+        ndp_ctrl_access_bk      = 3;
+        ndp_ctrl_access_bg      = 5;
+        ndp_ins_mem_access_bk   = 3;
+        ndp_ins_mem_access_bg   = 4;
+        ndp_dat_mem_access_bk   = 3; // BK3
         ndp_dat_mem_access_bg   = 3; // BG0-BG3        
       }
 
       // NDP Ops Counter
-      //
-      ndp_op_cnt_per_pch.resize(num_channels*num_pseudochannel,std::vector<uint64_t>(m_ndp_ops.size(),0));      
-
+      ndp_op_cnt_per_pch.resize(num_channels*num_pseudochannel,std::vector<uint64_t>(m_ndp_ops.size(),0));     
+      // NDP RD CONF REG RESPONSE (magic path... to simple simulation)
+      ndp_rd_config_reg_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));      
     };
 
     void set_timing_vals() {
@@ -1423,12 +1510,20 @@ class DDR5PCH : public IDRAM, public Implementation {
       // Load the organization specific timings
       int dq_id = [](int dq) -> int {
         switch (dq) {
-          case 4:  return 0;
-          case 8:  return 1;
-          case 16: return 2;
+          case 1:  return 0;
+          case 2:  return 1;
+          case 4:  return 2;
           default: return -1;
         }
-      }(m_organization.dq);
+      }(dq_scaling);      
+      // int dq_id = [](int dq) -> int {
+      //   switch (dq) {
+      //     case 4:  return 0;
+      //     case 8:  return 1;
+      //     case 16: return 2;
+      //     default: return -1;
+      //   }
+      // }(m_organization.dq);
 
       int rate_id = [](int rate) -> int {
         switch (rate) {
@@ -1888,11 +1983,16 @@ class DDR5PCH : public IDRAM, public Implementation {
       // pJ per one bit (on PCB/Socket)
       double socket_dq_energy = 18.48;
       double on_board_dq_energy = 10.08;
+      
+      // If use x8/x16 DRAM, use chiplet techonlogy to reduce DQ Power
+      if(dq_scaling != 1) on_board_dq_energy = 3.19;
+      
       // pJ per 64 bits
       double on_buffer_energy = 9.5;
       int num_channels = m_organization.count[m_levels["channel"]];
       int num_pseudochannels = m_organization.count[m_levels["pseudochannel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
+      
       // ECC Energy
       // Encoder: 1.13 pJ per RS(10,8,8) x8  (Per Access)
       //  -- Each NDP_DRAM_WR
@@ -1908,13 +2008,19 @@ class DDR5PCH : public IDRAM, public Implementation {
 
       // Current Hard Coding 
       // 64bits x 8, FP16 x 16 x 2
-      double buf_acc_energy_per_inst = on_buffer_energy * 4 * 2;
-      double add_energy_per_inst     = fp16_add_energy * 16 * 2;
-      double mul_energy_per_inst     = fp16_mul_energy * 16 * 2;
-      double addtree_energy_per_inst = fp16_add_energy * 16 * 2;
+      double buf_acc_energy_per_inst = on_buffer_energy * (double) (4 * 2 * dq_scaling);
+      double add_energy_per_inst     = fp16_add_energy * (double) (16 * 2 * dq_scaling);
+      double mul_energy_per_inst     = fp16_mul_energy * (double) (16 * 2 * dq_scaling);
+      double addtree_energy_per_inst = fp16_add_energy * (double) (16 * 2 * dq_scaling);
       
       double total_ndp_energy = 0;
       double total_ndp_power = 0;
+      double total_host_bw = 0.0;
+      double total_db_bw   = 0.0;
+      double total_ndp_bw   = 0.0;
+      int host_acc = 0; // Host <->DB 
+      int db_acc   = 0; // DB <-> DRAMs
+      int ndp_acc  = 0;
       for (int i = 0; i < num_channels; i++) {
         int num_socket_trans = 0;
         int num_on_board_trans = 0;
@@ -1943,23 +2049,28 @@ class DDR5PCH : public IDRAM, public Implementation {
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] + 
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];      
             num_ecc_decoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")];
-            num_ecc_encoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];                                                                
+            num_ecc_encoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];        
+
+            ndp_acc += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] +   
+                       m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];            
           }
           num_ndp_acc_mem += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ACC_BUF")];
           num_ndp_add     += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ADD")];
           num_ndp_mul     += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("MUL")];
           num_ndp_addtree += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ADDTree")];
         }
+        host_acc += num_socket_trans;
+        db_acc   += num_on_board_trans;
         // DQ Power (nJ) (Include ECC)
         double channel_socket_dq_energy = (double) num_socket_trans * (double) (16 * 4) * (double) ((m_channel_width+m_parity_width)/4) * socket_dq_energy/ 1E3;
-        double channel_onboard_dq_energy = (double) num_on_board_trans * (double) (16) * (double) (m_channel_width+m_parity_width) * on_board_dq_energy / 1E3;
-        double channel_onboard_ecc_energy = (num_ecc_decoder_trans * ecc_decoder_energy + num_ecc_encoder_trans * ecc_encoder_energy)  / 1E3;
-        double channel_access_buf_energy = (double) num_access_buf_trans * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_buffer_energy / 1E3;
+        double channel_onboard_dq_energy = (double) num_on_board_trans * (double) (16 * dq_scaling) * (double) (m_channel_width+m_parity_width) * on_board_dq_energy / 1E3;
+        double channel_onboard_ecc_energy = ((double) (dq_scaling * num_ecc_decoder_trans) * ecc_decoder_energy + (double) (dq_scaling * num_ecc_encoder_trans) * ecc_encoder_energy)  / 1E3;
+        double channel_access_buf_energy = (double) (dq_scaling * num_access_buf_trans) * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_buffer_energy / 1E3;
         // NDP Energy (nJ)
-        double channel_ndp_energy = ((double)num_ndp_acc_mem  * buf_acc_energy_per_inst + 
-                                     (double)num_ndp_add      * add_energy_per_inst +
-                                     (double)num_ndp_mul      * mul_energy_per_inst +
-                                     (double)num_ndp_addtree  * addtree_energy_per_inst) / 1E3;                                 
+        double channel_ndp_energy = ((double)(dq_scaling * num_ndp_acc_mem)  * buf_acc_energy_per_inst + 
+                                     (double)(dq_scaling * num_ndp_add)      * add_energy_per_inst +
+                                     (double)(dq_scaling * num_ndp_mul)      * mul_energy_per_inst +
+                                     (double)(dq_scaling * num_ndp_addtree)  * addtree_energy_per_inst) / 1E3;                                 
         // access 64 bit for on buffer
         double chanenl_socket_dq_power = channel_socket_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double chanenl_onboard_dq_power = channel_onboard_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
@@ -1998,6 +2109,16 @@ class DDR5PCH : public IDRAM, public Implementation {
       std::cout<<" - NDP Ops Power(W)             : "<<total_ndp_power<<std::endl;
       std::cout<<" - Total DRAM Power (W)         : "<<s_total_power<<std::endl;
 
+      std::cout<<" ==== Total Channel Bandwidth (GB/s) Report === "<<std::endl;
+      total_host_bw = (double)((double)host_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
+      total_db_bw   = (double)((double)db_acc * 512.0 * (double)dq_scaling) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
+      total_ndp_bw  = (double)((double)ndp_acc * 512.0 * (double)dq_scaling) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;            
+      std::cout<<" - Total Host <-> DB Bandwidth      : "<<total_host_bw<<std::endl;  
+      std::cout<<" - Total DB <-> DRAMs Bandwidth     : "<<total_db_bw<<std::endl;  
+      std::cout<<" - Total NDP Bandwidth              : "<<total_ndp_bw<<std::endl;  
+      std::cout<<" - Total Host Access                : "<<host_acc<<std::endl;
+      std::cout<<" - Total DB Access                  : "<<db_acc<<std::endl;
+      std::cout<<" - Total NDP Access                 : "<<ndp_acc<<std::endl;
     }
 
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {

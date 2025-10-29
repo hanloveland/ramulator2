@@ -41,6 +41,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<int>   busy_prefetch_mode_cycle_per_pch;
     std::vector<int>   busy_refresh_mode_cycle_per_pch;
 
+    std::vector<int>   cmd_cycle_per_pch;
+
     size_t s_row_hits = 0;
     size_t s_row_misses = 0;
     size_t s_row_conflicts = 0;
@@ -133,6 +135,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     int num_ndp_wr_req;
     std::vector<int> num_ndp_wr_req_per_pch;
     std::vector<int> num_ndp_rd_req_per_pch;
+
+    // NDP CONF REG RD Response from DRAM
+    std::vector<std::vector<int>> ndp_config_reg_resp_per_pch;
 
     // Round-Robin Vector
     std::vector<int> rr_pch_idx;
@@ -287,8 +292,6 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       num_ndp_rd_req = 0;
       num_ndp_wr_req = 0;      
 
-      // Test
-
       current_sch_mode_per_pch.resize(num_pseudochannel,0);
       sch_mode_per_pch.resize(num_pseudochannel,0);
       read_mode_cycle_per_pch.resize(num_pseudochannel,0);
@@ -300,6 +303,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       busy_prefetch_mode_cycle_per_pch.resize(num_pseudochannel,0);
       busy_refresh_mode_cycle_per_pch.resize(num_pseudochannel,0);
 
+      ndp_config_reg_resp_per_pch.resize(num_pseudochannel,std::vector<int>(0,0));     
+
+      cmd_cycle_per_pch.resize(num_pseudochannel,0);
     };
 
     bool send(Request& req) override {
@@ -576,9 +582,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
            req_it->command == m_dram->m_commands("REFsb_end")) {
           // Single Cycle Command
           cmd_io_cc+=1;
+          cmd_cycle_per_pch[req_it->addr_vec[psuedo_ch_idx]]+=1;
         } else {
           // Two Cycle Command
           cmd_io_cc+=2;
+          cmd_cycle_per_pch[req_it->addr_vec[psuedo_ch_idx]]+=2;
         }
 
         if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || 
@@ -651,6 +659,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           } else {
             m_dram->issue_ndp_command(req_it->command, req_it->addr_vec, req_it->ndp_id);
           }
+
         }
         
         if(false/* && req_it->addr_vec[0] == 0 && req_it->addr_vec[1] == 1*/) {
@@ -775,6 +784,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       }
 
+      // get NDP CONF REG Response
+      for(int i=0;i<num_pseudochannel;i++) {
+        int conf_reg_resp = m_dram->get_ndp_response(m_channel_id,i);
+        if(conf_reg_resp != -1) {
+          // if the ndp response is valid, then store 
+          ndp_config_reg_resp_per_pch[i].push_back(conf_reg_resp);
+        }
+      }
+      
     };
 
 
@@ -1212,6 +1230,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }
       */     
 
+        std::cout<<"------------------------------------------------"<<std::endl;
+        std::cout<<"Command IO Utilization (Channel: "<<m_channel_id<<")"<<std::endl;
+        for(int i=0;i<num_pseudochannel;i++) {
+          float val = (float)cmd_cycle_per_pch[i]/(float)m_clk;
+          std::cout<<val;
+          if (i != (num_pseudochannel-1))
+            std::cout<<" | ";
+        }
+        std::cout<<std::endl;
+        std::cout<<"------------------------------------------------"<<std::endl;
       
       return;
     }
@@ -1240,6 +1268,17 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(num_ndp_rd_req_per_pch[pch_idx] == 0 && num_ndp_wr_req_per_pch[pch_idx] == 0) return true;
       else                                                                             return false;
     }    
+
+    int get_config_reg_resp(int pch_idx) override {
+
+      if(ndp_config_reg_resp_per_pch[pch_idx].size() == 0) {
+        return -1;
+      } else {
+        int resp = ndp_config_reg_resp_per_pch[pch_idx][0];
+        ndp_config_reg_resp_per_pch[pch_idx].erase(ndp_config_reg_resp_per_pch[pch_idx].begin());      
+        return resp;        
+      }
+    }        
 
     void update_rr_pch_idx() {
       // Shift Round-Robin Pseudo Channel Index

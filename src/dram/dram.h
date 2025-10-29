@@ -24,6 +24,7 @@ class IDRAM : public Clocked<IDRAM> {
     Organization m_organization;        // The organization of the device (density, dq, levels)
     int m_channel_width = -1;           // Channel width (should be set by the implementation's config)
     int m_parity_width = -1;
+    int m_ndp_scaling = -1;
 
 
   /************************************************
@@ -173,6 +174,8 @@ class IDRAM : public Clocked<IDRAM> {
    virtual bool get_pri_prefetch(u_int32_t channel_id, u_int32_t pseudo_channel_id) = 0;
    virtual bool is_ndp_access(const AddrVec_t& addr_vec) = 0;
    virtual void issue_ndp_command(int command, const AddrVec_t& addr_vec, int thread_id, const std::vector<uint64_t> payload = {}) = 0;
+   virtual int get_ndp_response(int ch_id, int pch_id) = 0;
+   virtual bool is_ndp_issuable(int ndp_status) = 0;
    virtual bool get_use_prefetch() = 0;
   /************************************************
    *        Interface to Query Device Spec
