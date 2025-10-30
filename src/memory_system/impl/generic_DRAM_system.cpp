@@ -100,12 +100,15 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
         // Open Trace File to track memory pattern 
         if(!is_open_trace_file) {
           tout.open(trace_path);
+          is_open_trace_file = true;
         }
-        if(is_success) {
-          if (req.type_id == Request::Type::Read) {
-            tout << "LD "<<"0x"<<std::hex<<req.addr<<std::endl;
-          } else if(req.type_id == Request::Type::Write) {
-            tout << "ST "<<"0x"<<std::hex<<req.addr<<std::endl;
+        if(is_open_trace_file) {
+          if(is_success) {
+            if (req.type_id == Request::Type::Read) {
+              tout << "LD "<<"0x"<<std::hex<<req.addr<<std::endl;
+            } else if(req.type_id == Request::Type::Write) {
+              tout << "ST "<<"0x"<<std::hex<<req.addr<<std::endl;
+            }
           }
         }
       #endif 
@@ -154,7 +157,9 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
         s_avg_read_latency = (float)total_latency/(float)s_num_read_requests;
 
       #ifdef TRACE_ON
-        tout.close();
+        if(is_open_trace_file) {
+          tout.close();
+        }
       #endif        
     }    
 };
