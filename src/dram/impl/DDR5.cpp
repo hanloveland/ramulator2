@@ -900,7 +900,7 @@ class DDR5 : public IDRAM, public Implementation {
       double socket_dq_energy = 18.48;
       double on_board_dq_energy = 10.08;
       for (int i = 0; i < num_channels; i++) {
-        int num_trans = 0;
+        size_t num_trans = 0;
         for (int j = 0; j < num_ranks; j++) {
           process_rank_energy(m_power_stats[i * num_ranks + j], m_channels[i]->m_child_nodes[j]);
           num_trans += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] + 

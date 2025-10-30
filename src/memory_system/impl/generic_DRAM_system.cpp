@@ -18,9 +18,9 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     std::vector<IDRAMController*> m_controllers;    
 
   public:
-    int s_num_read_requests = 0;
-    int s_num_write_requests = 0;
-    int s_num_other_requests = 0;
+    size_t s_num_read_requests = 0;
+    size_t s_num_write_requests = 0;
+    size_t s_num_other_requests = 0;
     float s_avg_read_latency = 0;
     bool is_open_trace_file = false;
 

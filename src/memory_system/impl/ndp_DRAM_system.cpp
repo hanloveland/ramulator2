@@ -26,12 +26,12 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     std::vector<IDRAMController*> m_controllers;    
 
   public:
-    int s_num_read_requests = 0;
-    int s_num_write_requests = 0;
-    int s_num_other_requests = 0;
-    int s_num_ndp_read_requests = 0;
-    int s_num_ndp_write_requests = 0;
-    int s_num_ndp_other_requests = 0;
+    size_t s_num_read_requests = 0;
+    size_t s_num_write_requests = 0;
+    size_t s_num_other_requests = 0;
+    size_t s_num_ndp_read_requests = 0;
+    size_t s_num_ndp_write_requests = 0;
+    size_t s_num_ndp_other_requests = 0;
     float s_avg_read_latency = 0; // Only Access for Normal 
 
     // NDP Controller
@@ -81,7 +81,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_empty_cnt;   
     std::vector<std::vector<int>>                         pch_lvl_hsnc_nl_addr_wait_cnt;   
 
-    std::vector<std::vector<std::vector<int>>>            pch_hsnc_status_cnt;
+    std::vector<std::vector<std::vector<size_t>>>         pch_hsnc_status_cnt;
 
     bool                                                  all_ndp_idle;
     bool                                                  all_nl_req_buffer_empty;
@@ -122,10 +122,6 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int num_channels = -1;
     int num_pseudochannel = -1;
 
-    /*
-    int ndp_wait_cnt = -1;
-    int ndp_wait_cycle = -1;
-    */
   public:
     void init() override { 
       Logger_t m_logger;
