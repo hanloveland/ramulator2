@@ -326,7 +326,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       pch_lvl_hsnc_nl_addr_gen_wait_cycle.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,-1));    
       pch_lvl_hsnc_nl_addr_empty_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
       pch_lvl_hsnc_nl_addr_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
-      pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<int>>(m_num_subch*num_pseudochannel,std::vector<int>(8,0)));     
+      pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<size_t>>(m_num_subch*num_pseudochannel,std::vector<size_t>(8,0)));     
     
     };
 
