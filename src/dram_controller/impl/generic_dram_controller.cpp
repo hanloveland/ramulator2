@@ -769,6 +769,10 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     int get_config_reg_resp(int pch_idx) override {
       return -1;
     }      
+
+    virtual size_t get_host_acces_latency() {
+      return s_read_latency;
+    }    
 };
   
 }   // namespace Ramulator

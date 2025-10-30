@@ -22,9 +22,11 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     IFrontEnd* m_frontend;
     uint m_clock_ratio = 1;
     std::string output_path = "ramulator2_simulation_result.yaml";
+    std::string trace_path = "ramulator2.trace";
     bool use_gem5_frontend = false;
     int total_memory_capacity = 0;
-
+    std::ofstream tout;
+    
   public:
     virtual void connect_frontend(IFrontEnd* frontend) { 
       m_frontend = frontend; 
@@ -39,6 +41,7 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
         component->finalize();
       }
 
+      mem_sys_finalize();
       YAML::Emitter emitter;
       emitter << YAML::BeginMap;
       m_impl->print_stats(emitter);
@@ -84,6 +87,8 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
 
     virtual void set_output_path(std::string output_path_) {
       output_path = output_path_;
+      trace_path = output_path_ + std::string(".trace");
+      tout.open(trace_path);
     };
 
     virtual void set_use_gem5_frontend() {
@@ -98,6 +103,9 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
 
     // Check All Buffers are Empty to finish simulation 
     virtual bool is_finished() = 0;
+
+    // finalize memory system itself 
+    virtual void mem_sys_finalize() = 0;
 };
 
 }        // namespace Ramulator

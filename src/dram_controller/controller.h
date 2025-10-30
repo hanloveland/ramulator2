@@ -54,7 +54,7 @@ class IDRAMController : public Clocked<IDRAMController> {
     virtual bool is_empty_ndp_req() = 0;
     virtual bool is_empty_ndp_req(int pch_idx) = 0;
     virtual int  get_config_reg_resp(int pch_idx) = 0;
-   
+    virtual size_t get_host_acces_latency() = 0;   
 };
 
 }       // namespace Ramulator

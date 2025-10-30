@@ -29,6 +29,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int s_num_read_requests = 0;
     int s_num_write_requests = 0;
     int s_num_other_requests = 0;
+    int s_num_ndp_read_requests = 0;
+    int s_num_ndp_write_requests = 0;
+    int s_num_ndp_other_requests = 0;
+    float s_avg_read_latency = 0; // Only Access for Normal 
 
     // NDP Controller
     enum NDP_CTRL_STATUS {
@@ -248,7 +252,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       register_stat(s_num_read_requests).name("total_num_read_requests");
       register_stat(s_num_write_requests).name("total_num_write_requests");
       register_stat(s_num_other_requests).name("total_num_other_requests");
-      
+      register_stat(s_num_ndp_read_requests).name("total_num_ndp_read_requests");
+      register_stat(s_num_ndp_write_requests).name("total_num_ndp_write_requests");
+      register_stat(s_num_ndp_other_requests).name("total_num_ndp_other_requests");      
+      register_stat(s_avg_read_latency).name("avg_host_read_latency");
       /*
         Each DIMM has 2 Channel (Ramulator 2 Channel --> One DIMM and Two Sub-Channel)
         The number of channels are must 2x 
@@ -338,6 +345,22 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
          (req.addr_vec[bk_addr_idx] == ndp_ctrl_buf_bk && req.addr_vec[bg_addr_idx] == ndp_ctrl_buf_bg))) {          
           // Access NDP-specific Region (Host-Side NDP Controller)
           is_success = send_ndp_ctrl(req);
+          if (is_success) {
+            switch (req.type_id) {
+              case Request::Type::Read: {
+                s_num_ndp_read_requests++;
+                break;
+              }
+              case Request::Type::Write: {
+                s_num_ndp_write_requests++;
+                break;
+              }
+              default: {
+                s_num_ndp_other_requests++;
+                break;
+              }
+            }
+          }
       } else {
           int channel_id = req.addr_vec[0];
           // Check is NDP Request and set Request is_ndp_req as true (DIMM-Side NDP Controller)
@@ -351,24 +374,24 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           }
           
           is_success = m_controllers[channel_id]->send(req);
+          if (is_success) {
+            switch (req.type_id) {
+              case Request::Type::Read: {
+                s_num_read_requests++;
+                break;
+              }
+              case Request::Type::Write: {
+                s_num_write_requests++;
+                break;
+              }
+              default: {
+                s_num_other_requests++;
+                break;
+              }
+            }
+          }
       }
       
-      if (is_success) {
-        switch (req.type_id) {
-          case Request::Type::Read: {
-            s_num_read_requests++;
-            break;
-          }
-          case Request::Type::Write: {
-            s_num_write_requests++;
-            break;
-          }
-          default: {
-            s_num_other_requests++;
-            break;
-          }
-        }
-      }
 
       return is_success;
     };
@@ -1108,6 +1131,19 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       }
     }
+
+    virtual void mem_sys_finalize() override {
+      size_t total_latency = 0;
+      for (int i = 0; i < num_channels; i++) {
+        total_latency+=m_controllers[i]->get_host_acces_latency();
+      }      
+
+      // There is no normal read request, read latency is minus 1
+      if (s_num_read_requests == 0) 
+        s_avg_read_latency = -1.0;
+      else                          
+        s_avg_read_latency = (float)total_latency/(float)s_num_read_requests;
+    }    
 };
   
 }   // namespace 

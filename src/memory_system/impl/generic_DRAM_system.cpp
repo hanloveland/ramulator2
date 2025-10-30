@@ -4,6 +4,8 @@
 #include "addr_mapper/addr_mapper.h"
 #include "dram/dram.h"
 
+#define TRACE_ON 
+
 namespace Ramulator {
 
 class GenericDRAMSystem final : public IMemorySystem, public Implementation {
@@ -19,7 +21,8 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     int s_num_read_requests = 0;
     int s_num_write_requests = 0;
     int s_num_other_requests = 0;
-
+    float s_avg_read_latency = 0;
+    bool is_open_trace_file = false;
 
   public:
     void init() override { 
@@ -65,6 +68,8 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       register_stat(s_num_read_requests).name("total_num_read_requests");
       register_stat(s_num_write_requests).name("total_num_write_requests");
       register_stat(s_num_other_requests).name("total_num_other_requests");
+      register_stat(s_avg_read_latency).name("avg_host_read_latency");      
+
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override { }
@@ -91,6 +96,19 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
         }
       }
 
+      #ifdef TRACE_ON
+        // Open Trace File to track memory pattern 
+        if(!is_open_trace_file) {
+          tout.open(trace_path);
+        }
+        if(is_success) {
+          if (req.type_id == Request::Type::Read) {
+            tout << "LD "<<"0x"<<std::hex<<req.addr<<std::endl;
+          } else if(req.type_id == Request::Type::Write) {
+            tout << "ST "<<"0x"<<std::hex<<req.addr<<std::endl;
+          }
+        }
+      #endif 
       return is_success;
     };
     
@@ -119,6 +137,25 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       }
 
       return (is_dram_ctrl_finished);
+    }    
+
+    virtual void mem_sys_finalize() override {
+      size_t total_latency = 0;
+      int num_channels = m_dram->get_level_size("channel");
+      for (int i = 0; i < num_channels; i++) {
+        total_latency+=m_controllers[i]->get_host_acces_latency();
+        std::cout<<"Latency : "<<total_latency<<std::endl;
+      } 
+      
+      // There is no normal read request, read latency is minus 1
+      if (s_num_read_requests == 0) 
+        s_avg_read_latency = -1.0;
+      else                          
+        s_avg_read_latency = (float)total_latency/(float)s_num_read_requests;
+
+      #ifdef TRACE_ON
+        tout.close();
+      #endif        
     }    
 };
   

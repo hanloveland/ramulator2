@@ -83,6 +83,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     float s_write_prefetch_queue_len_avg = 0;
 
     size_t s_read_latency = 0;
+    size_t s_normal_read_latency = 0;
     float s_avg_read_latency = 0;
 
     float s_bandwidth = 0;
@@ -138,6 +139,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     bool m_use_prefetch;
 
     // tracking ndp_related rquest
+    int num_ndp_total_rd_req;
+    int num_ndp_total_wr_req;
     int num_ndp_rd_req;
     int num_ndp_wr_req;
     std::vector<int> num_ndp_wr_req_per_pch;
@@ -218,6 +221,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       register_stat(s_priority_queue_len_avg).name("priority_queue_len_avg_{}", m_channel_id);
 
       register_stat(s_read_latency).name("read_latency_{}", m_channel_id);
+      register_stat(s_normal_read_latency).name("normal_read_latency_{}", m_channel_id);
       register_stat(s_avg_read_latency).name("avg_read_latency_{}", m_channel_id);
 
       register_stat(s_bandwidth).name("rw_bandwidth_{}", m_channel_id);
@@ -386,10 +390,12 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           if(req.type_id == Request::Type::Read) {
             num_ndp_rd_req++;
             num_ndp_rd_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
+            num_ndp_total_rd_req++;
           }
           else {
             num_ndp_wr_req++;
             num_ndp_wr_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
+            num_ndp_total_wr_req++;
           }          
         }
       }
@@ -893,6 +899,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             // Check if this requests accesses the DRAM or is being forwarded.
             // TODO add the stats back
             s_read_latency += req.depart - req.arrive;
+            if((req.command == m_dram->m_commands("RD")) || (req.command == m_dram->m_commands("RDA"))) {
+              s_normal_read_latency += req.depart - req.arrive;
+            }
             // std::cout<<" RD latency ["<<(req.depart - req.arrive)<<"] ";
             // m_dram->print_req(req);
           }
@@ -1301,6 +1310,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       // Shift Round-Robin Pseudo Channel Index
       rr_pch_idx.push_back(rr_pch_idx[0]);
       rr_pch_idx.erase(rr_pch_idx.begin());
+    }
+
+    virtual size_t get_host_acces_latency() {
+      return s_normal_read_latency;
     }
 
 };
