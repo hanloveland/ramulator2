@@ -3,6 +3,7 @@
 #include "dram_controller/controller.h"
 #include "addr_mapper/addr_mapper.h"
 #include "dram/dram.h"
+#include <sstream>
 
 #define TRACE_ON 
 
@@ -18,6 +19,8 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     std::vector<IDRAMController*> m_controllers;    
 
   public:
+    Logger_t m_logger;
+    
     size_t s_num_read_requests = 0;
     size_t s_num_write_requests = 0;
     size_t s_num_other_requests = 0;
@@ -26,7 +29,6 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
 
   public:
     void init() override { 
-      Logger_t m_logger;
 
       m_logger = Logging::create_logger("GenericDRAMSystem");
       m_logger->info("DRAM_System init()");
@@ -99,16 +101,26 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       #ifdef TRACE_ON
         // Open Trace File to track memory pattern 
         if(!is_open_trace_file) {
+          if(tout.is_open()) {
+            throw std::runtime_error("The file is already open!");
+          }
+          // Open Trace Path File 
           tout.open(trace_path);
           is_open_trace_file = true;
+          if(tout.is_open()) {
+            m_logger->info(" Open Trace File to store memroy address pattern {}",trace_path);
+          }
         }
         if(is_open_trace_file) {
           if(is_success) {
-            if (req.type_id == Request::Type::Read) {
-              tout << "LD "<<"0x"<<std::hex<<req.addr<<std::endl;
-            } else if(req.type_id == Request::Type::Write) {
-              tout << "ST "<<"0x"<<std::hex<<req.addr<<std::endl;
+            std::stringstream ss;
+            if(req.type_id == 0) {
+              ss << "LD "<<"0x"<<std::hex<<req.addr<<std::endl;
+            } else {
+              ss << "ST "<<"0x"<<std::hex<<req.addr<<std::endl;
             }
+            std::string pattern = ss.str();
+            tout.write(pattern.c_str(),pattern.size());
           }
         }
       #endif 
@@ -159,6 +171,7 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       #ifdef TRACE_ON
         if(is_open_trace_file) {
           tout.close();
+          m_logger->info(" Close Trace File {}",trace_path);
         }
       #endif        
     }    

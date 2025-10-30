@@ -88,7 +88,6 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     virtual void set_output_path(std::string output_path_) {
       output_path = output_path_;
       trace_path = output_path_ + std::string(".trace");
-      tout.open(trace_path);
     };
 
     virtual void set_use_gem5_frontend() {
