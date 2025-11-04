@@ -5,7 +5,7 @@
 #include "dram/dram.h"
 #include <sstream>
 
-#define TRACE_ON 
+// #define TRACE_ON 
 
 namespace Ramulator {
 
