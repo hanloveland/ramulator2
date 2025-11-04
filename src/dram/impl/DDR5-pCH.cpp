@@ -428,6 +428,10 @@ class DDR5PCH : public IDRAM, public Implementation {
     // ndp_op_cnt_per_pch[PCH_ID][OP]
     std::vector<std::vector<uint64_t>>               ndp_op_cnt_per_pch;
     std::vector<std::vector<int>>                    ndp_rd_config_reg_per_pch;
+    // PCH-level DIMM-side NDP Controller Status Counter
+    // pch_dsnc_status_cnt[PCH_ID][NDP_STATUS]
+    // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"
+    std::vector<std::vector<size_t>>                pch_dsnc_status_cnt;
 
     /*
       x4 DRAM: 8BG,4BK per BG --> 32 BK with 128 COL
@@ -494,6 +498,13 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
 
       // NDP Unit tick()
+      for(int ch=0;ch<m_num_channels;ch++) {
+        for(int pch=0;pch<m_num_pseudochannel;pch++) {
+          int pch_idx = ch*m_num_pseudochannel + pch;
+          pch_dsnc_status_cnt[pch_idx][ndp_status_per_pch[pch_idx]]++;
+        }
+      }      
+      
       if(m_clk%4 == 0) {
         // NDP Unit Clock is 1/4 of DRAM clock
         // iteration each channel and pseudo channel
@@ -555,19 +566,19 @@ class DDR5PCH : public IDRAM, public Implementation {
                 
                 // Loop Control 
                 if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
-                  if(loop_cnt_per_pch[pch_idx] == inst.loop_cnt) {
+                  if(loop_cnt_per_pch[pch_idx * 8 + inst.id] == inst.loop_cnt) {
                     DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Loop End"); 
-                    loop_cnt_per_pch[pch_idx] = 0;
+                    loop_cnt_per_pch[pch_idx * 8 + inst.id] = 0;
                     ndp_pc_per_pch[pch_idx]++;
+                    // std::cout<<m_clk<<" CH["<<ch<<"]PCH["<<pch<<"] Loop End Jump to next PC --> "<<ndp_pc_per_pch[pch_idx]<<std::endl;
                   }
                   else {
-                    #ifdef PRINT_DEBUG
                     std::string msg = std::string(" Loop - jump to ") + std::to_string(inst.jump_pc) + std::string(" loop_cnt/Iteration :") + 
-                                      std::to_string(loop_cnt_per_pch[pch_idx]) + std::string("/") + std::to_string(inst.loop_cnt);
+                    std::to_string(loop_cnt_per_pch[pch_idx * 8 + inst.id]) + std::string("/") + std::to_string(inst.loop_cnt);
                     DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, msg); 
-                    #endif
-                    loop_cnt_per_pch[pch_idx]++;
+                    loop_cnt_per_pch[pch_idx * 8 + inst.id]++;
                     ndp_pc_per_pch[pch_idx] = inst.jump_pc;
+                    // std::cout<<m_clk<<" CH["<<ch<<"]PCH["<<pch<<"]"<<msg<<std::endl;
                   }
                 } else {
                   ndp_pc_per_pch[pch_idx]++;
@@ -635,16 +646,16 @@ class DDR5PCH : public IDRAM, public Implementation {
 
                 // Loop Control 
                 if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
-                  if(loop_cnt_per_pch[pch_idx] == inst.loop_cnt) {
-                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Loop End"); 
-                    loop_cnt_per_pch[pch_idx] = 0;
+                  if(loop_cnt_per_pch[pch_idx * 8 + inst.id] == inst.loop_cnt) {
+                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," (self_exec) Loop End"); 
+                    loop_cnt_per_pch[pch_idx * 8 + inst.id] = 0;
                     ndp_pc_per_pch[pch_idx]++;
                   }
                   else {
                     #ifdef PRINT_DEBUG
-                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch,std::string(" Loop - jump to ") + std::to_string(inst.jump_pc)); 
+                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch,std::string(" (self_exec) Loop - jump to ") + std::to_string(inst.jump_pc)); 
                     #endif
-                    loop_cnt_per_pch[pch_idx]++;
+                    loop_cnt_per_pch[pch_idx * 8 + inst.id]++;
                     ndp_pc_per_pch[pch_idx] = inst.jump_pc;
                   }
                 } else {
@@ -765,6 +776,9 @@ class DDR5PCH : public IDRAM, public Implementation {
                         " cnt "<<ndp_inst_slot_per_pch[pch_idx][i].cnt<<
                         " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
                        }                                            
+                       std::cout<<"<-> DRAM RD PCH ["<<ndp_id_per_pch[pch_idx]<<"] BG ["<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]]<<"] BK ["<<ndp_addr_per_pch[pch_idx][m_levels["bank"]]<<"]"<<std::endl;
+                       std::cout<<" NDP Status : "<<ndp_status_per_pch[pch_idx]<<std::endl;
+                       std::cout<<" NDP PC: "<<ndp_pc_per_pch[pch_idx]<<std::endl;
                       throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
@@ -1260,7 +1274,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       
       if(opcode == m_ndp_inst_op.at("LOOP")) {
         loop = (inst >> 16) & 0x3ff;
-        pc   = (inst >> 0) & 0x1ff;
+        pc   = (inst >> 0) & 0x3ff;
       }
       #ifdef PRINT_DEBUG
       std::cout<<"decoding ["<<std::hex<<inst<<"] - opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<" loop "<<loop<<" pc "<<pc<<std::endl;
@@ -1436,7 +1450,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       ndp_status_per_pch.resize(num_channels* num_pseudochannel,m_ndp_status("idle"));      
       ndp_pc_per_pch.resize(num_channels* num_pseudochannel,0);      
       ndp_inst_slot_per_pch.resize(num_channels* num_pseudochannel,std::vector<Inst_Slot>(0,Inst_Slot()));      
-      loop_cnt_per_pch.resize(num_channels* num_pseudochannel,0);
+      // Each PCH has 8 Loop Counter (equal TID)
+      loop_cnt_per_pch.resize(num_channels * num_pseudochannel * 8 ,0);
 
       // Command from MC to DB (NDP Unit)
       pipe_ndp_latency_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));
@@ -1488,6 +1503,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       ndp_op_cnt_per_pch.resize(num_channels*num_pseudochannel,std::vector<uint64_t>(m_ndp_ops.size(),0));     
       // NDP RD CONF REG RESPONSE (magic path... to simple simulation)
       ndp_rd_config_reg_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));      
+      pch_dsnc_status_cnt.resize(num_channels*num_pseudochannel,std::vector<size_t>(9,0));      
     };
 
     void set_timing_vals() {
@@ -2126,8 +2142,26 @@ class DDR5PCH : public IDRAM, public Implementation {
       std::cout<<" - Total Host Access                : "<<host_acc<<std::endl;
       std::cout<<" - Total DB Access                  : "<<db_acc<<std::endl;
       std::cout<<" - Total NDP Access                 : "<<ndp_acc<<std::endl;
-    }
 
+      // DIMM-side NDP Status 
+        std::cout<<"DIMM-side NDP Ctrl Status Stats (total cycle: "<<m_clk<<")"<<std::endl;
+        std::cout<<"   - Each PCH"<<std::endl;        
+        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;      
+      for(int ndp_status=0;ndp_status<9;ndp_status++) {
+        std::cout<<"["<<m_ndp_status(ndp_status)<<"] : ";
+        for(int ch=0;ch<m_num_channels;ch++) {
+          for(int pch=0;pch<m_num_pseudochannel;pch++) {
+            int pch_idx = ch*m_num_pseudochannel + pch; 
+            std::cout<<pch_dsnc_status_cnt[pch_idx][ndp_status];
+            if(pch_idx != (m_num_pseudochannel*m_num_channels - 1))
+              std::cout<<" | ";                
+            // 
+          }
+        }
+        std::cout<<std::endl;
+      }
+      std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+    }
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
       
       Lambdas::Power::Rank::finalize_rank<DDR5PCH>(rank_node, 0, AddrVec_t(), m_clk);

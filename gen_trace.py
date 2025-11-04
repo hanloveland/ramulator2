@@ -319,6 +319,8 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+COLUMN_BITS+RANK_BITS+BANKGROUP_BITS+BANK_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
+
+    # print(f" Address Translate CH{channel},PCH{pseudo_channel},RK{rank},BG{bg},BK{bank},RO{row},CO{col} --> 0x{address:016X}\n")        
     return address
 
 def encode_normal_address(channel, rank, bg, bank, row, col):
@@ -379,8 +381,8 @@ def inst(opcode,opsize,id,bg,bk,op1,op2,op3):
     inst_64bit |= (bg & 0x7) << 45
     inst_64bit |= (bk & 0x3) << 43
     if opcode == ndp_inst_opcode["LOOP"]:
-        inst_64bit |= (op1 & 0x3FF) << 16
-        inst_64bit |= (op2 & 0x1FF)     
+        inst_64bit |= (op1 & 0x3FF) << 16      # Iteration
+        inst_64bit |= (op2 & 0x3FF)            # PC
     return inst_64bit
 
 # Access Type (4) / Opsize (7)/ Channel(3) / Pseudo-Channel(2) / BG (3) / BK (3) / ROW (18) / COL (7) / ID (3) / Reserved
@@ -537,6 +539,68 @@ def cal_it(input_size, scaling):
             num_working_bg = num_row
             iteration      = 1   
     return iteration, num_working_bg, opsize
+
+def cal_it_v2(input_size, scaling):
+    if scaling == 4:
+        row_size = 8192 * 2
+    else:
+        row_size = 8192
+
+    # Max opsize varies depending on the scaling factor
+    if scaling == 1:
+        opsize = 128
+    else:
+        opsize = 64
+
+    # Input Size에 따라, 필요한 Row size 및 Working Bank Group이 다름. 
+    num_row = int(input_size_byte_list[input_size]/row_size)
+    vec_size = int(input_size_byte_list[input_size])
+
+    if scaling == 1:
+        num_working_bg = 8
+    elif scaling == 2:
+        num_working_bg = 8
+    elif scaling == 4:
+        num_working_bg = 4
+
+    if scaling == 1:
+        # Data Memory 32KB
+        # Max n_BG x ROW / 2
+        max_size = num_working_bg * row_size / 2
+        if vec_size > max_size:
+            ratio     = int(vec_size / max_size)
+            iteration = ratio
+            opsize    = int(opsize / 2)
+        else:
+            ratio     = int(max_size / vec_size)
+            iteration = 1
+            opsize    = int(opsize / 2 / ratio)
+    elif scaling == 2:
+        # Data Memory 64KB
+        # Max n_BG x ROW  
+        max_size = num_working_bg * row_size 
+        if vec_size > max_size:
+            ratio     = int(vec_size / max_size)
+            iteration = ratio
+            opsize    = int(opsize)
+        else:
+            ratio     = int(max_size / vec_size)
+            iteration = 1
+            opsize    = int(opsize / ratio)
+    elif scaling == 4:
+        # Data Memory 128KB
+        # Max n_BG x ROW x 2 (but, use 4 Row)
+        max_size = num_working_bg * row_size 
+        if vec_size > max_size:
+            ratio     = int(vec_size / max_size)
+            iteration = ratio
+            opsize    = int(opsize)
+        else:
+            ratio     = int(max_size / vec_size)
+            iteration = 1
+            opsize    = int(opsize / ratio)        
+
+    return iteration, num_working_bg, (opsize - 1)    
 '''
     AXPBY     : Z = aX + bY
     AXPBYPCZ  : W = aX + bB + zZ
@@ -573,7 +637,7 @@ def axpby_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -590,7 +654,7 @@ def axpby_pch(f, input_size, scaling):
             for bg in range(num_working_bg):                
                 ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -666,7 +730,7 @@ def axpbypcz_pch(f, input_size, scaling):
         
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -686,7 +750,7 @@ def axpbypcz_pch(f, input_size, scaling):
             for bg in range(num_working_bg):
                 ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,0,0,0,0))   
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -759,7 +823,7 @@ def axpy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -776,7 +840,7 @@ def axpy_pch(f, input_size, scaling):
             for bg in range(num_working_bg):                
                 ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -844,7 +908,7 @@ def copy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -859,7 +923,7 @@ def copy_pch(f, input_size, scaling):
             for bg in range(num_working_bg):                
                 ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -929,7 +993,7 @@ def xmy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -946,7 +1010,7 @@ def xmy_pch(f, input_size, scaling):
             for bg in range(num_working_bg):                
                 ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -1016,11 +1080,12 @@ def dot_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
+    print(f"opsize: {opsize}")
     # Max NDP Instruction 8KB/8B=1K
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
@@ -1041,7 +1106,7 @@ def dot_pch(f, input_size, scaling):
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
             ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,0,0,0,0))                      
             if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
             if(len(ndp_inst_list) >= 1024):
                 print("Error: Over NDP Instruction Memory")
@@ -1116,6 +1181,7 @@ def gemv_pch(f, input_size, scaling):
         BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
         COL:0-127 or 0-63                 
     '''
+    print(f"Generating Memory Trace of GEMV Operation for NDP Ops")
     # Based on the number of elements 
     # Each Element is FP16 (2B)
     if scaling == 4:
@@ -1125,6 +1191,7 @@ def gemv_pch(f, input_size, scaling):
         row_size = 4096
         n_bg = 8
 
+    print(f" - row_size: {row_size}") 
     # Data Memory Size: 32KB, 64KB, 128KB
     # elements per access 
     # x4:32, x8;64, x16; 128    
@@ -1138,26 +1205,42 @@ def gemv_pch(f, input_size, scaling):
         max_p_vec_size  =  8192 * 4
         n_per_acc = 128 
 
-    vec_size = int(mat_input_size_byte_list[input_size]/2)        
+    print(f" - max_p_vec_size: {max_p_vec_size}") 
+
+    vec_size = int(mat_input_size_byte_list[input_size]/2)       
+    print(f" - vec_size: {vec_size}") 
 
     if scaling == 1:
         opsize = 127
+        max_opsize = 127
     else:
         opsize = 63
+        max_opsize = 63
+
 
     # Partial Vector Size
     if max_p_vec_size > vec_size:
         p_vec_size = vec_size
         col_tile = 1
+        if row_size > vec_size:
+            row_vec_ratio = int(row_size/vec_size)
+            opsize = int((opsize + 1)/row_vec_ratio) - 1
+            print(f" - row_size {row_size} is larger then vec_size {vec_size}, so reduce opsize {max_opsize} -->  {opsize}")
     else:
         p_vec_size = max_p_vec_size
         col_tile = int(vec_size/p_vec_size)
+    
+    print(f" - opsize: {opsize}")
 
+    print(f" - p_vec_size: {p_vec_size}")
+    print(f" - col_tile: {col_tile}")
     # Require n_row for partial vector
     if row_size > p_vec_size:
             n_row_p_vec = 1
     else:
         n_row_p_vec = int(p_vec_size / row_size)
+
+    print(f" - n_row_p_vec: {n_row_p_vec}")
 
     # each tile size 
     if scaling == 4:
@@ -1167,6 +1250,8 @@ def gemv_pch(f, input_size, scaling):
         # BG x CH x PCH
         n_tile_row = n_bg * int(NUM_CHANNEL) * int(NUM_PSEUDOCHANNEL)
     n_tile_col = p_vec_size
+
+    print(f" - n_tile_row: {n_tile_row}")
 
     # Tile Block Row (nTile)
     tmp0 = n_row_p_vec * n_bg
@@ -1187,6 +1272,7 @@ def gemv_pch(f, input_size, scaling):
         print("Error: too small n_tile_block_row")
         exit(1)      
 
+
     if col_tile > 1:
         tmp2 = n_tile_block_row * n_row_p_vec * n_bg * 2
     else:
@@ -1194,22 +1280,23 @@ def gemv_pch(f, input_size, scaling):
     
     if tmp2 > 1000:
         n_tile_block_row = int(n_tile_block_row / 2)
+        
+    print(f" - n_tile_block_row: {n_tile_block_row}")
     # n_tile_block_row * n_row_p_vec * n_bg * 1 or 2 < 1024 
     # Iteration Tile Block 
-    iteration_tile_block = int(vec_size/n_tile_block_row/n_tile_row)
+    iteration_tile_block = int(vec_size/(n_tile_block_row*n_tile_row))
+    print(f" - iteration_tile_block: {iteration_tile_block}")
     # results vector colum size (block)
     # n_tile_block_row*n_tile_row/(n_ch * n_pch)
     n_partial_y =  n_tile_block_row*n_bg
     # Vector Reduction --> 2 Partial Sum
-    post_n_it = int(int(n_partial_y) / (opsize + 1))
-    if post_n_it > n_bg:
-        print("Error.. wrong assumption post_n_it is less then n_bg")
-    opsize_v_rec = opsize
+    post_n_it = int(int(n_partial_y) / (max_opsize + 1))
+    opsize_v_rec = max_opsize
     # if opsize_v_rec > 127:
     #     print(f"Error: {opsize_v_rec} Over Opsize (128)")
     #     exit(1)        
     # Scalare Reduction --> 32 or 64 or 128 --> 1
-    opsize_s_rec = opsize_v_rec
+    opsize_s_rec = max_opsize
     if scaling == 1:
         opsize_follow_s_rec = -1
     else:
@@ -1220,22 +1307,24 @@ def gemv_pch(f, input_size, scaling):
     # Tile Size 
     # iteration, num_working_bg, opsize = cal_it(input_size, scaling)
     extra_delay = 20
-    self_exec_delay = post_n_it * ((2 * opsize_v_rec) + extra_delay) + post_n_it * (2 * opsize_v_rec + extra_delay) + post_n_it * (2 * opsize_s_rec + extra_delay)
+    self_exec_delay = post_n_it * (2 * opsize_v_rec)  + extra_delay + \
+                      post_n_it * (2 * opsize_v_rec)  + extra_delay + \
+                      post_n_it * (2 * opsize_s_rec) + extra_delay 
     if opsize_follow_s_rec != -1:
-        self_exec_delay = post_n_it * (2 * opsize_follow_s_rec + extra_delay)
+        self_exec_delay = post_n_it * (2 * opsize_follow_s_rec)  + extra_delay
 
     #  NDP clocks run four times slower than regular clocks.
     self_exec_delay = self_exec_delay * 4
     
     # Input_size x 8 pch 
-    print(f"vec_size:                {vec_size}")
-    print(f"max_p_vec_size:          {max_p_vec_size}")
-    print(f"p_vec_size:              {p_vec_size}")
-    print(f"col_tile:                {col_tile}")
-    print(f"n_row_p_vec:             {n_row_p_vec}")
-    print(f"n_tile_row:              {n_tile_row}")
-    print(f"n_tile_col:              {n_tile_col}")
-    print(f"iteration_tile_block:    {iteration_tile_block}")
+    # print(f"vec_size:                {vec_size}")
+    # print(f"max_p_vec_size:          {max_p_vec_size}")
+    # print(f"p_vec_size:              {p_vec_size}")
+    # print(f"col_tile:                {col_tile}")
+    # print(f"n_row_p_vec:             {n_row_p_vec}")
+    # print(f"n_tile_row:              {n_tile_row}")
+    # print(f"n_tile_col:              {n_tile_col}")
+    # print(f"iteration_tile_block:    {iteration_tile_block}")
     print(f"self_exec_delay:         {self_exec_delay}")
     print(f"post_n_it:               {post_n_it}")
     print(f"opsize_v_rec:            {opsize_v_rec}")    
@@ -1251,11 +1340,17 @@ def gemv_pch(f, input_size, scaling):
                for pch in range(int(NUM_PSEUDOCHANNEL)):   
                    for bg in range(n_row_p_vec):
                        write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, 0, 1000 + ro, co))           
-        
+    
+    jump_pc0 = 0
+    jump_pc1 = 0
+    self_before_pc = 0
+    self_after_pc = 0
+    fianl_pc = 0
+    # NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
+            jump_pc0 = len(ndp_inst_list)
             # Block-level GEMV
             # Load Partial Vector to Data Memory
             for bg in range(n_row_p_vec):
@@ -1268,39 +1363,70 @@ def gemv_pch(f, input_size, scaling):
                         ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))
             # Column-wise gemv ops
             if col_tile > 1:
+                jump_pc1 = len(ndp_inst_list)
                 for bg in range(n_row_p_vec):
                     ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 for _ in range(n_tile_block_row):
                     for _ in range(n_row_p_vec):
                         for bg in range(n_bg):                
                             ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))                
+                        ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                # ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(col_tile - 2),jump_pc1,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             # Partial-Sum Vector 
+            self_before_pc = len(ndp_inst_list)
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))
-            for bg in range(post_n_it):
-                ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
-            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            if int(post_n_it/n_bg) > 0:
+                for _ in range(int(post_n_it/n_bg)):
+                    for bg in range(n_bg):
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            if int(post_n_it%n_bg) != 0:                     
+                for bg in range(int(post_n_it%n_bg)):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))                
             # Scalar Reduction
-            for bg in range(post_n_it):
-                ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
-            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            if int(post_n_it/n_bg) > 0:
+                for _ in range(int(post_n_it/n_bg)):
+                    for bg in range(n_bg):            
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+            if int(post_n_it%n_bg) != 0:                     
+                for bg in range(int(post_n_it%n_bg)):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))    
+            # Extra Reduction for x8 or x16 NDP Ops
             if opsize_follow_s_rec != -1:
-                for bg in range(post_n_it):            
-                    ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
-                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                if int(post_n_it/n_bg) > 0:
+                    for _ in range(int(post_n_it/n_bg)):
+                        for bg in range(n_bg):            
+                            ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
+                        ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                if int(post_n_it%n_bg) != 0:                     
+                    for bg in range(int(post_n_it%n_bg)):
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0)) 
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
+            self_after_pc = len(ndp_inst_list)
             # WBD
             ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,0,0,0,0)) 
 
             if iteration_tile_block > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,iteration_tile_block,jump_pc,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,1,0,0,(iteration_tile_block - 1),jump_pc0,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
+            fianl_pc = len(ndp_inst_list)
 
             if(len(ndp_inst_list) >= 1024):
                 print(f"Error: Over NDP Instruction Memory {len(ndp_inst_list)}")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
-
+    print(f"jump0 PC:              {jump_pc0}")
+    print(f"jump1 PC:              {jump_pc1}")
+    print(f"self_before_pc PC:     {self_before_pc}")
+    print(f"self_after_pc PC:      {self_after_pc}")
+    print(f"fianl_pc PC:           {fianl_pc}")
     # Generate NDP Start Request 
     data_array = [0] * 8
     for ch in range(int(NUM_CHANNEL)):
@@ -1335,20 +1461,22 @@ def gemv_pch(f, input_size, scaling):
                             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
                         acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 if col_tile > 1:
-                    # Load Partial Vector
-                    for bg in range(n_row_p_vec):
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                    # MAC Operation 
-                    for t_tile in range(n_tile_block_row):
-                        # Each Tile GEMV
-                        for n_row in range(n_row_p_vec):                 
-                            for bg in range(n_bg):
-                                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
-                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
+                    for col_it in range(col_tile - 1):
+                        # Load Partial Vector
+                        for bg in range(n_row_p_vec):
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                        # MAC Operation 
+                        for t_tile in range(n_tile_block_row):
+                            # Each Tile GEMV
+                            for n_row in range(n_row_p_vec):                 
+                                for bg in range(n_bg):
+                                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
+                                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
+                        # acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
                              
                 # Wait Self Execution (N-Cycle)
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                # acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,self_exec_delay)) #self_exec_delay
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,0,(7000+i),0,0,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
@@ -1388,40 +1516,7 @@ def axpby_normal(f, input_size):
     gen_normal_req_from_row(f,5000,num_rd,'LD')
     gen_normal_req_from_row(f,6000,num_rd,'LD')
     gen_normal_req_from_row(f,7000,num_rd,'ST')
-    # cnt_req = 0
-    # done = 0
-    # for ro in range(NUM_ROW):
-    #     for rk in range(NUM_RANK):        
-    #         for ba in range(NUM_BANK):
-    #             for co in range(NUM_COL): 
-    #                 for bg in range(NUM_BANKGROUP):
-    #                     for ch in range(NUM_CHANNEL):
-    #                         write_normal_trace(f,'LD',encode_normal_address(ch, rk, bg, ba, 5000+ro, co))
-    #                         cnt_req+=1
-    #                         if cnt_req == num_rd:
-    #                             done = 1
-                            
-    #                         if done == 1:
-    #                             break
-    #                     if done == 1:
-    #                         break    
-    #                 if done == 1:
-    #                     break 
-    #             if done == 1:
-    #                 break
-    #         if done == 1:
-    #             break
-    #     if done == 1:
-    #         break    
-            
-    # for _ in range(num_rd):
-    #     write_normal_trace(f,'LD',src_X_addr)
-    #     write_normal_trace(f,'LD',src_Y_addr)
-    #     src_X_addr+=BURST_SIZE
-    #     src_Y_addr+=BURST_SIZE
-    # for _ in range(num_rd):
-    #     write_normal_trace(f,'ST',des_Z_addr)        
-    #     des_Z_addr+=BURST_SIZE
+ 
 
 # AXPBYPCZ  : W = aX + bB + zZ
 def axpbypcz_normal(f, input_size):
@@ -1444,23 +1539,108 @@ def axpbypcz_normal(f, input_size):
     gen_normal_req_from_row(f,5000,num_rd,'LD')
     gen_normal_req_from_row(f,6000,num_rd,'LD')
     gen_normal_req_from_row(f,7000,num_rd,'LD')
-    gen_normal_req_from_row(f,8000,num_rd,'ST')
+    gen_normal_req_from_row(f,8000,num_rd,'ST') 
 
-    # for _ in range(num_rd):
-    #     write_normal_trace(f,'LD',src_X_addr)
-    #     write_normal_trace(f,'LD',src_B_addr)
-    #     write_normal_trace(f,'LD',src_Z_addr)
-    #     src_X_addr+=BURST_SIZE
-    #     src_B_addr+=BURST_SIZE
-    #     src_Z_addr+=BURST_SIZE
-    # for _ in range(num_rd):
-    #     write_normal_trace(f,'ST',des_W_addr)        
-    #     des_W_addr+=BURST_SIZE    
+def axpy_normal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        Z = aX + Y
+        --- Iteration InputSize/8K -------
+        Read X
+        Read Y
+
+        Vector X: Row 5000
+        Vector Y: Row 6000
+        Vector Z: Row 7000
+        ROW5000        
+    '''
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'LD')
+    gen_normal_req_from_row(f,7000,num_rd,'ST')
+
+def copy_normal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        Y = X
+        --- Iteration InputSize/8K -------
+        Read X
+        Write Y
+
+        Vector X: Row 5000
+        Vector Y: Row 6000
+        ROW5000        
+    '''
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'ST')    
+
+def xmy_normal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        Z = X ⨀ Y
+        --- Iteration InputSize/8K -------
+        Read X
+        Read Y
+        Write Z
+
+        Vector X: Row 5000
+        Vector Y: Row 6000
+        Vector Z: Row 7000
+    '''
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'LD')
+    gen_normal_req_from_row(f,7000,num_rd,'ST')      
+
+def dot_normal(f, input_size):
+    '''
+        input_size: (8K, 32K, 64K, 128K, 512K, 8M)*NORMAL_SCALE_FACTOR*NUM_CHANNEL
+        c = X·Y
+        --- Iteration InputSize/8K -------
+        Read X
+        Read Y
+        Write c
+
+        Vector X: Row 5000
+        Vector Y: Row 6000
+        Scalar C: Row 7000
+    '''
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+
+    gen_normal_req_from_row(f,5000,num_rd,'LD')
+    gen_normal_req_from_row(f,6000,num_rd,'LD')
+    gen_normal_req_from_row(f,7000,1,'ST')     
+
+def gemv_normal(f, input_size):
+    '''
+        input_size (vector): 8KB(4K), 16KB(8K), 32KB(16K), 64KB(32K), 128KB(64K)
+        Matrix Size(elements); 4K x 4K, 8K x 8K, 16K x 16K, ..
+        
+        Read Vector 
+        Read Matrix .. each Row.. 
+
+        vec_size = int(mat_input_size_byte_list[input_size]/2)        
+
+    '''
+    # Require RD per Row
+    num_rd = int(mat_input_size_byte_list[input_size]/2) / 32
+    num_row = int(mat_input_size_byte_list[input_size]/2)
+    # elements_per_row = 32 * NUM_COL * NUM_BANK * NUM_BANKGROUP * NUM_RANK * NUM_CHANNEL (-1M)
+
+    gen_normal_req_from_row(f,1000,num_rd,'LD')
+    gen_normal_req_from_row(f,2000,num_rd * num_row,'LD')
+    gen_normal_req_from_row(f,1001,num_rd,'ST')         
+    print(f"=======================================")
+    print(f" GEMV Normal Mode - Size: {mat_input_size_byte_list[input_size]}")    
+    print(f"  - RD Vecotr: {num_rd}")    
+    print(f"  - RD Matrix: {num_rd * num_row}")    
+    print(f"  - WR Vecotr: {num_rd}")    
 
 def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor=-1):
-    # if seed is not None:
-    #     #random.seed(seed)
-
     file_name = "none.txt"
     if workload in workload_list:
         file_name = workload + ".txt"
@@ -1492,7 +1672,7 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor
             print("Error: Wrong Input Size")
             exit(1)
     else: 
-        file_name = "non_ndp_" + file_name
+        file_name = "baseline_" + file_name
     
     # Set Address Mapping Scheme 
     config_scale_factor(scaling_factor)
@@ -1524,6 +1704,16 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor
                 axpby_normal(f,size)
             elif workload == "AXPBYPCZ":
                 axpbypcz_normal(f,size)
+            elif workload == "AXPY":
+                axpy_normal(f,size)          
+            elif workload == "COPY":
+                copy_normal(f,size)          
+            elif workload == "XMY":
+                xmy_normal(f,size)                                    
+            elif workload == "DOT":
+                dot_normal(f,size)  
+            elif workload == "GEMV":
+                gemv_normal(f,size)                    
             else:
                 print("Error: Not Implemented Workload")
                 exit(1)
@@ -1551,30 +1741,18 @@ if __name__ == '__main__':
     print(" - NDP Workload Path: ",ndp_trace_path)
     print(" - Non-NDP Workload Path: ",non_ndp_trace_path)
 
+    # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
+
     for size in input_size_list:
-        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
-        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
-        generate_trace("AXPBY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)
-        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
-        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
-        generate_trace("AXPBYPCZ", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
-        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
-        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
-        generate_trace("AXPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)        
-        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
-        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
-        generate_trace("COPY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)     
-        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=1)
-        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=2)
-        generate_trace("XMY", size,ndp_trace_path, is_ndp_ops=True, scaling_factor=4)                
-        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
-        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
-        generate_trace("DOT", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
+        for bench in ["AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT"]:
+            generate_trace(bench, size,non_ndp_trace_path, is_ndp_ops=False, scaling_factor=1)
+            for scaling in [1, 2, 4]:
+                generate_trace(bench, size,ndp_trace_path, is_ndp_ops=True, scaling_factor=scaling)
 
     for size in mat_input_size_list:
-        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=1)
-        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=2)
-        generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=4)
+        generate_trace("GEMV", size,non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
+        for scaling in [1, 2, 4]:
+            generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=scaling)
         
     # for size in input_size_list:
     #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
