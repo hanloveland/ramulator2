@@ -324,7 +324,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       if(req.is_ndp_req) {
         if(m_dram->is_ndp_access(req.addr_vec)) {
-          // NDP Access (NDP_CONF, ISNT/DAT MMEM)
+          // NDP Access (NDP_CONF, ISNT/DAT MEM)
           if(req.type_id == Request::Type::Read) req.final_command = m_dram->m_request_translations(m_dram->m_requests("ndp-db-read"));
           else                                   req.final_command = m_dram->m_request_translations(m_dram->m_requests("ndp-db-write")); 
         } else {
