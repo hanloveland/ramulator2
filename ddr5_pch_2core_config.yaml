@@ -1,0 +1,67 @@
+Frontend:
+  impl: LoadStoreNCoreTrace
+  clock_ratio: 1
+  num_cores: 2
+  debug_mode: false
+  
+  # Core 0: NDP unit with high memory bandwidth
+  core0_trace: "./trace/ndp/ndp_4x_2M_AXPBY.txt"
+  core0_mshr_size: 32  # Large MSHR for high bandwidth
+  
+  # Core 1: CPU core with moderate memory access
+  core1_trace: "../spec_trace/401.bzip2"
+  core1_mshr_size: 32  # Standard MSHR size
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+              
+
+MemorySystem:
+  impl: ndpDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: DDR5-pCH
+    org:
+      # DBX Preset: DDR5_16Gb_x4, DDR5_16Gb_x8, DDR5_16Gb_x16 
+      preset: DDR5_16Gb_DBX_x4
+      channel: 2
+      pseudochannel : 4
+      rank: 1
+      # DRAM DQs on DIMM-side: 4, 8, 16  
+      dq: 4
+      real_dq: 4
+      # IO Freqeucny Boost: 1 2, 4
+      io_boost: 1
+    timing:
+      preset: DDR5_4800B 
+    RFM:
+      BRC: 0  
+    drampower_enable: true
+    power_debug: false
+    use_db_fetch: true
+    ndp_inst_slot: 8
+    voltage:
+      preset: Default
+    current:
+      # DBX preset: DDR5_4800x4, DDR5_4800x8, DDR5_4800x16
+      preset: DDR5_4800x4
+
+  Controller:
+    impl: ndpDRAMCtrl
+    Scheduler:
+      impl: NDPFRFCFS
+    RefreshManager:
+      impl: DR5CHAllBank
+    RowPolicy:
+      impl: OpenRowPolicy
+      # impl: ClosedRowPolicyPch
+      cap: 4
+    plugins:
+
+  AddrMapper:
+    # impl: RoRaCoBaPcCh
+    # impl: RoRabkCoBgPcCh    
+    # impl: RoBaRaCoPcCh
+    impl: RoCoBaRaPcCh
+    
