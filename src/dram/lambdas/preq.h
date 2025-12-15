@@ -131,6 +131,12 @@ int RequireSameBanksClosed(typename T::Node* node, int cmd, const AddrVec_t& add
     return T::m_commands["PREsb"];
   }
 };
+
+template <class T>
+int NoRequire(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+  return cmd;
+};
+
 }       // namespace Rank
 namespace Channel {
   template <class T>
