@@ -750,7 +750,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
     bool is_finished() override {
       bool is_dram_ctrl_finished = true;
-      if((m_active_buffer.size() != 0) || (m_read_buffer.size() != 0) || (m_write_buffer.size() != 0) || (pending.size() != 0)) 
+      if((m_active_buffer.size() != 0) || (m_read_buffer.size() != 0) || (pending.size() != 0)) 
+      // || (m_write_buffer.size() != 0) 
         is_dram_ctrl_finished = false;
 
       return (is_dram_ctrl_finished);

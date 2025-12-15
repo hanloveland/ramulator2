@@ -365,10 +365,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             int dimm_id = req.addr_vec[0]/2;
             int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];
             DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Host send NDP Request to NDP Unit");            
-          } else {
-            DEBUG_PRINT(m_clk,"HSNC", -1, -1, "Host send Normal Request to NDP Unit");
-          }
-          
+          } 
+
           is_success = m_controllers[channel_id]->send(req);
           if (is_success) {
             switch (req.type_id) {
@@ -400,7 +398,25 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       }
 
       // Loop All DIMM 
-      
+      #ifdef NDP_DEBUG      
+        if(m_clk%10000 == 0) {
+          std::cout<<"dimm/pch_lvl_req_buffer"<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            std::cout<<"  - DIMM["<<dimm_id<<"] : "<<dimm_lvl_req_buffer[dimm_id].size()<<std::endl;
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              std::cout<<"  - PCH["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size()<<std::endl;;            
+            }
+          }
+
+          std::cout<<"Status"<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            std::cout<<"  - DIMM["<<dimm_id<<"]"<<std::endl;
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              std::cout<<"  - PCH["<<pch_id<<"] : "<<pch_lvl_hsnc_status[dimm_id][pch_id]<<std::endl;;            
+            }
+          }                
+        }
+      #endif 
       bool dimm_lvl_buf_empty = true;
       #ifdef DIMM_LVL_BUF
         // DIMM-level Address Buffer
@@ -906,6 +922,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               all_nl_req_buffer_empty = false;
               return true;
             } else {
+              // DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "DIMM-level NDP Launch Request Buffer FULL!");
               // dimm_level req_buffer is full
               return false;
             }
@@ -1103,7 +1120,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       req.addr_vec[m_dram->m_levels("column")]        = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col;
       req.ndp_id                                      = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].id;
       req.is_ndp_req                                  = true;
-
+      req.arrive                                      = m_clk;
       // Send NDP-Launch Request to Memory Controller 
       bool issue_req;
       issue_req = m_controllers[ch_id]->send(req);            
@@ -1125,6 +1142,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id]++;
         }
 
+      } else {
+        #ifdef NDP_DEBUG
+        std::cout<<"["<<m_clk<<"] [HSNC] Fail Send : ";
+        m_dram->print_req(req);
+        #endif                
       }
     }
 

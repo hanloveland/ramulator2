@@ -114,6 +114,14 @@ class FRFCFS : public IScheduler, public Implementation {
       return buffer.end();
     } 
 
+    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) override  {
+      return buffer.end();
+    }    
+
+    ReqBuffer::iterator compare_priority(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
+      return req1;      
+    };    
+
 };
 
 }       // namespace Ramulator

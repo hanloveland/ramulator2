@@ -10,12 +10,29 @@ class NDPFRFCFS : public IScheduler, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IScheduler, NDPFRFCFS, "NDPFRFCFS", "NDPFRFCFS DRAM Scheduler.")
   private:
     IDRAM* m_dram;
+    std::vector<int> m_cmd_priority_list;             // Command priority list
+    std::unordered_map<int, int> m_cmd_priority_map;  // Command -> priority mapping
 
   public:
     void init() override { };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
       m_dram = cast_parent<IDRAMController>()->m_dram;
+    };
+
+    void set_command_priority(const std::vector<int>& cmd_list) {
+        m_cmd_priority_list = cmd_list;
+        m_cmd_priority_map.clear();
+        
+        // Higher index = higher priority
+        for (size_t i = 0; i < cmd_list.size(); i++) {
+            m_cmd_priority_map[cmd_list[i]] = cmd_list.size() - i;
+        }
+    };
+    
+    int get_command_priority(const int cmd) const {
+        auto it = m_cmd_priority_map.find(cmd);
+        return (it != m_cmd_priority_map.end()) ? it->second : 0;
     };
 
     ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
@@ -44,17 +61,60 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       } 
     }
   
+    ReqBuffer::iterator compare_priority(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
+      bool ready1, ready2;
+      int  priority1, priority2;
+
+      ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
+      ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
+      
+      priority1 = get_command_priority(req1->command);
+      priority2 = get_command_priority(req2->command);
+
+      ready1 = ready1 && req1_ready && (priority1 > 0);
+      ready2 = ready2 && req2_ready && (priority2 > 0);
+      
+      // Both ready - compare by command priority first
+      if (ready1 && ready2) {          
+          // Higher priority wins
+          if (priority1 > priority2) {
+              return req1;
+          } else if (priority2 > priority1) {
+              return req2;
+          }
+          
+          // Same priority - fall back to FCFS (First-Come-First-Serve)
+          if (req1->arrive <= req2->arrive) {
+              return req1;
+          } else {
+              return req2;
+          }
+      }
+      
+      // Only one ready
+      if (ready1) {
+          return req1;
+      } else if (ready2) {
+          return req2;
+      }
+      
+      // Neither ready - fallback to FCFS by arrival time
+      if (req1->arrive <= req2->arrive) {
+          return req1;
+      } else {
+          return req2;
+      }
+    };
+
     bool check_db_buf_over_th(ReqBuffer::iterator req) {
       bool over_threshold = false;
       // Check It's not in m_activity_buffer and it's request is PRE_WR
       
-      if((req->command == m_dram->m_commands("P_ACT") && (req->final_command == m_dram->m_commands("WR") || 
-          req->final_command == m_dram->m_commands("WRA"))) || req->command == m_dram->m_commands("PRE_WR")) {
+      if((req->final_command == m_dram->m_commands("WR") || req->final_command == m_dram->m_commands("WRA"))) {
         // Check Write Fetch Buffer 
-        if((m_dram->get_db_wr_fetch_per_pch(req->addr_vec)) >= 16) over_threshold = true;
-      } else if((req->command == m_dram->m_commands("ACT") && (req->final_command == m_dram->m_commands("RD") || 
-      req->final_command == m_dram->m_commands("RDA"))) || req->command == m_dram->m_commands("PRE_RD")) {
-        if((m_dram->get_db_rd_fetch_per_pch(req->addr_vec)) >= 16) over_threshold = true;
+        if((m_dram->get_db_wr_fetch_per_pch(req->addr_vec)) >= 8) over_threshold = true;
+      } else if((req->final_command == m_dram->m_commands("RD") || req->final_command == m_dram->m_commands("RDA"))) {
+        if((m_dram->get_db_rd_fetch_per_pch(req->addr_vec)) >= 8) over_threshold = true;
       }
       return over_threshold;
     }
@@ -91,6 +151,30 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       return candidate;
     }
 
+    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) override  {
+      if (buffer.size() == 0) {
+          return buffer.end();
+      }
+      
+      // Update priority mapping if provided
+      if (!cmd_priority_list.empty()) {
+          set_command_priority(cmd_priority_list);
+      }
+      
+      // Specify command for all requests in the buffer
+      for (auto& req : buffer) {
+          req.command = m_dram->get_preq_command(req.final_command, req.addr_vec);
+      }
+      
+      // Pick up the oldest/highest priority command that is ready
+      auto candidate = buffer.begin();
+      for (auto next = std::next(buffer.begin(), 1); next != buffer.end(); next++) {
+          candidate = compare_priority(candidate, next, true, true);
+      }
+      
+      return candidate;
+    }    
+
     
     // Get Best 
     //   - WRITE (PRE_WR) Reuqest
@@ -119,7 +203,6 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     
     
     // Deprecated Source 
-    
     bool check_post_rw(ReqBuffer::iterator req, bool write_mode) {
       return false;
     }    
