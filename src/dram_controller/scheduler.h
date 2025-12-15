@@ -15,8 +15,15 @@ class IScheduler {
   public:
     virtual ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) = 0;
 
-    virtual ReqBuffer::iterator get_best_request(ReqBuffer& buffer) = 0;
+    virtual ReqBuffer::iterator compare_priority(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) = 0;
 
+    virtual ReqBuffer::iterator get_best_request(ReqBuffer& buffer) = 0;
+    
+    virtual ReqBuffer::iterator get_best_pre_request(ReqBuffer& buffer) = 0;
+    
+    virtual ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) = 0;
+
+    // Deprecated Function 
     virtual ReqBuffer::iterator get_best_request_refresh_ch(ReqBuffer& buffer) = 0;
 
     virtual ReqBuffer::iterator get_best_request_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) = 0;
@@ -25,7 +32,6 @@ class IScheduler {
 
     virtual ReqBuffer::iterator get_best_request_refresh_ch_with_mask(ReqBuffer& buffer, std::vector<bool>& mask_array) = 0;
 
-    virtual ReqBuffer::iterator get_best_pre_request(ReqBuffer& buffer) = 0;
 };
 
 }       // namespace Ramulator
