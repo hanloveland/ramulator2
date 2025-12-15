@@ -29,7 +29,8 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       std::vector<Trace> trace;
       size_t curr_idx;
       size_t max_outstanding;
-      
+      uint64_t m_max_trace_inst;      
+
       // Outstanding requests tracking
       struct OutstandingRequest {
         uint64_t issue_time;
@@ -44,12 +45,13 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       uint64_t total_read_latency;
       
       CoreState(int id, size_t mshr_size) 
-        : core_id(id), curr_idx(0), max_outstanding(mshr_size),
+        : core_id(id), curr_idx(0), max_outstanding(mshr_size), m_max_trace_inst(0),
           total_read_requests(0), total_write_requests(0), 
           completed_reads(0), total_read_latency(0) {}
       
       bool is_finished() const {
-        return curr_idx >= trace.size() && outstanding_reads.empty();
+        return (curr_idx >= trace.size() || curr_idx >= m_max_trace_inst) && outstanding_reads.empty();
+        
       }
       
       double avg_read_latency() const {
@@ -76,11 +78,13 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       if (m_num_cores <= 0) {
         throw ConfigurationError("num_cores must be positive!");
       }
-
+      
       // Debug mode configuration
       m_debug_mode = param<bool>("debug_mode").desc("Enable detailed debug logging").default_val(false);
       
       m_logger->info("Initializing {} cores... (debug_mode={})", m_num_cores, m_debug_mode);
+
+      uint64_t m_max_trace_inst = param<int>("max_inst").desc("Number of Issued Trace Instruction").default_val(1000);
 
       // Initialize each core
       for (int core_id = 0; core_id < m_num_cores; core_id++) {
@@ -91,6 +95,8 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
                             .default_val(16);
         
         CoreState* core = new CoreState(core_id, mshr_size);
+        
+        core->m_max_trace_inst = m_max_trace_inst;
         
         // Load trace for this core
         std::string trace_param_name = "core" + std::to_string(core_id) + "_trace";
@@ -138,7 +144,8 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
     void try_issue_requests(CoreState* core) {
       // Try to issue as many requests as possible from this core
       while (core->curr_idx < core->trace.size() && 
-             core->outstanding_reads.size() < core->max_outstanding) {
+             core->outstanding_reads.size() < core->max_outstanding && 
+             core->m_max_trace_inst > core->curr_idx) {
         
         const Trace& t = core->trace[core->curr_idx];
         
