@@ -16,6 +16,7 @@ namespace Ramulator {
 class NDPDRAMController final : public IDRAMController, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IDRAMController, NDPDRAMController, "ndpDRAMCtrl", "A NDP DRAM controller.");
   private:
+    Logger_t m_logger;
     std::deque<Request> pending;           // A queue for read requests that are about to finish (callback after RL)
     // Hardcoding Pseudo-Channel is fixed to 4
     ReqBuffer m_active_buffer;             // Buffer for requests being served. This has the highest priority 
@@ -40,7 +41,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     enum DB_DRAM_RW_MODE {
       DRAM_REF,
       DRAM_RD, 
-      DRAM_WR
+      DRAM_WR,
+      DRAM_NDP_WR
     };
 
     // Mode name strings for printing
@@ -48,8 +50,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         "DB_NDP_WR", "DB_RD", "DB_WR"
     };
     
-    const std::array<std::string, 3> DB_DRAM_MODE_NAMES = {
-        "DRAM_REF", "DRAM_RD", "DRAM_WR"
+    const std::array<std::string, 4> DB_DRAM_MODE_NAMES = {
+        "DRAM_REF", "DRAM_RD", "DRAM_WR", "DRAM_NDP_WR"
     };
 
     // mc_db, db_dram rw mode per PCH 
@@ -71,17 +73,26 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<size_t> m_num_read_req;
     std::vector<size_t> m_num_write_req;
 
+    std::vector<size_t> m_ndp_dram_wr_timer;    
+    std::vector<size_t> m_dram_rd_timer;
+    std::vector<size_t> m_dram_ndp_rd_token;
+    std::vector<bool>   m_enable_pre_rd;
+
+    // Per-Bank RD/WR Counter
+    std::vector<size_t> m_host_access_cnt_per_bank;
+    std::vector<size_t> m_ndp_access_cnt_per_bank;
+
     // Per-channel mode statistics
     struct ChannelModeStats {
         // MC <-> DB mode cycles
         std::array<uint64_t, 3> mc_db_mode_cycles;  // [DB_NDP_WR, DB_RD, DB_WR]
         
         // DB <-> DRAM mode cycles
-        std::array<uint64_t, 3> db_dram_mode_cycles;  // [DRAM_REF, DRAM_RD, DRAM_WR]
+        std::array<uint64_t, 4> db_dram_mode_cycles;  // [DRAM_REF, DRAM_RD, DRAM_WR, DRAM_NDP_WR]
             
         ChannelModeStats() 
             : mc_db_mode_cycles{0, 0, 0},
-              db_dram_mode_cycles{0, 0, 0} {}      
+              db_dram_mode_cycles{0, 0, 0, 0} {}      
     };
 
     // Statistics per pseudo channel
@@ -106,12 +117,23 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     size_t m_wr_high_threshold;
     size_t m_wr_low_threshold;
     size_t ndp_dram_wr_max_age;
+    size_t ndp_wr_mode_min_time;
+    size_t dram_rd_mode_min_time;
     // NDP Request threshold (0.0 ~ 1.0)
-    float m_ndp_read_threshold;
-    float m_ndp_write_threshold;
+    float m_ndp_read_max_threshold;
+    float m_ndp_write_max_threshold;
+    float m_ndp_read_high_threshold;
+    float m_ndp_write_high_threshold;    
+    float m_ndp_read_low_threshold;
+    float m_ndp_write_low_threshold;    
+    size_t high_max_ndp_read_reqs;
+    size_t low_max_ndp_read_reqs;
+    size_t high_max_ndp_write_reqs;
+    size_t low_max_ndp_write_reqs;
+
     // Calculated max NDP request counts
-    size_t m_max_ndp_read_reqs;     // max_ndp_read_reqs = read_buffer_size * threshold
-    size_t m_max_ndp_write_reqs;    // max_ndp_write_reqs = write_buffer_size * threshold
+    std::vector<size_t> m_max_ndp_read_reqs;     // max_ndp_read_reqs = read_buffer_size * threshold
+    std::vector<size_t> m_max_ndp_write_reqs;    // max_ndp_write_reqs = write_buffer_size * threshold
     
     std::vector<int>   cmd_cycle_per_pch;
 
@@ -170,8 +192,12 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     bool use_pseudo_ch = false;
     int num_pseudochannel = -1;
+    int num_bankgroup = -1;
+    int num_bank = -1;
     int ch_idx = 0;
     int psuedo_ch_idx = 0;
+    int bankgroup_idx = 0;
+    int bank_idx = 0;
     std::vector<int> db_prefetch_cnt_per_pch;
     std::vector<int> db_prefetch_rd_cnt_per_pch;
     std::vector<int> db_prefetch_wr_cnt_per_pch;
@@ -193,7 +219,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint32_t s_num_ndp_db_rd   = 0; 
     uint32_t s_num_ndp_db_wr   = 0; 
 
-    // 초기화 시 (생성자에서)
+    uint32_t m_prev_num_cmd = 0;
     uint32_t m_prev_num_rd = 0;
     uint32_t m_prev_num_wr = 0;
     uint32_t m_prev_num_pre_wr = 0;
@@ -205,6 +231,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint32_t m_prev_num_ndp_db_rd = 0;
     uint32_t m_prev_num_ndp_db_wr = 0;
     
+    std::vector <uint32_t> m_his_num_cmd;
     std::vector <uint32_t> m_his_num_rd;
     std::vector <uint32_t> m_his_num_wr;
     std::vector <uint32_t> m_his_num_pre_wr;
@@ -229,14 +256,27 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     // Round-Robin Vector
     std::vector<int> rr_pch_idx;
+
+    uint64_t m_avg_active_buffer;
+    std::vector<uint64_t> m_avg_read_buffers;
+    std::vector<uint64_t> m_avg_write_buffers;;
+    std::vector<uint64_t> m_avg_priority_buffers;
+    std::vector<uint64_t> m_avg_rd_prefetch_buffers;
+    std::vector<uint64_t> m_avg_wr_prefetch_buffers;
+
+    size_t buf_size = 32;
+
   public:
-    void init() override {
+    void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
       m_wr_high_watermark = param<float>("wr_high_watermark").desc("Threshold for switching to write mode.").default_val(0.8f);
       ndp_dram_wr_max_age = param<size_t>("ndp_wr_max_age").desc("Threshold for Maxium NDP Write Age").default_val(512);
-
-      m_ndp_read_threshold  = param<float>("ndp_read_threshold").desc("Threshold for NDP Read Request").default_val(0.5f);
-      m_ndp_write_threshold = param<float>("ndp_write_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);
+      ndp_wr_mode_min_time = param<size_t>("ndp_wr_mode_min_time").desc("Keep NDP_WR_MODE at least ..").default_val(512);
+      dram_rd_mode_min_time = param<size_t>("dram_rd_mode_min_time").desc("Keep DRAM_RD at least ..").default_val(512);
+      m_ndp_read_high_threshold = param<float>("ndp_read_high_threshold").desc("Threshold for NDP Read Request").default_val(0.5f);
+      m_ndp_write_high_threshold = param<float>("ndp_write_high_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);
+      m_ndp_read_low_threshold = param<float>("ndp_read_low_threshold").desc("Threshold for NDP Read Request").default_val(0.5f);
+      m_ndp_write_low_threshold = param<float>("ndp_write_low_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);      
 
       m_scheduler = create_child_ifce<IScheduler>();
       m_refresh = create_child_ifce<IRefreshManager>();    
@@ -262,12 +302,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(m_dram->get_level_size("pseudochannel") == -1) use_pseudo_ch = false;
       else                                              use_pseudo_ch = true;
 
-      psuedo_ch_idx = m_dram->m_levels("pseudochannel");
       ch_idx = m_dram->m_levels("channel");
+      psuedo_ch_idx = m_dram->m_levels("pseudochannel");
+      bankgroup_idx = m_dram->m_levels("bankgroup");
+      bank_idx = m_dram->m_levels("bank");
 
       m_use_prefetch = m_dram->get_use_prefetch();
 
       m_num_cores = frontend->get_num_cores();
+
+      m_logger = Logging::create_logger("NDPDRAMCtrl_"+std::to_string(m_channel_id));
 
       s_read_row_hits_per_core.resize(m_num_cores, 0);
       s_read_row_misses_per_core.resize(m_num_cores, 0);
@@ -314,6 +358,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       register_stat(s_max_effective_bandwidth).name("s_max_effective_bandwidth_{}", m_channel_id);
 
       num_pseudochannel = m_dram->get_level_size("pseudochannel");  
+      num_bankgroup = m_dram->get_level_size("bankgroup");  
+      num_bank = m_dram->get_level_size("bank");         
 
       // Initialize Per Pseudo-Channel Request Buffer and set Max Request Capacity     
       m_read_buffers.resize(num_pseudochannel,ReqBuffer());
@@ -346,21 +392,19 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_num_read_req.resize(num_pseudochannel,0);
       m_num_write_req.resize(num_pseudochannel,0);      
       
-      // m_his_num_rd.resize(1,0);
-      // m_his_num_wr.resize(1,0);
-      // m_his_num_pre_wr.resize(1,0);
-      // m_his_num_post_wr.resize(1,0);
-      // m_his_num_pre_rd.resize(1,0);
-      // m_his_num_post_rd.resize(1,0);
-      // m_his_num_ndp_dram_rd.resize(1,0);
-      // m_his_num_ndp_dram_wr.resize(1,0);
-      // m_his_num_ndp_db_rd.resize(1,0);
-      // m_his_num_ndp_db_wr.resize(1,0);
+      m_ndp_dram_wr_timer.resize(num_pseudochannel,0);
+      m_dram_rd_timer.resize(num_pseudochannel,0);
+
+      m_dram_ndp_rd_token.resize(num_pseudochannel,0);
+      m_enable_pre_rd.resize(num_pseudochannel,false);      
+
+      m_host_access_cnt_per_bank.resize(num_pseudochannel*num_bankgroup*num_bank,0);      
+      m_ndp_access_cnt_per_bank.resize(num_pseudochannel*num_bankgroup*num_bank,0);            
+
       // to be Deprecated 
       // m_is_write_mode_per_pch.resize(num_pseudochannel,false);
       // prefetch_mode_before_ref_per_ch.resize(num_pseudochannel,false);
 
-      size_t buf_size = 32;
       for(int i=0; i<num_pseudochannel; i++) {
         m_read_buffers[i].max_size = buf_size;
         m_write_buffers[i].max_size = buf_size;
@@ -370,9 +414,24 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         rr_pch_idx.push_back(i);
       }
       m_wr_high_threshold   = (size_t)(buf_size * m_wr_high_watermark);
-      m_wr_low_threshold    = (size_t)(buf_size * m_wr_low_watermark);
-      m_max_ndp_read_reqs   = (size_t)(buf_size * m_ndp_read_threshold);
-      m_max_ndp_write_reqs  = (size_t)(buf_size * m_ndp_write_threshold);            
+      m_wr_low_threshold    = (size_t)(buf_size * m_wr_low_watermark);      
+      m_max_ndp_read_reqs.resize(num_pseudochannel,(size_t)(buf_size * (m_ndp_read_high_threshold+m_ndp_read_low_threshold)/2));
+      m_max_ndp_write_reqs.resize(num_pseudochannel,(size_t)(buf_size * (m_ndp_write_high_threshold+m_ndp_write_low_threshold)/2));            
+
+      high_max_ndp_read_reqs = (size_t)(buf_size * m_ndp_read_high_threshold);
+      low_max_ndp_read_reqs = (size_t)(buf_size * m_ndp_read_low_threshold);
+      high_max_ndp_write_reqs = (size_t)(buf_size * m_ndp_write_high_threshold);
+      low_max_ndp_write_reqs = (size_t)(buf_size * m_ndp_write_low_threshold);                    
+
+      m_logger->info("NDPDRAMCtrl init()");
+      m_logger->info(" - Active Buffer Size         : {}",m_active_buffer.max_size);
+      m_logger->info(" - Priority Buffer Size       : {}",m_priority_buffers[0].max_size);
+      m_logger->info(" - Read Buffer Size           : {}",m_read_buffers[0].max_size);
+      m_logger->info(" - Write Buffer Size          : {}",m_write_buffers[0].max_size);
+      m_logger->info(" - Read Prefetch Buffer Size  : {}",m_rd_prefetch_buffers[0].max_size);
+      m_logger->info(" - Write Prefetch Buffer Size : {}",m_rd_prefetch_buffers[0].max_size);
+      m_logger->info(" - MAX NDP Read Request       : {}",m_max_ndp_read_reqs[0]);
+      m_logger->info(" - MAX NDP Write Request      : {}",m_max_ndp_write_reqs[0]);
 
       if(num_pseudochannel != -1) {
         s_num_trans_per_pch.resize(num_pseudochannel, 0);
@@ -439,6 +498,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       ndp_config_reg_resp_per_pch.resize(num_pseudochannel,std::vector<int>(0,0));     
 
       cmd_cycle_per_pch.resize(num_pseudochannel,0);
+
+      m_avg_active_buffer = 0;
+      m_avg_read_buffers.resize(num_pseudochannel,0);
+      m_avg_write_buffers.resize(num_pseudochannel,0);
+      m_avg_priority_buffers.resize(num_pseudochannel,0);
+      m_avg_rd_prefetch_buffers.resize(num_pseudochannel,0);
+      m_avg_wr_prefetch_buffers.resize(num_pseudochannel,0);
     };
 
     bool send(Request& req) override {
@@ -534,6 +600,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             num_ndp_total_wr_req++;
           }          
         }
+
+        int flat_bank_id = req.addr_vec[bank_idx] + req.addr_vec[bankgroup_idx] * num_bank + req.addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
+        if(req.is_ndp_req) m_ndp_access_cnt_per_bank[flat_bank_id]++;
+        else               m_host_access_cnt_per_bank[flat_bank_id]++;
       }
       // if(is_success) {
         // std::cout<<"[NDP_DRAM_CTRL] Get Request ";
@@ -561,54 +631,149 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       m_clk++;
 
-      // #ifdef PRINT_DEBUG
-        if(m_clk%100000 == 0) {
-          std::cout<<"Active Buf: "<<m_active_buffer.size()<<std::endl;
+      for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+        if(m_db_dram_rw_modes[pch_id] == DRAM_NDP_WR) {
+          m_ndp_dram_wr_timer[pch_id]++;
+        } else {
+          m_ndp_dram_wr_timer[pch_id] = 0;
+        }
+
+        if(m_db_dram_rw_modes[pch_id] == DRAM_RD) {
+          m_dram_rd_timer[pch_id]++;
+        } else {
+          m_dram_rd_timer[pch_id] = 0;
+        }
+      }
+
+      // Update Each Row Cap 
+      for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+        for(int bg_id=0;bg_id<num_bankgroup;bg_id++) {
+          for(int bk_id=0;bk_id<num_bank;bk_id++) {
+            int flat_bank_id = bk_id + bg_id * num_bank + pch_id * num_bankgroup*num_bank;
+            int host_access = m_host_access_cnt_per_bank[flat_bank_id];
+            int ndp_access = m_ndp_access_cnt_per_bank[flat_bank_id];
+            if(host_access < 0 || host_access > 32) 
+              throw std::runtime_error("Host Access Count Error");
+            if(ndp_access < 0 || ndp_access > 32) 
+              throw std::runtime_error("NDP Access Count Error");
+            if(host_access == 0 || ndp_access == 0) {
+              // Max Cap 
+              m_rowpolicy->update_cap(pch_id,bg_id,bk_id,128);
+            } else {
+              m_rowpolicy->update_cap(pch_id,bg_id,bk_id,16);
+            }
+          }
+        }             
+      }
+
+      //Update Max NDP Read/Write Requests
+      if(m_clk%32 == 0) {
+        for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+          int rd_buf_headroom = buf_size - m_read_buffers[pch_id].size();          
+          int ndp_rd_headroom = m_max_ndp_read_reqs[pch_id] - (m_num_db_rd_cnts[pch_id] + m_num_dram_rd_cnts[pch_id]);
+
+          if(rd_buf_headroom >=4 && ndp_rd_headroom <= 1 && high_max_ndp_read_reqs > m_max_ndp_read_reqs[pch_id]) {
+            m_max_ndp_read_reqs[pch_id]+=4;
+          } else if(rd_buf_headroom < 4 && ndp_rd_headroom > 1 && low_max_ndp_read_reqs < m_max_ndp_read_reqs[pch_id]) {
+            m_max_ndp_read_reqs[pch_id]-=4;
+          } 
+
+          int wr_buf_headroom = buf_size - m_write_buffers[pch_id].size();          
+          int ndp_wr_headroom = m_max_ndp_write_reqs[pch_id] - (m_num_db_wr_cnts[pch_id] + m_num_dram_wr_cnts[pch_id]);
+
+          if(wr_buf_headroom >=4 && ndp_wr_headroom <= 1 && high_max_ndp_write_reqs > m_max_ndp_write_reqs[pch_id]) {
+            m_max_ndp_write_reqs[pch_id]+=4;
+          } else if(wr_buf_headroom < 4 && ndp_wr_headroom > 1 && low_max_ndp_write_reqs < m_max_ndp_write_reqs[pch_id]) {
+            m_max_ndp_write_reqs[pch_id]-=4;
+          }         
+        }
+      }   
+
+      // tracking every time..
+      for(int bg_id=0;bg_id<num_bankgroup;bg_id++) {
+        for(int bk_id=0;bk_id<num_bank;bk_id++) {
+            bool has_host_read_access = false;
+            bool has_ndp_read_access = false;
+            bool has_host_write_access = false;
+            bool has_ndp_write_access = false;
+            for(auto _it = m_read_buffers[0].begin(); _it != m_read_buffers[0].end(); _it++) {
+              if(bg_id == _it->addr_vec[m_dram->m_levels("bankgroup")] && bk_id == _it->addr_vec[m_dram->m_levels("bank")]) {
+                if(_it->is_ndp_req) has_ndp_read_access = true;
+                else                has_host_read_access = true;
+              }
+            }
+            for(auto _it = m_write_buffers[0].begin(); _it != m_write_buffers[0].end(); _it++) {
+              if(bg_id == _it->addr_vec[m_dram->m_levels("bankgroup")] && bk_id == _it->addr_vec[m_dram->m_levels("bank")]) {
+                if(_it->is_ndp_req) has_ndp_write_access = true;
+                else                has_host_write_access = true;
+              }
+            }         
+        }
+      }
+
+      m_avg_active_buffer+=m_active_buffer.size();
+      for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+        m_avg_read_buffers[pch_id]+=m_read_buffers[pch_id].size();
+        m_avg_write_buffers[pch_id]+=m_write_buffers[pch_id].size();
+        m_avg_priority_buffers[pch_id]+=m_priority_buffers[pch_id].size();
+        m_avg_rd_prefetch_buffers[pch_id]+=m_rd_prefetch_buffers[pch_id].size();
+        m_avg_wr_prefetch_buffers[pch_id]+=m_wr_prefetch_buffers[pch_id].size();
+      }      
+      uint64_t print_interval = 100000;
+      // uint64_t print_interval = 1024;
+      if(m_clk%print_interval == 0) {
+          #ifdef PRINT_DEBUG    
+          std::cout<<"Active Buf: "<<m_avg_active_buffer/print_interval<<std::endl;
           std::cout<<"RD_BUF"<<std::endl;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_read_buffers[pch_id].size()<<std::endl;
+            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_avg_read_buffers[pch_id]/print_interval<<std::endl;
           }
           std::cout<<"WR_BUF"<<std::endl;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_write_buffers[pch_id].size()<<std::endl;
+            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_avg_write_buffers[pch_id]/print_interval<<std::endl;
           }       
           std::cout<<"PRE_RD_BUF"<<std::endl;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_rd_prefetch_buffers[pch_id].size()<<std::endl;
+            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_avg_rd_prefetch_buffers[pch_id]/print_interval<<std::endl;
           }
           std::cout<<"PRE_WR_BUF"<<std::endl;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_wr_prefetch_buffers[pch_id].size()<<std::endl;
+            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_avg_wr_prefetch_buffers[pch_id]/print_interval<<std::endl;
           }       
           std::cout<<"PRI_BUF"<<std::endl;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_priority_buffers[pch_id].size()<<std::endl;
-            if(m_priority_buffers[pch_id].size() > 0) {
-              // ReqBuffer::iterator req_it_ref = m_priority_buffers[pch_id].begin();
-              m_dram->print_req(*(m_priority_buffers[pch_id].begin()));
-            }
-          }              
-          std::cout<<"NDP_DRAM_WR"<<std::endl;
+            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_avg_priority_buffers[pch_id]/print_interval<<std::endl;
+          }    
+          #endif          
+          m_avg_active_buffer = 0;
           for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
-            std::cout<<"  - PCH["<<pch_id<<"] : "<<m_num_dram_wr_cnts[pch_id]<<std::endl;
-            if(m_num_dram_wr_cnts[pch_id] != 0) {
-              std::cout<<"      -> Last NDP DRAM WR "<<(m_clk - m_last_ndp_dram_wr[pch_id])<<std::endl;
-              if((m_clk - m_last_ndp_dram_wr[pch_id]) > 4000) {
-                throw std::runtime_error("NDP DRAM Write.. too late to issue..");
-              }
-            }                  
-          }
+            m_avg_read_buffers[pch_id]       = 0;
+            m_avg_write_buffers[pch_id]      = 0;
+            m_avg_priority_buffers[pch_id]   = 0;
+            m_avg_rd_prefetch_buffers[pch_id]= 0;
+            m_avg_wr_prefetch_buffers[pch_id]= 0;
+          }         
+          
+          #ifdef PRINT_DEBUG    
           for(int i=0;i<num_pseudochannel;i++) {
             print_channel_periodic_stats(i);
           }
+          #endif 
           // Reset Mode Info
           for(int i=0;i<num_pseudochannel;i++) {
             for (int mode = 0; mode < 3; mode++) {
               m_periodic_channel_stats[i].mc_db_mode_cycles[mode] = 0;
-              m_periodic_channel_stats[i].db_dram_mode_cycles[mode] = 0;
             }
+            for (int mode = 0; mode < 4; mode++) {
+              m_periodic_channel_stats[i].db_dram_mode_cycles[mode] = 0;
+            }            
           }
 
+          u_int32_t num_cmd_all_pch = 0;
+          for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+            num_cmd_all_pch+=cmd_cycle_per_pch[pch_id];
+          }          
+          m_his_num_cmd.push_back(num_cmd_all_pch - m_prev_num_cmd);
           m_his_num_rd.push_back(s_num_rd - m_prev_num_rd);
           m_his_num_wr.push_back(s_num_wr - m_prev_num_wr);
           m_his_num_pre_wr.push_back(s_num_pre_wr - m_prev_num_pre_wr);
@@ -620,6 +785,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           m_his_num_ndp_db_rd.push_back(s_num_ndp_db_rd - m_prev_num_ndp_db_rd);
           m_his_num_ndp_db_wr.push_back(s_num_ndp_db_wr - m_prev_num_ndp_db_wr);
 
+          m_prev_num_cmd = num_cmd_all_pch;
           m_prev_num_rd = s_num_rd;
           m_prev_num_wr = s_num_wr;
           m_prev_num_pre_wr = s_num_pre_wr;
@@ -630,8 +796,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           m_prev_num_ndp_dram_wr = s_num_ndp_dram_wr;
           m_prev_num_ndp_db_rd = s_num_ndp_db_rd;
           m_prev_num_ndp_db_wr = s_num_ndp_db_wr;
+         
         }
-      // #endif
       // Update statistics
       s_queue_len += pending.size();
       for(int i=0;i<num_pseudochannel;i++) {
@@ -985,6 +1151,29 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             if(m_num_ref_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for REF Counter");            
             m_num_ref_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
           }
+
+          if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA")) {
+            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] < 128)
+              m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]++;
+          }        
+          
+          if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
+            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] >= 16)
+              m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]-=16;            
+          }
+
+          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
+          if(req_it->command == m_dram->m_commands("RD")     || req_it->command == m_dram->m_commands("RDA") || 
+             req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA") ||
+             req_it->command == m_dram->m_commands("WR")     || req_it->command == m_dram->m_commands("WRA") || 
+             req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")) 
+             m_host_access_cnt_per_bank[flat_bank_id]--;
+
+          if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA") ||
+             req_it->command == m_dram->m_commands("NDP_DB_WR")   || req_it->command == m_dram->m_commands("NDP_DB_RD") ||
+             req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA"))  
+            m_ndp_access_cnt_per_bank[flat_bank_id]--;
+
           // Move issued Read Request to pending buffer
           if (req_it->type_id == Request::Type::Read) {
             if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) {
@@ -1146,7 +1335,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             // Check if this requests accesses the DRAM or is being forwarded.
             // TODO add the stats back
             s_read_latency += req.depart - req.arrive;
-            if((req.command == m_dram->m_commands("RD")) || (req.command == m_dram->m_commands("RDA"))) {
+            if((req.command == m_dram->m_commands("RD")) || (req.command == m_dram->m_commands("RDA")) ||
+               (req.command == m_dram->m_commands("POST_RD")) || (req.command == m_dram->m_commands("POST_RDA"))) {
               s_normal_read_latency += req.depart - req.arrive;
             }
             // std::cout<<" RD latency ["<<(req.depart - req.arrive)<<"] ";
@@ -1215,21 +1405,42 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       // Set DB RW Mode
       size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
       size_t elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
+      if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
+        m_enable_pre_rd[pch_idx] = true;
+      else 
+        m_enable_pre_rd[pch_idx] = false;
+      
       switch (m_db_dram_rw_modes[pch_idx]) {
         case DRAM_REF: {          
           if(m_num_ref_cnts[pch_idx] > 0) {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF; 
-          } else if(num_dram_wr > m_wr_high_threshold || (m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
+          } else if(num_dram_wr > m_wr_high_threshold) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
           }
           break;
         }
-        case DRAM_WR: {         
+        case DRAM_WR: {
           if(m_num_ref_cnts[pch_idx] > 0) {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if(num_dram_wr > m_wr_low_threshold || (m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+          } else if(num_dram_wr > m_wr_low_threshold) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_WR;
+          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
+          } else {
+            m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+          }          
+          break;          
+        }
+        case DRAM_NDP_WR: {         
+          if(m_num_ref_cnts[pch_idx] > 0) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_REF;
+          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && ((m_ndp_dram_wr_timer[pch_idx] < ndp_wr_mode_min_time) || m_num_rd_cnts[pch_idx] == 0))) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
+          } else if(num_dram_wr > m_wr_high_threshold) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
@@ -1239,11 +1450,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         case DRAM_RD: {
           if(m_num_ref_cnts[pch_idx] > 0) {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if(num_dram_wr > m_wr_high_threshold || (m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age) && 
+                    ((m_dram_rd_timer[pch_idx] >= dram_rd_mode_min_time) || 
+                    m_num_post_rd_cnts[pch_idx] == 8)) {
+            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
+          } else if(num_dram_wr > m_wr_high_threshold) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
-          }          
+          }         
           break;
         }
         default: {
@@ -1252,6 +1467,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
       }  
     };    
+
 
     /**
      * @brief    Helper function to find a request to schedule from the buffers.
@@ -1262,13 +1478,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       bool request_found = false;
 
       // Update Priority Queue Empty Flag Array 
-      m_dram->reset_need_be_open_per_bank(m_channel_id);
       for(int pch_idx=0;pch_idx<m_dram->get_level_size("pseudochannel");pch_idx++) {
-        is_empty_priority_per_pch[pch_idx] = true;
-        for(auto req : m_priority_buffer) {
-          if(req.addr_vec[1] == pch_idx) is_empty_priority_per_pch[pch_idx] = false;
+        if(m_priority_buffers[pch_idx].size() != 0) {
+          is_empty_priority_per_pch[pch_idx] = false;
+        } else {
+          is_empty_priority_per_pch[pch_idx] = true;
         }
       }
+
+      // To evoid the closing of the request in the activated_buffer 
+      m_dram->reset_need_be_open_per_bank(m_channel_id);
       for(auto req : m_active_buffer) {
         m_dram->set_need_be_open_per_bank(req.addr_vec);
       }
@@ -1333,7 +1552,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     }   
                   }
                   // Search Issuable PRE_RD
-                  if(!request_found) {
+                  if(!request_found && m_enable_pre_rd[pch_idx]) {
                     if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
@@ -1424,7 +1643,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     }   
                   } 
                   // Search Issuable PRE_RD
-                  if(!request_found) {
+                  if(!request_found && m_enable_pre_rd[pch_idx]) {
                     if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
@@ -1522,7 +1741,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     }      
                   }
                   // Search Issuable PRE_RD
-                  if(!request_found) {
+                  if(!request_found && m_enable_pre_rd[pch_idx]) {
                     if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
@@ -1933,7 +2152,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         std::cout << "\n  --- DB <-> DRAM Modes ---" << std::endl;
         
         // Print DB <-> DRAM mode statistics
-        for (int mode = 0; mode < 3; mode++) {
+        for (int mode = 0; mode < 4; mode++) {
             uint64_t cycles = stats.db_dram_mode_cycles[mode];
             double ratio = (m_clk > 0) ? (100.0 * cycles / m_clk) : 0.0;
             
@@ -1966,7 +2185,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         std::cout << "\n  --- DB <-> DRAM Modes ---" << std::endl;
         
         // Print DB <-> DRAM mode statistics
-        for (int mode = 0; mode < 3; mode++) {
+        for (int mode = 0; mode < 4; mode++) {
             uint64_t cycles = stats.db_dram_mode_cycles[mode];
             double ratio = (100000 > 0) ? (100.0 * cycles / 100000) : 0.0;
             
@@ -1979,14 +2198,16 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     // Check if NDP request can be added to buffer    
     bool can_accept_ndp_request(const Request& req, int psuedo_ch_idx) {
-        if (req.type_id == Request::Type::Read) {
-            // Check total NDP read requests (NDP_DB_RD + NDP_DRAM_RD)
-            size_t ndp_rd_req = m_num_db_rd_cnts[psuedo_ch_idx] +  m_num_dram_rd_cnts[psuedo_ch_idx];
-            return ndp_rd_req < m_max_ndp_read_reqs;
-        } else if (req.type_id == Request::Type::Write) {
-            // Check total NDP write requests (NDP_DB_WR + NDP_DRAM_WR)
-            size_t ndp_wr_req = m_num_db_wr_cnts[psuedo_ch_idx] +  m_num_dram_wr_cnts[psuedo_ch_idx];            
-            return ndp_wr_req < m_max_ndp_write_reqs;
+        if(req.is_ndp_req) {
+          if (req.type_id == Request::Type::Read) {
+              // Check total NDP read requests (NDP_DB_RD + NDP_DRAM_RD)
+              size_t ndp_rd_req = m_num_db_rd_cnts[psuedo_ch_idx] +  m_num_dram_rd_cnts[psuedo_ch_idx];
+              return ndp_rd_req < m_max_ndp_read_reqs[psuedo_ch_idx];
+          } else if (req.type_id == Request::Type::Write) {
+              // Check total NDP write requests (NDP_DB_WR + NDP_DRAM_WR)
+              size_t ndp_wr_req = m_num_db_wr_cnts[psuedo_ch_idx] +  m_num_dram_wr_cnts[psuedo_ch_idx];            
+              return ndp_wr_req < m_max_ndp_write_reqs[psuedo_ch_idx];
+          }
         }
         return true;  // Non-NDP requests always accepted
     }    
@@ -1996,6 +2217,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         
         std::cout << "=== Interval Statistics ===" << std::endl;
         std::cout << std::setw(10) << "Interval"
+                  << std::setw(12) << "CMD"
                   << std::setw(12) << "RD"
                   << std::setw(12) << "WR"
                   << std::setw(12) << "PRE_WR"
@@ -2010,6 +2232,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         
         for (size_t i = 0; i < num_intervals; i++) {
             std::cout << std::setw(10) << i
+                      << std::setw(12) << m_his_num_cmd[i]
                       << std::setw(12) << m_his_num_rd[i]
                       << std::setw(12) << m_his_num_wr[i]
                       << std::setw(12) << m_his_num_pre_wr[i]
