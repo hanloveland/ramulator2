@@ -385,6 +385,19 @@ namespace Rank {
   }
 
   template <class T>
+  void DB2MC_RD(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "Incrementing DB-to-MC RD counter.", clk);
+    node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("DB2MC_RD")]++;
+  }  
+  
+  template <class T>
+  void MC2DB_WR(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "Incrementing MC-to-DB WR counter.", clk);
+    node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("MC2DB_WR")]++;
+  }    
+
+
+  template <class T>
   void finalize_rank(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
     Rank::debug<T>(node, "------finalize_rank------", clk);
     auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];

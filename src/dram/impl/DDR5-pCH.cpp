@@ -1963,6 +1963,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_powers[m_levels["rank"]][m_commands["DRFMsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["DRFMsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;
 
+      m_powers[m_levels["rank"]][m_commands["POST_RD"]] = Lambdas::Power::Rank::DB2MC_RD<DDR5PCH>;
+      m_powers[m_levels["rank"]][m_commands["PRE_WR"]] = Lambdas::Power::Rank::MC2DB_WR<DDR5PCH>;
       m_powers[m_levels["rank"]][m_commands["ACT"]] = Lambdas::Power::Rank::ACT<DDR5PCH>;
       m_powers[m_levels["rank"]][m_commands["PRE"]] = Lambdas::Power::Rank::PRE<DDR5PCH>;
       m_powers[m_levels["rank"]][m_commands["PREA"]] = Lambdas::Power::Rank::PREA<DDR5PCH>;
