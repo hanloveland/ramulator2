@@ -64,8 +64,10 @@ NDP_DAT2_MEM_BK = -1 # Not Used when DRAM x4
 NDP_DAT2_MEM_BG = -1 # Not Used when DRAM x4 
 NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4 
 NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
+NDP_TARGET_BK = 3    # To decoule host access and DRAM access
 
 PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
+# PCH_ADDRESS_SCHEME = "BaRoCoBgRaPcCH"
 # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
 # NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
 # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
@@ -309,7 +311,7 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+BANKGROUP_BITS+BANK_BITS+COLUMN_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
-    if PCH_ADDRESS_SCHEME == "RoBaBgRaCoPcCH":
+    elif PCH_ADDRESS_SCHEME == "RoBaBgRaCoPcCH":
         address |= (channel          & ((1 << CHANNEL_BITS) - 1))
         address |= (pseudo_channel   & ((1 << PCHANNEL_BITS) - 1))      << (CHANNEL_BITS)
         address |= (col              & ((1 << COLUMN_BITS) - 1))        << (CHANNEL_BITS+PCHANNEL_BITS)
@@ -319,6 +321,16 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+COLUMN_BITS+RANK_BITS+BANKGROUP_BITS+BANK_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
+    elif PCH_ADDRESS_SCHEME == "BaRoCoBgRaPcCH":
+        address |= (channel          & ((1 << CHANNEL_BITS) - 1))
+        address |= (pseudo_channel   & ((1 << PCHANNEL_BITS) - 1))      << (CHANNEL_BITS)
+        address |= (rank             & ((1 << RANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS)
+        address |= (bg               & ((1 << BANKGROUP_BITS) - 1))     << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS)
+        address |= (col              & ((1 << COLUMN_BITS) - 1))        << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+BANKGROUP_BITS)
+        address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+BANKGROUP_BITS+COLUMN_BITS)
+        address |= (bank             & ((1 << BANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+BANKGROUP_BITS+COLUMN_BITS+ROW_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY        
 
     # print(f" Address Translate CH{channel},PCH{pseudo_channel},RK{rank},BG{bg},BK{bank},RO{row},CO{col} --> 0x{address:016X}\n")        
     return address
@@ -340,7 +352,7 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS+NORMAL_COLUMN_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
-    if NORMAL_ADDRESS_SCHEME == "RoBaRaCoCh":
+    elif NORMAL_ADDRESS_SCHEME == "RoBaRaCoCh":
         address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
         address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS)
         address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS)
@@ -349,7 +361,7 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY
-    if NORMAL_ADDRESS_SCHEME == "RoRaCoBaCh":
+    elif NORMAL_ADDRESS_SCHEME == "RoRaCoBaCh":
         address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
         address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS)
         address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS)
@@ -639,6 +651,8 @@ def axpby_pch(f, input_size, scaling):
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
+    ndp_bk_idx = NDP_TARGET_BK
+
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
@@ -648,11 +662,11 @@ def axpby_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,0,0,0,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))       
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -684,13 +698,13 @@ def axpby_pch(f, input_size, scaling):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -732,6 +746,8 @@ def axpbypcz_pch(f, input_size, scaling):
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
+    ndp_bk_idx = NDP_TARGET_BK
+
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
@@ -742,13 +758,13 @@ def axpbypcz_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list) 
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))       
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,0,0,0,0))               
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))               
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,2,bg,0,0,0,0))   
+                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,2,bg,ndp_bk_idx,0,0,0))   
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,0,0,0,0))   
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,ndp_bk_idx,0,0,0))   
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -780,16 +796,16 @@ def axpbypcz_pch(f, input_size, scaling):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(7000+i),0,2,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(7000+i),0,2,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(8000+i),0,3,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,(8000+i),0,3,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))                    
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -825,6 +841,8 @@ def axpy_pch(f, input_size, scaling):
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
 
+    ndp_bk_idx = NDP_TARGET_BK
+
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}")
@@ -834,11 +852,11 @@ def axpy_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["ADD"],opsize,1,bg,0,0,0,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))       
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -870,13 +888,13 @@ def axpy_pch(f, input_size, scaling):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -909,6 +927,7 @@ def copy_pch(f, input_size, scaling):
     '''
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -919,9 +938,9 @@ def copy_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -953,10 +972,10 @@ def copy_pch(f, input_size, scaling):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -994,6 +1013,7 @@ def xmy_pch(f, input_size, scaling):
     '''
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -1004,11 +1024,11 @@ def xmy_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["MUL"],opsize,1,bg,0,0,0,0))       
+                ndp_inst_list.append(inst(ndp_inst_opcode["MUL"],opsize,1,bg,ndp_bk_idx,0,0,0))       
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,0,0,0,0))                      
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -1040,13 +1060,13 @@ def xmy_pch(f, input_size, scaling):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
             for i in range(iteration):
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,0,(7000+i),0,2,0))             
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -1081,6 +1101,7 @@ def dot_pch(f, input_size, scaling):
     '''
 
     iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
     print(f"Working Bank Group: {num_working_bg}")
@@ -1092,9 +1113,9 @@ def dot_pch(f, input_size, scaling):
             ndp_inst_list = []
             jump_pc = len(ndp_inst_list)
             for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
             for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,1,bg,0,0,0,0))    
+                ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,1,bg,ndp_bk_idx,0,0,0))    
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))  
             if num_working_bg > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["T_V_RED"],(2*num_working_bg),0,0,0,0,0,0))
@@ -1104,7 +1125,7 @@ def dot_pch(f, input_size, scaling):
             ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],0,0,0,0,0,0,0))  
             ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))   
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
-            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,0,0,0,0))                      
+            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,ndp_bk_idx,0,0,0))                      
             if iteration > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
@@ -1137,15 +1158,15 @@ def dot_pch(f, input_size, scaling):
             for i in range(iteration):
                 # LOAD
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(5000+i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(5000+i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 # MAC
                 for bg in range(num_working_bg):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(6000+i),0,1,0))               
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(6000+i),0,1,0))               
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 # for bg in range(num_working_bg):
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,100))
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],0,ch,pch,0,0,(7000+i),0,2,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],0,ch,pch,0,ndp_bk_idx,(7000+i),0,2,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -1182,6 +1203,9 @@ def gemv_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
     print(f"Generating Memory Trace of GEMV Operation for NDP Ops")
+
+    ndp_bk_idx = NDP_TARGET_BK
+
     # Based on the number of elements 
     # Each Element is FP16 (2B)
     if scaling == 4:
@@ -1339,7 +1363,7 @@ def gemv_pch(f, input_size, scaling):
             for ch in range(int(NUM_CHANNEL)):
                for pch in range(int(NUM_PSEUDOCHANNEL)):   
                    for bg in range(n_row_p_vec):
-                       write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, 0, 1000 + ro, co))           
+                       write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, ndp_bk_idx, 1000 + ro, co))           
     
     jump_pc0 = 0
     jump_pc1 = 0
@@ -1354,23 +1378,23 @@ def gemv_pch(f, input_size, scaling):
             # Block-level GEMV
             # Load Partial Vector to Data Memory
             for bg in range(n_row_p_vec):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
             # MAC Operation 
             for _ in range(n_tile_block_row):
                 # Each Tile GEMV
                 for _ in range(n_row_p_vec): 
                     for bg in range(n_bg):                
-                        ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))
+                        ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,ndp_bk_idx,0,0,0))
             # Column-wise gemv ops
             if col_tile > 1:
                 jump_pc1 = len(ndp_inst_list)
                 for bg in range(n_row_p_vec):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 for _ in range(n_tile_block_row):
                     for _ in range(n_row_p_vec):
                         for bg in range(n_bg):                
-                            ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,0,0,0,0))                
+                            ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,ndp_bk_idx,0,0,0))                
                         ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 # ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(col_tile - 2),jump_pc1,0))
@@ -1381,37 +1405,37 @@ def gemv_pch(f, input_size, scaling):
             if int(post_n_it/n_bg) > 0:
                 for _ in range(int(post_n_it/n_bg)):
                     for bg in range(n_bg):
-                        ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,ndp_bk_idx,0,0,0))
                     ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             if int(post_n_it%n_bg) != 0:                     
                 for bg in range(int(post_n_it%n_bg)):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],opsize_v_rec,0,bg,ndp_bk_idx,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))                
             # Scalar Reduction
             if int(post_n_it/n_bg) > 0:
                 for _ in range(int(post_n_it/n_bg)):
                     for bg in range(n_bg):            
-                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,ndp_bk_idx,0,0,0))
                     ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             if int(post_n_it%n_bg) != 0:                     
                 for bg in range(int(post_n_it%n_bg)):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_s_rec,0,bg,ndp_bk_idx,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))    
             # Extra Reduction for x8 or x16 NDP Ops
             if opsize_follow_s_rec != -1:
                 if int(post_n_it/n_bg) > 0:
                     for _ in range(int(post_n_it/n_bg)):
                         for bg in range(n_bg):            
-                            ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
+                            ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,ndp_bk_idx,0,0,0))
                         ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 if int(post_n_it%n_bg) != 0:                     
                     for bg in range(int(post_n_it%n_bg)):
-                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,0,0,0,0))
+                        ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],opsize_follow_s_rec,0,bg,ndp_bk_idx,0,0,0))
                     ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0)) 
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
             self_after_pc = len(ndp_inst_list)
             # WBD
-            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,0,0,0,0)) 
+            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,ndp_bk_idx,0,0,0)) 
 
             if iteration_tile_block > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,1,0,0,(iteration_tile_block - 1),jump_pc0,0))
@@ -1451,34 +1475,34 @@ def gemv_pch(f, input_size, scaling):
             for i in range(iteration_tile_block):
                 # Load Partial Vector
                 for bg in range(n_row_p_vec):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(1000+col_tile*i),0,0,0))            
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 # MAC Operation 
                 for t_tile in range(n_tile_block_row):
                     # Each Tile GEMV
                     for n_row in range(n_row_p_vec):                 
                         for bg in range(n_bg):
-                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
                         acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 if col_tile > 1:
                     for col_it in range(col_tile - 1):
                         # Load Partial Vector
                         for bg in range(n_row_p_vec):
-                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(1000+col_tile*i),0,0,0))            
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(1000+col_tile*i),0,0,0))            
                         acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                         # MAC Operation 
                         for t_tile in range(n_tile_block_row):
                             # Each Tile GEMV
                             for n_row in range(n_row_p_vec):                 
                                 for bg in range(n_bg):
-                                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
+                                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,(3000+i*n_tile_block_row*n_row_p_vec+t_tile*n_row_p_vec+n_row),0,0,0))               
                                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
                         # acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))       
                              
                 # Wait Self Execution (N-Cycle)
                 # acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,self_exec_delay)) #self_exec_delay
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,0,(7000+i),0,0,0))             
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,ndp_bk_idx,(7000+i),0,0,0))             
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 

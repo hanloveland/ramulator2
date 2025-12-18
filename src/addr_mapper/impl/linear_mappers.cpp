@@ -380,6 +380,42 @@ class RoRabkCoBgPcCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+// Ch/PCH/nI/WI/Rank/BankGroup/Bank/Row/Col
+// 0   1  2  3   4       5      6   7  8
+class BkRoCoBgRaPcCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, BkRoCoBgRaPcCh, "BkRoCoBgRaPcCh", "Applies a BkRoCoBgRaPcCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> pCh 
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> nI
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);            
+      // Address --> wI
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);                  
+      // Address --> Rank (PCh has only 1 Rank)
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);      
+      // Address --> BG
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> COL
+      req.addr_vec[8] = slice_lower_bits(addr, m_addr_bits[8]);
+      // Address --> ROW
+      req.addr_vec[7] = slice_lower_bits(addr, m_addr_bits[7]);
+      // Address --> BK
+      req.addr_vec[6] = slice_lower_bits(addr, m_addr_bits[6]);
+    }
+};
+
 
 
 class MOP4CLXOR final : public LinearMapperBase, public Implementation {
