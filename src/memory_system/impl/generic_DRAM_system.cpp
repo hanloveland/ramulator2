@@ -154,6 +154,12 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       return (is_dram_ctrl_finished);
     }    
 
+    // Always Done
+    bool is_ndp_finished() override {
+      return true;
+    }     
+    
+
     virtual void mem_sys_finalize() override {
       size_t total_latency = 0;
       int num_channels = m_dram->get_level_size("channel");

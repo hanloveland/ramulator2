@@ -103,6 +103,9 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
     // Check All Buffers are Empty to finish simulation 
     virtual bool is_finished() = 0;
 
+    // Check DIMM-side NDP Controller status (It is done or not)
+    virtual bool is_ndp_finished() = 0;
+
     // finalize memory system itself 
     virtual void mem_sys_finalize() = 0;
 };

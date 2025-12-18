@@ -428,7 +428,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // if target pch is empty, fetch nl-req to target pch hsnc
             if((pch_lvl_hsnc_nl_req_slot_max - pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size()) >= 8) {
               for(int i=0;i<8;i++) {
-                pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].push_back(dimm_lvl_req_buffer[dimm_id][0]);
+                if(dimm_lvl_req_buffer[dimm_id][0] != 0) 
+                  pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].push_back(dimm_lvl_req_buffer[dimm_id][0]);
                 // std::cout<<" nl_buf -> nl_req_slot :"<<std::hex<<dimm_lvl_req_buffer[dimm_id][0]<<std::endl;
                 // remove 8 nl-req from dimm_lvl_req_buffer 
                 dimm_lvl_req_buffer[dimm_id].erase(dimm_lvl_req_buffer[dimm_id].begin() + 0);
@@ -530,6 +531,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // fetch nl_req from pch_lvl_hsnc_nl_req_slot and enque nl_req into pch_lvl_hsnc_nl_addr_gen_slot
             // if pch_lvl_hsnc_nl_addr_gen_slot has room and pch_lvl_hsnc_nl_req_slot has nl_req 
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() < pch_lvl_hsnc_nl_addr_gen_slot_max && pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size() != 0) {
+              DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Decoding NDP-NL Request");
               AccInst_Slot nl_req = decode_acc_inst(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]);
               pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].begin() + 0);
               
@@ -646,186 +648,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           } // NDP Status: NDP_WAIT END
         } // LOOP-PCH END
       } // LOOP-DIMM END
-      all_ndp_idle = pch_lvl_ndp_idle;
-      /*
-      deprecated code
-      if(ndp_on) {
-        if(!ndp_issued_start) {
-          // Send Start WR Command to each NDP Unit
-          bool issued_all_start_req = true;
-          bool issu_try_req = false;
-          for(int ch=0;ch<num_channels;ch++) {
-            for(int pch=0;pch<num_pseudochannel;pch++) {
-              int pch_idx = ch*num_pseudochannel + pch;
-              if(!issue_ndp_start[pch_idx]) {
-                issued_all_start_req = false;
-                issu_try_req         = true;
-                Request req = Request(0,Request::Type::Write);
-                m_addr_mapper->apply(req);
-                req.addr_vec[m_dram->m_levels("channel")]       = ch;
-                req.addr_vec[m_dram->m_levels("pseudochannel")] = pch;
-                req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
-                req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
-                req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
-                req.is_ndp_req = true;
-                for(int i=0;i<8;i++) {
-                  req.m_payload.push_back(1);
-                }
-                bool issue_req;
-                issue_req = m_controllers[ch]->send(req);
-                // Issue
-                if(issue_req) issue_ndp_start[pch_idx] = true;
-              }                      
-              if(issu_try_req) break;
-            }
-            if(issu_try_req) break;
-          }                
-          if(issued_all_start_req) {
-            ndp_issued_start    = true;
-            ndp_ctrl_status     = NDP_RUN;
-            ndp_ctrl_pc         = 0;
-            ndp_access_slot_idx = 0;
-            #ifdef NDP_DEBUG
-            std::cout<<"["<<m_clk<<"]";
-            std::cout<<"[HSNU] Send start request to all target pseudo-channels"<<std::endl;           
-            #endif 
-          }
-        } else {
-          if(ndp_ctrl_status != NDP_IDLE && ndp_access_inst_slots.size() != 0) {
-            // Generate NDP EXEC REQ and Send to MCs
-            if(ndp_access_slot_idx >= ndp_access_inst_slots.size()) ndp_access_slot_idx = 0;
-
-            bool is_read;
-            if (ndp_access_inst_slots[ndp_access_slot_idx].opcode == m_ndp_access_inst_op.at("RD")) 
-              is_read = true;
-            else if (ndp_access_inst_slots[ndp_access_slot_idx].opcode == m_ndp_access_inst_op.at("WR")) 
-              is_read = false;
-            else 
-              throw std::runtime_error("Invalid NDP Access Instruction during.. NDP Access");
-            
-            Request req = Request(0,is_read ? Request::Type::Read : Request::Type::Write);
-            m_addr_mapper->apply(req);
-            req.addr_vec[m_dram->m_levels("channel")]       = ndp_access_inst_slots[ndp_access_slot_idx].ch;
-            req.addr_vec[m_dram->m_levels("pseudochannel")] = ndp_access_inst_slots[ndp_access_slot_idx].pch;
-            req.addr_vec[m_dram->m_levels("bankgroup")]     = ndp_access_inst_slots[ndp_access_slot_idx].bg;
-            req.addr_vec[m_dram->m_levels("bank")]          = ndp_access_inst_slots[ndp_access_slot_idx].bk;
-            req.addr_vec[m_dram->m_levels("row")]           = ndp_access_inst_slots[ndp_access_slot_idx].row;
-            req.addr_vec[m_dram->m_levels("column")]        = ndp_access_inst_slots[ndp_access_slot_idx].col;
-            req.ndp_id                                      = ndp_access_inst_slots[ndp_access_slot_idx].id;
-            req.is_ndp_req                                  = true;
-
-            bool issue_req;
-            issue_req = m_controllers[ndp_access_inst_slots[ndp_access_slot_idx].ch]->send(req);      
-            if(issue_req) {
-              #ifdef NDP_DEBUG
-              std::cout<<"[NDP_MEM_SYS] Send MC :";
-              m_dram->print_req(req);
-              #endif 
-              if(ndp_access_inst_slots[ndp_access_slot_idx].cnt == ndp_access_inst_slots[ndp_access_slot_idx].opsize) {
-                // Remove Done Request
-                ndp_access_inst_slots.erase(ndp_access_inst_slots.begin() + ndp_access_slot_idx);
-                #ifdef NDP_DEBUG
-                std::cout<<"[NDP_MEM_SYS] One Access Instruction Done! Remove from inst_slots"<<std::endl;
-                #endif
-              } else {
-                ndp_access_inst_slots[ndp_access_slot_idx].cnt++;
-                ndp_access_inst_slots[ndp_access_slot_idx].col++;
-                // Round-Robin
-                ndp_access_slot_idx++;
-              }
-            }
-          }
-
-          if(ndp_ctrl_status == NDP_RUN) {
-            if(ndp_access_inst_slots.size()<16) {
-              #ifdef NDP_DEBUG
-              std::cout<<"[NDP_MEM_SYS] NDP_CTRL_PC: "<<ndp_ctrl_pc<<std::endl;
-              #endif 
-              AccInst_Slot access_inst = ndp_access_infos[ndp_ctrl_pc];
-              if(access_inst.opcode == m_ndp_access_inst_op.at("BAR")) {
-                ndp_ctrl_status = NDP_BAR;
-                #ifdef NDP_DEBUG
-                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_BAR"<<std::endl;
-                #endif
-              } else if(access_inst.opcode == m_ndp_access_inst_op.at("DONE")) {
-                ndp_ctrl_status = NDP_DONE;
-                #ifdef NDP_DEBUG
-                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_DONE"<<std::endl;
-                #endif
-              } else if(access_inst.opcode == m_ndp_access_inst_op.at("WAIT_RES")) {
-                ndp_ctrl_status = NDP_WAIT_RES;
-                #ifdef NDP_DEBUG
-                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> WAIT_RES"<<std::endl;
-                #endif        
-              } else if(access_inst.opcode == m_ndp_access_inst_op.at("WAIT")) {
-                ndp_ctrl_status = NDP_WAIT;
-                ndp_wait_cnt   = 0;
-                ndp_wait_cycle = access_inst.etc;                
-                #ifdef NDP_DEBUG
-                std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_RUN --> NDP_WAIT ("<<ndp_wait_cycle<<")"<<std::endl;
-                #endif                         
-              } else {
-                ndp_access_inst_slots.push_back(access_inst);
-              }
-              ndp_ctrl_pc++;
-            }            
-          } else if(ndp_ctrl_status == NDP_BAR) {
-            bool is_empty_ndp_req = true;
-            for (auto controller : m_controllers) {
-              if(!(controller->is_empty_ndp_req())) is_empty_ndp_req = false;
-            }
-            if(is_empty_ndp_req && ndp_access_inst_slots.size() == 0) {
-              ndp_ctrl_status = NDP_RUN;
-              #ifdef NDP_DEUBG
-              std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_BAR --> NDP_RUN"<<std::endl;
-              #endif
-            }
-          } else if(ndp_ctrl_status == NDP_DONE) {
-            bool is_empty_ndp_req = true;
-            for (auto controller : m_controllers) {
-              if(!(controller->is_empty_ndp_req())) is_empty_ndp_req = false;
-            }
-            if(is_empty_ndp_req && ndp_access_inst_slots.size() == 0) {
-              ndp_ctrl_status = NDP_IDLE;
-              ndp_on = false;
-              #ifdef NDP_DEUBG
-              std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_DONE --> NDP_IDLE"<<std::endl;
-              #endif
-            }
-          } else if(ndp_ctrl_status == NDP_WAIT_RES) {
-            // Not Imple..
-          } else if(ndp_ctrl_status == NDP_WAIT) {
-            // Wait Fixed Latency
-            if(ndp_wait_cnt == ndp_wait_cycle) {
-              ndp_ctrl_status = NDP_RUN;
-              #ifdef NDP_DEUBG
-              std::cout<<"[NDP_MEM_SYS] NDP_CTRL Status NDP_WAIT --> NDP_RUN"<<std::endl;
-              #endif
-            } else {
-              ndp_wait_cnt++;
-            }           
-          }
-
-
-        }
-      }
-      //
-      if(wait_ndp_on) {
-        // Try Check NDP Request in R/W Request Buffer
-        bool is_empty_ndp_req = true;
-        for (auto controller : m_controllers) {
-          if(!(controller->is_empty_ndp_req())) is_empty_ndp_req = false;
-        }
-        if(is_empty_ndp_req) {
-          wait_ndp_on = false;
-          ndp_on      = true;          
-          #ifdef NDP_DEBUG
-          std::cout<<"["<<m_clk<<"]";
-          std::cout<<"[HSNU] Start NDP_ON ["<<ndp_on<<"] WAIT_NDP_ON ["<<wait_ndp_on<<"]"<<std::endl;          
-          #endif 
-        }
-      }
-      */
+      if(!all_ndp_idle && pch_lvl_ndp_idle) {
+        DEBUG_PRINT(m_clk,"HSNC", -1, -1, "=================== All Pseudo Channel NDP DONE ============== ");
+      }        
+      all_ndp_idle = pch_lvl_ndp_idle;     
     };
 
     float get_tCK() override {
@@ -860,44 +686,6 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             }
             if(req.m_payload[i] != 0) pch_lvl_hsnc_status[dimm_id][i] = NDP_ISSUE_START;
           }
-
-          /*
-          // Deprecated Code
-          if(req.m_payload[0] == 1) {
-            bool is_empty_ndp_req = true;
-            for (auto controller : m_controllers) {
-              if(!(controller->is_empty_ndp_req())) is_empty_ndp_req = false;
-            }
-            if(!(wait_ndp_on || ndp_on)) {        
-              if(is_empty_ndp_req) {
-                wait_ndp_on      = true;
-                ndp_on           = false;
-                ndp_issued_start = false;
-              } else {
-                wait_ndp_on      = true;
-                ndp_on           = false;
-                ndp_issued_start = false;
-              }
-              #ifdef NDP_DEBUG
-              std::cout<<"["<<m_clk<<"]";
-              std::cout<<"[HSNU] Get NDP Start Request - NDP_ON ["<<ndp_on<<"] WAIT_NDP_ON ["<<wait_ndp_on<<"]"<<std::endl;
-              #endif
-
-              for(int i=0;i<issue_ndp_start.size();i++) {
-                if(((req.m_payload[1]>>i) & 0x1) == 0x1) issue_ndp_start[i] = false;
-                else                                     issue_ndp_start[i] = true;
-              }              
-              
-              #ifdef NDP_DEBUG
-              std::cout<<"[HSNU] Print Acc Inst. "<<std::endl;
-              for(int i=0;i<18;i++) {
-                std::cout<<"["<<i<<"]";
-                print_acc_inst(ndp_access_infos[i]);
-              }
-              #endif 
-            }
-          }
-          */
         } else {
           // Read Access Req? 
           throw std::runtime_error("Not Allow NDP Controller Read (Not Implemented)");          
@@ -915,8 +703,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "NDP Ctrl nl-req from host");
               dimm_lvl_req_pch_addr[dimm_id].push_back(pch_id);
               for(uint32_t i=0;i<req.m_payload.size();i++) {
-                dimm_lvl_req_buffer[dimm_id].push_back(req.m_payload[i]);
                 // std::cout<<"host -> nl_req_buf : 0x"<<std::hex<<req.m_payload[i]<<std::endl;
+                dimm_lvl_req_buffer[dimm_id].push_back(req.m_payload[i]);
               }
 
               all_nl_req_buffer_empty = false;
@@ -1068,6 +856,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
     }
 
+    bool is_ndp_finished() override {
+      return all_ndp_idle;
+    }     
+    
+    
     AccInst_Slot decode_acc_inst(uint64_t inst) {
       uint64_t opcode = (inst >> 60) & 0xf;
       uint64_t opsize = (inst >> 53) & 0x7f;
@@ -1143,10 +936,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         }
 
       } else {
-        #ifdef NDP_DEBUG
-        std::cout<<"["<<m_clk<<"] [HSNC] Fail Send : ";
-        m_dram->print_req(req);
-        #endif                
+        // #ifdef NDP_DEBUG
+        // std::cout<<"["<<m_clk<<"] [HSNC] Fail Send : ";
+        // m_dram->print_req(req);
+        // #endif                
       }
     }
 

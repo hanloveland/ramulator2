@@ -16,6 +16,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
     "Load/Store memory address trace with multi-core support.")
 
   private:
+    uint64_t stat_interval;
     struct Trace {
       uint64_t timestamp;  // When this request should be issued (in cycles)
       bool is_write;
@@ -30,6 +31,10 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       size_t curr_idx;
       size_t max_outstanding;
       uint64_t m_max_trace_inst;      
+      bool is_ndp_trace;
+      bool is_ndp_done;
+      size_t repeat_trace_count;
+      size_t repeat_trace;
 
       // Outstanding requests tracking
       struct OutstandingRequest {
@@ -43,15 +48,19 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       uint64_t total_write_requests;
       uint64_t completed_reads;
       uint64_t total_read_latency;
+      uint64_t avg_outstanding_reads;
+      uint64_t reach_max_outstanding_reads;
+      uint64_t reach_controller_buffer;
       
       CoreState(int id, size_t mshr_size) 
-        : core_id(id), curr_idx(0), max_outstanding(mshr_size), m_max_trace_inst(0),
+        : core_id(id), curr_idx(0), max_outstanding(mshr_size), m_max_trace_inst(0), is_ndp_trace(false), is_ndp_done(false), repeat_trace_count(0), repeat_trace(1),
           total_read_requests(0), total_write_requests(0), 
-          completed_reads(0), total_read_latency(0) {}
+          completed_reads(0), total_read_latency(0), 
+          avg_outstanding_reads(0), reach_max_outstanding_reads(0),
+          reach_controller_buffer(0) {}
       
       bool is_finished() const {
-        return (curr_idx >= trace.size() || curr_idx >= m_max_trace_inst) && outstanding_reads.empty();
-        
+        return (repeat_trace_count >= repeat_trace);      
       }
       
       double avg_read_latency() const {
@@ -96,8 +105,20 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
         
         CoreState* core = new CoreState(core_id, mshr_size);
         
+        std::string is_ndp_trace_param_name = "core" + std::to_string(core_id) + "_is_ndp_trace";
+        bool is_ndp_trace = param<bool>(is_ndp_trace_param_name)
+                            .desc("Is NDP Trace for core " + std::to_string(core_id))
+                            .default_val(false);
+                                    
+        core->is_ndp_trace = is_ndp_trace;
+
+        std::string repeat_trace_param_name = "core" + std::to_string(core_id) + "_repeat";
+        size_t repeat_trace = param<size_t>(repeat_trace_param_name)
+                            .desc("Repeat Trace for core " + std::to_string(core_id))
+                            .default_val(1);                                    
+        core->repeat_trace = repeat_trace;
+
         core->m_max_trace_inst = m_max_trace_inst;
-        
         // Load trace for this core
         std::string trace_param_name = "core" + std::to_string(core_id) + "_trace";
         try {
@@ -115,6 +136,8 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
         }
         
         m_cores.push_back(core);
+
+        stat_interval = 100000;
       }
 
       m_logger->info("All {} cores initialized successfully", m_num_cores);
@@ -130,12 +153,14 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       m_current_cycle++;
 
       // Try to issue requests from each core
+      bool is_ndp_done = m_memory_system->is_ndp_finished();
       for (auto core : m_cores) {
+        core->is_ndp_done = is_ndp_done;      
         try_issue_requests(core);
       }
 
       // Progress reporting
-      if (m_current_cycle % 100000 == 0) {
+      if (m_current_cycle % stat_interval == 0) {
         log_progress();
       }
     };
@@ -143,6 +168,16 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
   private:
     void try_issue_requests(CoreState* core) {
       // Try to issue as many requests as possible from this core
+      core->avg_outstanding_reads+=core->outstanding_reads.size();
+      if(core->outstanding_reads.size() >= core->max_outstanding)
+        core->reach_max_outstanding_reads += 1;
+
+      if ((core->curr_idx >= core->trace.size() || core->curr_idx >= core->m_max_trace_inst) && core->outstanding_reads.empty() && 
+          (!core->is_ndp_trace || (core->is_ndp_trace && core->is_ndp_done)) && core->repeat_trace_count < core->repeat_trace) {
+        core->repeat_trace_count+=1;
+        if(core->repeat_trace_count < core->repeat_trace) core->curr_idx = 0; 
+      }
+
       while (core->curr_idx < core->trace.size() && 
              core->outstanding_reads.size() < core->max_outstanding && 
              core->m_max_trace_inst > core->curr_idx) {
@@ -202,6 +237,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
           
           core->curr_idx++;
         } else {
+          core->reach_controller_buffer+=1;
           break;  // Memory system busy, try next cycle
         }
       }
@@ -329,14 +365,19 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
     void log_progress() {
       m_logger->info("=== Cycle {} Progress ===", m_current_cycle);
       for (auto core : m_cores) {
-        m_logger->info("  Core {}: {}/{} issued (RD:{}, WR:{}), outstanding_reads:{}, avg_rd_latency={:.1f} cycles", 
+        m_logger->info("  Core {}: {}/{} issued (RD:{}, WR:{}), outstanding_reads:{}, avg_rd_latency={:.1f} cycles maxoustanding_read:{}, full_controller_buffer:{}", 
                       core->core_id, 
                       core->curr_idx, 
                       core->trace.size(),
                       core->total_read_requests,
                       core->total_write_requests,
-                      core->outstanding_reads.size(),
-                      core->avg_read_latency());
+                      core->avg_outstanding_reads/stat_interval,
+                      core->avg_read_latency(),
+                      core->reach_max_outstanding_reads,
+                      core->reach_controller_buffer);
+        core->avg_outstanding_reads = 0;
+        core->reach_max_outstanding_reads = 0;
+        core->reach_controller_buffer = 0;      
       }
     }
 

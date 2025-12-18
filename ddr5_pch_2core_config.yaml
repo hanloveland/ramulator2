@@ -3,14 +3,20 @@ Frontend:
   clock_ratio: 1
   num_cores: 2
   debug_mode: false
+  max_inst: 200000
   
-  # Core 0: NDP unit with high memory bandwidth
-  core0_trace: "./trace/ndp/ndp_4x_2M_AXPBY.txt"
+  # Core 1: NDP unit with high memory bandwidth
+  core0_trace: "./trace/ndp/ndp_4x_2M_DOT.txt"
   core0_mshr_size: 32  # Large MSHR for high bandwidth
+  core0_is_ndp_trace: true
+  core0_repeat: 2
   
   # Core 1: CPU core with moderate memory access
-  core1_trace: "../spec_trace/401.bzip2"
-  core1_mshr_size: 32  # Standard MSHR size
+  core1_trace: "../spec_trace/403.gcc"
+  core1_mshr_size: 128  # Standard MSHR size
+  core1_is_ndp: false
+  core1_repeat: 2
+
   Translation:
     impl: NoTranslation
     max_addr: 2147483648
@@ -54,14 +60,22 @@ MemorySystem:
     RefreshManager:
       impl: DR5CHAllBank
     RowPolicy:
-      impl: OpenRowPolicy
-      # impl: ClosedRowPolicyPch
-      cap: 4
+      # impl: OpenRowPolicy
+      impl: ClosedRowPolicyPch
+      cap: 128
     plugins:
+    ndp_wr_max_age: 256
+    ndp_wr_mode_min_time: 256
+    dram_rd_mode_min_time: 256
+    ndp_read_high_threshold: 0.75
+    ndp_write_high_threshold: 0.75
+    ndp_read_low_threshold: 0.25
+    ndp_write_low_threshold: 0.25
 
   AddrMapper:
-    # impl: RoRaCoBaPcCh
+    impl: RoRaCoBaPcCh
     # impl: RoRabkCoBgPcCh    
     # impl: RoBaRaCoPcCh
-    impl: RoCoBaRaPcCh
+    # impl: RoCoBaRaPcCh
+    # impl: BkRoCoBgRaPcCh
     

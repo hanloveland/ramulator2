@@ -607,7 +607,8 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP Status: Wait DONE END
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {
               // NDP Status: Wait DONE
-
+              ndp_pc_per_pch[pch_idx] = 0;
+              ndp_status_per_pch[pch_idx] = m_ndp_status("idle");
               // NDP Status: Wait DONE END
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
               // NDP Status: idle
@@ -1951,18 +1952,16 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]] = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
 
-      m_powers[m_levels["bank"]][m_commands["POST_RD"]]      = Lambdas::Power::Bank::DB2MC_RD<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["NDP_DB_RD"]]    = Lambdas::Power::Bank::DB2MC_RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["PRE_WR"]]       = Lambdas::Power::Bank::MC2DB_WR<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["NDP_DB_WR"]]    = Lambdas::Power::Bank::MC2DB_WR<DDR5PCH>;
-
+      
       // m_powers[m_levels["rank"]][m_commands["REFsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["REFsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["RFMsb"]] = Lambdas::Power::Rank::RFMsb<DDR5PCH>;
       // m_powers[m_levels["rank"]][m_commands["RFMsb_end"]] = Lambdas::Power::Rank::RFMsb_end<DDR5PCH>;
       // m_powers[m_levels["rank"]][m_commands["DRFMsb"]] = Lambdas::Power::Rank::REFsb<DDR5>;
       // m_powers[m_levels["rank"]][m_commands["DRFMsb_end"]] = Lambdas::Power::Rank::REFsb_end<DDR5>;
-
+      
       m_powers[m_levels["rank"]][m_commands["POST_RD"]] = Lambdas::Power::Rank::DB2MC_RD<DDR5PCH>;
       m_powers[m_levels["rank"]][m_commands["PRE_WR"]] = Lambdas::Power::Rank::MC2DB_WR<DDR5PCH>;
       m_powers[m_levels["rank"]][m_commands["ACT"]] = Lambdas::Power::Rank::ACT<DDR5PCH>;
