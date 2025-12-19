@@ -31,6 +31,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<ReqBuffer> m_rd_prefetch_buffers; // Read Prefetch Buffers (D2PA Buffer) Per Pseudo Channel    
     std::vector<ReqBuffer> m_wr_prefetch_buffers; // Write Prefetch Buffers (D2PA Buffer) Per Pseudo Channel    
 
+    std::vector<std::vector<std::pair<Request, int>>> m_to_rd_prefetch_buffers;
+    std::vector<std::vector<std::pair<Request, int>>> m_to_wr_prefetch_buffers;
+
     // Decoupled Priority Mode (MC <-> DB / DB <-> DRAM)
     enum MC_DB_RW_MODE {
       DB_NDP_WR, 
@@ -69,12 +72,14 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<size_t> m_num_post_wr_cnts;
     std::vector<size_t> m_num_ref_cnts;
     std::vector<Clk_t> m_last_ndp_dram_wr;
+    std::vector<Clk_t> m_last_host_rd;
 
     std::vector<size_t> m_num_read_req;
     std::vector<size_t> m_num_write_req;
 
     std::vector<size_t> m_ndp_dram_wr_timer;    
     std::vector<size_t> m_dram_rd_timer;
+    std::vector<size_t> m_mc_rd_timer;
     std::vector<size_t> m_dram_ndp_rd_token;
     std::vector<bool>   m_enable_pre_rd;
 
@@ -370,7 +375,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       m_mc_db_rw_modes.resize(num_pseudochannel,DB_RD);
       m_db_dram_rw_modes.resize(num_pseudochannel,DRAM_RD);
-      
+
+      m_to_rd_prefetch_buffers.resize(num_pseudochannel);
+      m_to_wr_prefetch_buffers.resize(num_pseudochannel);
+
       m_channel_stats.resize(num_pseudochannel);
       m_periodic_channel_stats.resize(num_pseudochannel);
 
@@ -385,6 +393,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_num_post_wr_cnts.resize(num_pseudochannel,0);
       m_num_ref_cnts.resize(num_pseudochannel,0);
       m_last_ndp_dram_wr.resize(num_pseudochannel,0);
+      m_last_host_rd.resize(num_pseudochannel,0);
       
       num_ndp_wr_req_per_pch.resize(num_pseudochannel,0);
       num_ndp_rd_req_per_pch.resize(num_pseudochannel,0);
@@ -394,6 +403,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       
       m_ndp_dram_wr_timer.resize(num_pseudochannel,0);
       m_dram_rd_timer.resize(num_pseudochannel,0);
+      m_mc_rd_timer.resize(num_pseudochannel,0);
 
       m_dram_ndp_rd_token.resize(num_pseudochannel,0);
       m_enable_pre_rd.resize(num_pseudochannel,false);      
@@ -614,6 +624,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(is_success && req.is_ndp_req && req.type_id == Request::Type::Write && !(m_dram->is_ndp_access(req.addr_vec))) {
         m_last_ndp_dram_wr[req.addr_vec[psuedo_ch_idx]] = req.arrive;
       }
+      if(is_success && !req.is_ndp_req && req.type_id == Request::Type::Read) {
+        m_last_host_rd[req.addr_vec[psuedo_ch_idx]] = req.arrive;
+      }
       return is_success;
     };
 
@@ -644,6 +657,41 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         } else {
           m_dram_rd_timer[pch_id] = 0;
         }
+
+        if(m_mc_db_rw_modes[pch_id] == DB_RD) {
+          m_dram_rd_timer[pch_id]++;
+        } else {
+          m_dram_rd_timer[pch_id] = 0;
+        }        
+      }
+
+      for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {                  
+        // Move to m_rd_prefetch_buffers
+        if(m_to_rd_prefetch_buffers[pch_id].size() != 0) {
+          for(int i=0;i<m_to_rd_prefetch_buffers[pch_id].size();i++) {
+            m_to_rd_prefetch_buffers[pch_id][i].second-=1;
+          }
+          if(m_to_rd_prefetch_buffers[pch_id][0].second == 0) {
+            bool is_success = m_rd_prefetch_buffers[pch_id].enqueue(m_to_rd_prefetch_buffers[pch_id][0].first);
+            if(!is_success) {
+              throw std::runtime_error("Fail to enque to m_rd_prefetch_buffers");
+            }    
+            m_to_rd_prefetch_buffers[pch_id].erase(m_to_rd_prefetch_buffers[pch_id].begin());
+          }
+        }
+        // Move to m_wr_prefetch_buffers
+        if(m_to_wr_prefetch_buffers[pch_id].size() != 0) {
+          for(int i=0;i<m_to_wr_prefetch_buffers[pch_id].size();i++) {
+            m_to_wr_prefetch_buffers[pch_id][i].second-=1;
+          }
+          if(m_to_wr_prefetch_buffers[pch_id][0].second == 0) {
+            bool is_success = m_wr_prefetch_buffers[pch_id].enqueue(m_to_wr_prefetch_buffers[pch_id][0].first);
+            if(!is_success) {
+              throw std::runtime_error("Fail to enque to m_rd_prefetch_buffers");
+            }    
+            m_to_wr_prefetch_buffers[pch_id].erase(m_to_wr_prefetch_buffers[pch_id].begin());
+          }
+        }        
       }
 
       // Update Each Row Cap 
@@ -1198,17 +1246,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             new_req.arrive        = req_it->arrive;
             new_req.final_command = m_dram->m_commands("POST_WR");
             m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
-            bool is_success = false;              
-
-            // is_success = m_prefetched_buffer.enqueue(new_req);
-            is_success = m_wr_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].enqueue(new_req);
             std::string msg = std::string(" Remove Request (PRE_WR) from Buffer ") + std::to_string(buffer->size()) + std::string(")");
             DEBUG_PRINT(m_clk, "Memory Controller", new_req.addr_vec[ch_idx], new_req.addr_vec[psuedo_ch_idx], msg);              
             buffer->remove(req_it);
             // std::cout<<"[NDP_DRAM_CTRL] Generate POST_WR and Enqueue to WR_PREFETCH_BUFFER"<<std::endl;
-            if(!is_success) {
-              throw std::runtime_error("Fail to enque to m_wr_prefetch_buffers");
-            }                    
+            m_to_wr_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].push_back(std::make_pair(new_req, (m_dram->m_timing_vals("nBL")*4)));            
           } else if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
             // Generate POST_RD and Enqueue to Prefetched Buffer
             Request new_req = Request(req_it->addr_vec, Request::Type::Read);
@@ -1223,10 +1265,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             std::string msg = std::string(" Remove Request (PRE_WR) from Buffer (remained ") + std::to_string(buffer->size()) + std::string(" )");
             DEBUG_PRINT(m_clk, "Memory Controller", new_req.addr_vec[ch_idx], new_req.addr_vec[psuedo_ch_idx], msg);              
             buffer->remove(req_it);
-            is_success = m_rd_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].enqueue(new_req);
-            if(!is_success) {
-              throw std::runtime_error("Fail to enque to m_rd_prefetch_buffers");
-            }                    
+            m_to_rd_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].push_back(std::make_pair(new_req, (m_dram->m_timing_vals("nBL"))));
+            // is_success = m_rd_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].enqueue(new_req);
+            // if(!is_success) {
+            //   throw std::runtime_error("Fail to enque to m_rd_prefetch_buffers");
+            // }                    
           } else {
             std::string msg = std::string(" Remove Request from Buffer (remained ") + std::to_string(buffer->size()) + std::string(" )");
             DEBUG_PRINT(m_clk, "Memory Controller", req_it->addr_vec[ch_idx], req_it->addr_vec[psuedo_ch_idx], msg);                        
@@ -1372,6 +1415,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     void set_mode_per_pch(int pch_idx) {
 
       // Set MC-DB RW Mode
+      size_t num_rd = m_num_rd_cnts[pch_idx] + m_num_post_rd_cnts[pch_idx];
+      size_t elaped_time = m_clk - m_last_host_rd[pch_idx];
       switch (m_mc_db_rw_modes[pch_idx]) {
         case DB_NDP_WR: {
           if(m_num_db_wr_cnts[pch_idx] > 0) {
@@ -1384,7 +1429,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           break;
         }
         case DB_WR: {
-          if(m_num_wr_cnts[pch_idx] > m_wr_low_threshold) {
+          if(m_num_wr_cnts[pch_idx] > m_wr_low_threshold && !(elaped_time > ndp_dram_wr_max_age && num_rd > 0)) {
             m_mc_db_rw_modes[pch_idx] = DB_WR;
           } else if(m_num_db_wr_cnts[pch_idx] > 0) {
             m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
@@ -1396,7 +1441,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         case DB_RD: {
           if(m_num_db_wr_cnts[pch_idx] > 0) {
             m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
-          } else if(m_num_wr_cnts[pch_idx] > m_wr_high_threshold) {
+          } else if(m_num_wr_cnts[pch_idx] > m_wr_high_threshold && !(m_mc_rd_timer[pch_idx] < ndp_dram_wr_max_age && num_rd > 0)) {
             m_mc_db_rw_modes[pch_idx] = DB_WR;
           } else {
             m_mc_db_rw_modes[pch_idx] = DB_RD;
@@ -1411,7 +1456,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       // Set DB RW Mode
       size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
-      size_t elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
+      elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
       if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
         m_enable_pre_rd[pch_idx] = true;
       else 

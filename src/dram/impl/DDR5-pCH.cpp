@@ -1846,8 +1846,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       // m_preqs[m_levels["rank"]][m_commands["RFMab"]]  = Lambdas::Preq::Rank::RequireAllBanksClosed<DDR5PCH>;
       // m_preqs[m_levels["rank"]][m_commands["DRFMab"]] = Lambdas::Preq::Rank::RequireAllBanksClosed<DDR5PCH>;
 
-      m_preqs[m_levels["bank"]][m_commands["PRE_WR"]]          = Lambdas::Preq::Rank::NoRequire<DDR5PCH>;
-      m_preqs[m_levels["bank"]][m_commands["POST_RD"]]         = Lambdas::Preq::Rank::NoRequire<DDR5PCH>;      
+      m_preqs[m_levels["rank"]][m_commands["PRE_WR"]]          = Lambdas::Preq::Rank::NoRequire<DDR5PCH>;
+      m_preqs[m_levels["rank"]][m_commands["POST_RD"]]         = Lambdas::Preq::Rank::NoRequire<DDR5PCH>;      
       // Same-Bank Preqs.
       m_preqs[m_levels["rank"]][m_commands["REFsb"]]  = Lambdas::Preq::Rank::RequireSameBanksClosed<DDR5PCH>;
       // m_preqs[m_levels["rank"]][m_commands["RFMsb"]]  = Lambdas::Preq::Rank::RequireSameBanksClosed<DDR5PCH>;
