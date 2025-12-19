@@ -73,6 +73,8 @@ PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
 # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
 NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
 
+GEN_PCH_NORMAL_MODE = True
+
 ndp_inst_opcode = {
     "LOAD"           :0,
     "LOAD_ADD"       :1,
@@ -507,6 +509,34 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
                 break
         if done == True:
             break        
+
+def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
+    cnt_req = 0
+    done = False
+    for ro in range(NUM_ROW):
+        for ba in range(NUM_BANK):
+            for co in range(NUM_COL): 
+                for bg in range(NUM_BANKGROUP):
+                    for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                        for ch in range(NUM_CHANNEL):
+                            write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))
+                                                         
+                            cnt_req+=1
+                            if cnt_req == num_req:
+                                done = True
+                            
+                            if done == True:
+                                break
+                        if done == True:
+                            break    
+                    if done == True:
+                        break 
+                if done == True:
+                    break
+            if done == True:
+                break
+        if done == True:
+            break     
 
 def cal_it(input_size, scaling):
     if scaling == 4:
@@ -1537,9 +1567,14 @@ def axpby_normal(f, input_size):
     # NUM_COL
     # encode_normal_address(channel, rank, bg, bank, row, col)
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'LD')
-    gen_normal_req_from_row(f,7000,num_rd,'ST')
+    if GEN_PCH_NORMAL_MODE:
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,7000,num_rd,'ST')
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'LD')
+        gen_normal_req_from_row(f,7000,num_rd,'ST')
  
 
 # AXPBYPCZ  : W = aX + bB + zZ
@@ -1560,10 +1595,16 @@ def axpbypcz_normal(f, input_size):
     # src_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
     # des_W_addr = encode_normal_address(0, 0, 0, 0, 8000, 0)
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'LD')
-    gen_normal_req_from_row(f,7000,num_rd,'LD')
-    gen_normal_req_from_row(f,8000,num_rd,'ST') 
+    if GEN_PCH_NORMAL_MODE:
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,7000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,8000,num_rd,'ST')
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'LD')
+        gen_normal_req_from_row(f,7000,num_rd,'LD')
+        gen_normal_req_from_row(f,8000,num_rd,'ST')         
 
 def axpy_normal(f, input_size):
     '''
@@ -1580,9 +1621,14 @@ def axpy_normal(f, input_size):
     '''
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'LD')
-    gen_normal_req_from_row(f,7000,num_rd,'ST')
+    if GEN_PCH_NORMAL_MODE:
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,7000,num_rd,'ST')        
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'LD')
+        gen_normal_req_from_row(f,7000,num_rd,'ST')
 
 def copy_normal(f, input_size):
     '''
@@ -1598,8 +1644,12 @@ def copy_normal(f, input_size):
     '''
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'ST')    
+    if GEN_PCH_NORMAL_MODE:
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'ST')    
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'ST')    
 
 def xmy_normal(f, input_size):
     '''
@@ -1616,9 +1666,14 @@ def xmy_normal(f, input_size):
     '''
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'LD')
-    gen_normal_req_from_row(f,7000,num_rd,'ST')      
+    if GEN_PCH_NORMAL_MODE:
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,7000,num_rd,'ST')
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'LD')
+        gen_normal_req_from_row(f,7000,num_rd,'ST')        
 
 def dot_normal(f, input_size):
     '''
@@ -1635,9 +1690,14 @@ def dot_normal(f, input_size):
     '''
     num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
 
-    gen_normal_req_from_row(f,5000,num_rd,'LD')
-    gen_normal_req_from_row(f,6000,num_rd,'LD')
-    gen_normal_req_from_row(f,7000,1,'ST')     
+    if GEN_PCH_NORMAL_MODE:        
+        gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,6000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,7000,1,'ST')     
+    else:
+        gen_normal_req_from_row(f,5000,num_rd,'LD')
+        gen_normal_req_from_row(f,6000,num_rd,'LD')
+        gen_normal_req_from_row(f,7000,1,'ST')             
 
 def gemv_normal(f, input_size):
     '''
@@ -1655,16 +1715,27 @@ def gemv_normal(f, input_size):
     num_row = int(mat_input_size_byte_list[input_size]/2)
     # elements_per_row = 32 * NUM_COL * NUM_BANK * NUM_BANKGROUP * NUM_RANK * NUM_CHANNEL (-1M)
 
-    gen_normal_req_from_row(f,1000,num_rd,'LD')
-    gen_normal_req_from_row(f,2000,num_rd * num_row,'LD')
-    gen_normal_req_from_row(f,1001,num_rd,'ST')         
+    if GEN_PCH_NORMAL_MODE:        
+        gen_normal_req_from_row_pch(f,1000,num_rd,'LD')
+        gen_normal_req_from_row_pch(f,2000,num_rd * num_row,'LD')
+        gen_normal_req_from_row_pch(f,1001,num_rd,'ST')         
+    else:
+        gen_normal_req_from_row(f,1000,num_rd,'LD')
+        gen_normal_req_from_row(f,2000,num_rd * num_row,'LD')
+        gen_normal_req_from_row(f,1001,num_rd,'ST')         
     print(f"=======================================")
     print(f" GEMV Normal Mode - Size: {mat_input_size_byte_list[input_size]}")    
     print(f"  - RD Vecotr: {num_rd}")    
     print(f"  - RD Matrix: {num_rd * num_row}")    
     print(f"  - WR Vecotr: {num_rd}")    
 
-def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor=-1):
+def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, scaling_factor=-1):
+    global GEN_PCH_NORMAL_MODE
+    if pch:
+        GEN_PCH_NORMAL_MODE = True
+    else:
+        GEN_PCH_NORMAL_MODE = False
+
     file_name = "none.txt"
     if workload in workload_list:
         file_name = workload + ".txt"
@@ -1687,16 +1758,24 @@ def generate_trace(workload, size,output_path='',is_ndp_ops=True, scaling_factor
 
     if is_ndp_ops:
         if scaling_factor == 1:
-            file_name = "ndp_4x_" +  file_name 
+            file_name = "pch_ndp_x4_" +  file_name 
         elif scaling_factor == 2: 
-            file_name = "ndp_8x_" +  file_name 
+            file_name = "pch_ndp_x8_" +  file_name 
         elif scaling_factor == 4: 
-            file_name = "ndp_16x_" +  file_name 
+            file_name = "pch_ndp_x16_" +  file_name 
         else:
             print("Error: Wrong Input Size")
             exit(1)
     else: 
-        file_name = "baseline_" + file_name
+        if pch:
+            if scaling_factor == 1:
+                file_name = "pch_non_ndp_x4_" +  file_name 
+            elif scaling_factor == 2: 
+                file_name = "pch_non_ndp_x8_" +  file_name 
+            elif scaling_factor == 4: 
+                file_name = "pch_non_ndp_x16_" +  file_name             
+        else:
+            file_name = "baseline_" + file_name
     
     # Set Address Mapping Scheme 
     config_scale_factor(scaling_factor)
@@ -1754,29 +1833,34 @@ if __name__ == '__main__':
     print(" ========================================================================  ")
 
     # make generated trace output path 
-    ndp_trace_path = "trace/ndp"
-    non_ndp_trace_path = "trace/non_ndp"
+    pch_ndp_trace_path = "trace/pch_ndp"
+    pch_none_ndp_trace_path = "trace/pch_non_ndp"
+    baseline_trace_path = "trace/baseline"
 
     shutil.rmtree("trace")
     crete_folder("trace")
-    crete_folder(ndp_trace_path)
-    crete_folder(non_ndp_trace_path)
+    crete_folder(pch_ndp_trace_path)
+    crete_folder(pch_none_ndp_trace_path)
+    crete_folder(baseline_trace_path)
 
-    print(" - NDP Workload Path: ",ndp_trace_path)
-    print(" - Non-NDP Workload Path: ",non_ndp_trace_path)
+    print(" - PCH NDP Workload Path: ",pch_ndp_trace_path)
+    print(" - PCH Non-NDP Workload Path: ",pch_none_ndp_trace_path)
+    print(" - Baseline Workload Path: ",baseline_trace_path)
 
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
 
     for size in input_size_list:
         for bench in ["AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT"]:
-            generate_trace(bench, size,non_ndp_trace_path, is_ndp_ops=False, scaling_factor=1)
+            generate_trace(bench, size,baseline_trace_path, pch=False,is_ndp_ops=False, scaling_factor=1)
             for scaling in [1, 2, 4]:
-                generate_trace(bench, size,ndp_trace_path, is_ndp_ops=True, scaling_factor=scaling)
+                generate_trace(bench, size,pch_none_ndp_trace_path, pch=True,is_ndp_ops=False, scaling_factor=scaling)
+                generate_trace(bench, size,pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
 
     for size in mat_input_size_list:
-        generate_trace("GEMV", size,non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
+        generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
         for scaling in [1, 2, 4]:
-            generate_trace("GEMV", size,ndp_trace_path,is_ndp_ops=True, scaling_factor=scaling)
+            generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
+            generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
         
     # for size in input_size_list:
     #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    

@@ -604,6 +604,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         int flat_bank_id = req.addr_vec[bank_idx] + req.addr_vec[bankgroup_idx] * num_bank + req.addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
         if(req.is_ndp_req) m_ndp_access_cnt_per_bank[flat_bank_id]++;
         else               m_host_access_cnt_per_bank[flat_bank_id]++;
+
       }
       // if(is_success) {
         // std::cout<<"[NDP_DRAM_CTRL] Get Request ";
@@ -652,10 +653,14 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             int flat_bank_id = bk_id + bg_id * num_bank + pch_id * num_bankgroup*num_bank;
             int host_access = m_host_access_cnt_per_bank[flat_bank_id];
             int ndp_access = m_ndp_access_cnt_per_bank[flat_bank_id];
-            if(host_access < 0 || host_access > 32) 
-              throw std::runtime_error("Host Access Count Error");
-            if(ndp_access < 0 || ndp_access > 32) 
-              throw std::runtime_error("NDP Access Count Error");
+            if(host_access < 0 || host_access > 64) {
+              std::string msg = std::string(" Host Access Count Error (") + std::to_string(host_access) + std::string(")");
+              throw std::runtime_error(msg);
+            }
+            if(ndp_access < 0 || ndp_access > 64) {
+              std::string msg = std::string(" NDP Access Count Error (") + std::to_string(ndp_access) + std::string(")");
+              throw std::runtime_error(msg);
+            }
             if(host_access == 0 || ndp_access == 0) {
               // Max Cap 
               m_rowpolicy->update_cap(pch_id,bg_id,bk_id,128);
@@ -1166,13 +1171,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           if(req_it->command == m_dram->m_commands("RD")     || req_it->command == m_dram->m_commands("RDA") || 
              req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA") ||
              req_it->command == m_dram->m_commands("WR")     || req_it->command == m_dram->m_commands("WRA") || 
-             req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")) 
-             m_host_access_cnt_per_bank[flat_bank_id]--;
-
-          if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA") ||
-             req_it->command == m_dram->m_commands("NDP_DB_WR")   || req_it->command == m_dram->m_commands("NDP_DB_RD") ||
-             req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA"))  
-            m_ndp_access_cnt_per_bank[flat_bank_id]--;
+             req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")) {
+             m_host_access_cnt_per_bank[flat_bank_id]--;             
+            }
+            
+            if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA") ||
+            req_it->command == m_dram->m_commands("NDP_DB_WR")   || req_it->command == m_dram->m_commands("NDP_DB_RD") ||
+            req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) {
+              m_ndp_access_cnt_per_bank[flat_bank_id]--;         
+          }
 
           // Move issued Read Request to pending buffer
           if (req_it->type_id == Request::Type::Read) {
@@ -1561,7 +1568,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_RD");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not RD/RDA)");
+                          throw std::runtime_error("DB_WR/DB_NDP_WR Mode - Wrong Pick up DDR Command (Not RD/RDA)");
                         }
                       }                                 
                     }      
@@ -1652,7 +1659,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_RD");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not RD/RDA)");
+                          throw std::runtime_error("DB_WR/DRAM_RD Mode - Wrong Pick up DDR Command (Not RD/RDA)");
                         }
                       }                                 
                     }
@@ -1716,7 +1723,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_WR");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not WR/WRA)");
+                          m_dram->print_req(*req_it);
+                          throw std::runtime_error("DB_WR/DRAM_REF Mode - Wrong Pick up DDR Command (Not WR/WRA)");
                         }
                       }                                 
                     }      
@@ -1735,7 +1743,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_WR");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not WR/WRA)");
+                          m_dram->print_req(*req_it);
+                          throw std::runtime_error("DB_WR/DRAM_RD Mode - Wrong Pick up DDR Command (Not WR/WRA)");
                         }
                       }                                 
                     }      
@@ -1750,7 +1759,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_RD");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not RD/RDA)");
+                          throw std::runtime_error("DB_WR/DRAM_RD Mode - Wrong Pick up DDR Command (Not RD/RDA)");
                         }
                       }                                 
                     }
@@ -1777,7 +1786,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                           req_it->final_command = m_dram->m_commands("PRE_WR");
                           req_it->is_db_cmd = true;  
                         } else {
-                          throw std::runtime_error("Wrong Pick up DDR Command (Not WR/WRA)");
+                          m_dram->print_req(*req_it);
+                          throw std::runtime_error("DB_WR/DRAM_WR Mode - Wrong Pick up DDR Command (Not WR/WRA)");
                         }
                       }                                 
                     }      

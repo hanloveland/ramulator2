@@ -1,0 +1,81 @@
+Frontend:
+  impl: LoadStoreNCoreTrace
+  clock_ratio: 1
+  num_cores: 1
+  debug_mode: false
+  max_inst: 100000000
+  
+  # Core 1: NDP unit with high memory bandwidth
+  core0_trace: "./trace/pch_ndp/pch_ndp_x4_8K_GEMV.txt"
+  core0_mshr_size: 32  # Large MSHR for high bandwidth
+  core0_is_ndp_trace: true
+  core0_repeat: 1
+  
+  # Core 1: CPU core with moderate memory access
+  core1_trace: "../spec_trace/403.gcc"
+  core1_mshr_size: 128  # Standard MSHR size
+  core1_is_ndp: false
+  core1_repeat: 2
+
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+              
+
+MemorySystem:
+  impl: ndpDRAM
+  clock_ratio: 1
+
+  DRAM:
+    impl: DDR5-pCH
+    org:
+      # DBX Preset: DDR5_16Gb_x4, DDR5_16Gb_x8, DDR5_16Gb_x16 
+      preset: DDR5_16Gb_DBX_x4
+      channel: 2
+      pseudochannel : 4
+      rank: 1
+      # DRAM DQs on DIMM-side: 4, 8, 16  
+      dq: 4
+      real_dq: 4
+      # IO Freqeucny Boost: 1 2, 4
+      io_boost: 1
+    timing:
+      preset: DDR5_4800B 
+    RFM:
+      BRC: 0  
+    drampower_enable: true
+    power_debug: false
+    use_db_fetch: true
+    ndp_inst_slot: 8
+    voltage:
+      preset: Default
+    current:
+      # DBX preset: DDR5_4800x4, DDR5_4800x8, DDR5_4800x16
+      preset: DDR5_4800x4
+
+  Controller:
+    impl: ndpDRAMCtrl
+    Scheduler:
+      impl: NDPFRFCFS
+    RefreshManager:
+      impl: DR5CHAllBank
+    RowPolicy:
+      # impl: OpenRowPolicy
+      impl: ClosedRowPolicyPch
+      cap: 128
+    plugins:
+    ndp_wr_max_age: 256
+    ndp_wr_mode_min_time: 256
+    dram_rd_mode_min_time: 256
+    ndp_read_high_threshold: 0.75
+    ndp_write_high_threshold: 0.75
+    ndp_read_low_threshold: 0.25
+    ndp_write_low_threshold: 0.25
+
+  AddrMapper:
+    impl: RoRaCoBaPcCh
+    # impl: RoRabkCoBgPcCh    
+    # impl: RoBaRaCoPcCh
+    # impl: RoCoBaRaPcCh
+    # impl: BkRoCoBgRaPcCh
+    
