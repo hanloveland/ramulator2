@@ -1416,6 +1416,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       // Set MC-DB RW Mode
       size_t num_rd = m_num_rd_cnts[pch_idx] + m_num_post_rd_cnts[pch_idx];
+      size_t num_wr = m_num_wr_cnts[pch_idx];
       size_t elaped_time = m_clk - m_last_host_rd[pch_idx];
       switch (m_mc_db_rw_modes[pch_idx]) {
         case DB_NDP_WR: {
@@ -1429,7 +1430,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           break;
         }
         case DB_WR: {
-          if(m_num_wr_cnts[pch_idx] > m_wr_low_threshold && !(elaped_time > ndp_dram_wr_max_age && num_rd > 0)) {
+          if((m_num_wr_cnts[pch_idx] > m_wr_low_threshold && !(elaped_time > ndp_dram_wr_max_age && num_rd > 0)) ||
+            (num_rd == 0 && num_wr !=0)) {
             m_mc_db_rw_modes[pch_idx] = DB_WR;
           } else if(m_num_db_wr_cnts[pch_idx] > 0) {
             m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
@@ -1441,7 +1443,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         case DB_RD: {
           if(m_num_db_wr_cnts[pch_idx] > 0) {
             m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
-          } else if(m_num_wr_cnts[pch_idx] > m_wr_high_threshold && !(m_mc_rd_timer[pch_idx] < ndp_dram_wr_max_age && num_rd > 0)) {
+          } else if((m_num_wr_cnts[pch_idx] > m_wr_high_threshold && !(m_mc_rd_timer[pch_idx] < ndp_dram_wr_max_age && num_rd > 0)) ||
+                    (num_rd == 0 && num_wr !=0)) {
             m_mc_db_rw_modes[pch_idx] = DB_WR;
           } else {
             m_mc_db_rw_modes[pch_idx] = DB_RD;
@@ -1456,6 +1459,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       // Set DB RW Mode
       size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
+      size_t num_dram_rd = m_num_rd_cnts[pch_idx] + m_num_dram_rd_cnts[pch_idx]; 
       elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
       if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
         m_enable_pre_rd[pch_idx] = true;
@@ -1468,7 +1472,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF; 
           } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
-          } else if(num_dram_wr > m_wr_high_threshold) {
+          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
@@ -1478,7 +1482,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         case DRAM_WR: {
           if(m_num_ref_cnts[pch_idx] > 0) {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if(num_dram_wr > m_wr_low_threshold) {
+          } else if(num_dram_wr > m_wr_low_threshold || (num_dram_wr > 0 && num_dram_rd == 0) ) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
@@ -1492,7 +1496,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             m_db_dram_rw_modes[pch_idx] = DRAM_REF;
           } else if((m_num_dram_wr_cnts[pch_idx] > 0 && ((m_ndp_dram_wr_timer[pch_idx] < ndp_wr_mode_min_time) || m_num_rd_cnts[pch_idx] == 0))) {
             m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
-          } else if(num_dram_wr > m_wr_high_threshold) {
+          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
@@ -1506,7 +1510,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                     ((m_dram_rd_timer[pch_idx] >= dram_rd_mode_min_time) || 
                     m_num_post_rd_cnts[pch_idx] == 8)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
-          } else if(num_dram_wr > m_wr_high_threshold) {
+          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
