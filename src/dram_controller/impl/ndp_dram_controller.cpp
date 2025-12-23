@@ -271,6 +271,37 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     size_t buf_size = 32;
 
+    struct CmdIds {
+      int ACT = -1;
+      int P_ACT = -1;
+      int PRE = -1;
+      int PREA = -1;
+      int PREsb = -1;
+      int P_PRE = -1;
+      int RD = -1;
+      int WR = -1;
+      int RDA = -1;
+      int WRA = -1;
+      int PRE_RD = -1;
+      int PRE_WR = -1;
+      int POST_RD = -1;
+      int POST_WR = -1;
+      int PRE_RDA = -1;
+      int POST_WRA = -1;
+      int NDP_DRAM_RD = -1;
+      int NDP_DRAM_WR = -1;
+      int NDP_DRAM_RDA = -1;
+      int NDP_DRAM_WRA = -1;
+      int NDP_DB_RD = -1;
+      int NDP_DB_WR = -1;
+      int REFab = -1;
+      int REFsb = -1;
+      int REFab_end = -1;
+      int REFsb_end = -1;
+    };    
+
+    CmdIds m_cmds;
+
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -515,6 +546,33 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_avg_priority_buffers.resize(num_pseudochannel,0);
       m_avg_rd_prefetch_buffers.resize(num_pseudochannel,0);
       m_avg_wr_prefetch_buffers.resize(num_pseudochannel,0);
+
+      m_cmds.ACT = m_cmds.ACT;
+      m_cmds.P_ACT = m_cmds.P_ACT;
+      m_cmds.PRE = m_cmds.PRE;
+      m_cmds.PREA = m_cmds.PREA;
+      m_cmds.PREsb = m_cmds.PREsb;
+      m_cmds.P_PRE = m_cmds.P_PRE;
+      m_cmds.RD = m_cmds.RD;
+      m_cmds.WR = m_cmds.WR;
+      m_cmds.RDA = m_cmds.RDA;
+      m_cmds.WRA = m_cmds.WRA;
+      m_cmds.PRE_RD = m_cmds.PRE_RD;
+      m_cmds.PRE_WR = m_cmds.PRE_WR;
+      m_cmds.POST_RD = m_cmds.POST_RD;
+      m_cmds.POST_WR = m_cmds.POST_WR;
+      m_cmds.PRE_RDA = m_cmds.PRE_RDA;
+      m_cmds.POST_WRA = m_cmds.POST_WRA;
+      m_cmds.NDP_DRAM_RD = m_cmds.NDP_DRAM_RD;
+      m_cmds.NDP_DRAM_WR = m_cmds.NDP_DRAM_WR;
+      m_cmds.NDP_DRAM_RDA = m_cmds.NDP_DRAM_RDA;
+      m_cmds.NDP_DRAM_WRA = m_cmds.NDP_DRAM_WRA;
+      m_cmds.NDP_DB_RD = m_cmds.NDP_DB_RD;
+      m_cmds.NDP_DB_WR = m_cmds.NDP_DB_WR;
+      m_cmds.REFab = m_cmds.REFab;
+      m_cmds.REFsb = m_cmds.REFsb;
+      m_cmds.REFab_end = m_cmds.REFab_end;
+      m_cmds.REFsb_end = m_cmds.REFsb_end;
     };
 
     bool send(Request& req) override {
@@ -636,7 +694,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       bool is_success = false;
       // is_success = m_priority_buffer.enqueue(req);
       is_success = m_priority_buffers[req.addr_vec[psuedo_ch_idx]].enqueue(req);
-      if(req.final_command == m_dram->m_commands("REFab"))
+      if(req.final_command == m_cmds.REFab)
         m_num_ref_cnts[req.addr_vec[psuedo_ch_idx]]++;
       return is_success;
     }
@@ -695,6 +753,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }
 
       // Update Each Row Cap 
+
       for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
         for(int bg_id=0;bg_id<num_bankgroup;bg_id++) {
           for(int bk_id=0;bk_id<num_bank;bk_id++) {
@@ -741,29 +800,6 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }         
         }
       }   
-
-      // tracking every time..
-      for(int bg_id=0;bg_id<num_bankgroup;bg_id++) {
-        for(int bk_id=0;bk_id<num_bank;bk_id++) {
-            bool has_host_read_access = false;
-            bool has_ndp_read_access = false;
-            bool has_host_write_access = false;
-            bool has_ndp_write_access = false;
-            for(auto _it = m_read_buffers[0].begin(); _it != m_read_buffers[0].end(); _it++) {
-              if(bg_id == _it->addr_vec[m_dram->m_levels("bankgroup")] && bk_id == _it->addr_vec[m_dram->m_levels("bank")]) {
-                if(_it->is_ndp_req) has_ndp_read_access = true;
-                else                has_host_read_access = true;
-              }
-            }
-            for(auto _it = m_write_buffers[0].begin(); _it != m_write_buffers[0].end(); _it++) {
-              if(bg_id == _it->addr_vec[m_dram->m_levels("bankgroup")] && bk_id == _it->addr_vec[m_dram->m_levels("bank")]) {
-                if(_it->is_ndp_req) has_ndp_write_access = true;
-                else                has_host_write_access = true;
-              }
-            }         
-        }
-      }
-
       m_avg_active_buffer+=m_active_buffer.size();
       for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
         m_avg_read_buffers[pch_id]+=m_read_buffers[pch_id].size();
@@ -774,6 +810,27 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }      
       uint64_t print_interval = 100000;
       // uint64_t print_interval = 1024;
+
+      // if(m_clk%print_interval == 0) {
+      //   std::cout<<"Active Buf: "<<m_active_buffer.size()<<std::endl;
+      //   std::cout<<"RD_BUF"<<std::endl;
+      //   for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+      //     std::cout<<"  - PCH["<<pch_id<<"] : "<<m_read_buffers[pch_id].size()<<std::endl;
+      //   }        
+      //   std::cout<<"WR_BUF"<<std::endl;
+      //   for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+      //     std::cout<<"  - PCH["<<pch_id<<"] : "<<m_write_buffers[pch_id].size()<<std::endl;
+      //   }        
+      //   std::cout<<"PRE_RD_BUF"<<std::endl;
+      //   for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+      //     std::cout<<"  - PCH["<<pch_id<<"] : "<<m_rd_prefetch_buffers[pch_id].size()<<std::endl;
+      //   }
+      //   std::cout<<"PRE_WR_BUF"<<std::endl;
+      //   for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+      //     std::cout<<"  - PCH["<<pch_id<<"] : "<<m_wr_prefetch_buffers[pch_id].size()<<std::endl;
+      //   }              
+      // }
+
       if(m_clk%print_interval == 0) {
           #ifdef PRINT_DEBUG    
           std::cout<<"Active Buf: "<<m_avg_active_buffer/print_interval<<std::endl;
@@ -898,7 +955,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
         // Update prefetch rd/wr counter for PRE_RD/WR
         if(req_it->is_db_cmd) {
-          if(req_it->final_command == m_dram->m_commands("PRE_RD") || req_it->final_command == m_dram->m_commands("PRE_RDA")) {
+          if(req_it->final_command == m_cmds.PRE_RD || req_it->final_command == m_cmds.PRE_RDA) {
             s_num_pre_rd++;
             db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
             db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++; 
@@ -923,7 +980,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
 
         // Update POST_RD
-        if(req_it->command  == m_dram->m_commands("POST_RD")) {
+        if(req_it->command  == m_cmds.POST_RD) {
           s_num_post_rd++;
           db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
           db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
@@ -936,7 +993,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }       
 
         // Update POST_WR 
-        if(req_it->command == m_dram->m_commands("POST_WR")) {
+        if(req_it->command == m_cmds.POST_WR) {
           // Issued DDR commands related with PRE_WR
           s_num_post_wr++;
           db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
@@ -949,23 +1006,23 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           #endif
         }
 
-        // if((req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) && 
+        // if((req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA) && 
         //     db_prefetch_rd_cnt_per_pch[req_pch_idx] < m_rd_prefetch_buffers[req_pch_idx].max_size) {
         //   // Convert RD or RDA to PRE_RD when the pseudo channel is high priority mode of prefetch
-        //   if(req_it->command == m_dram->m_commands("RD")) req_it->command = m_dram->m_commands("PRE_RD");
-        //   else                                            req_it->command = m_dram->m_commands("PRE_RDA");\
+        //   if(req_it->command == m_cmds.RD) req_it->command = m_cmds.PRE_RD;
+        //   else                                            req_it->command = m_cmds.PRE_RDA;\
         //   req_it->is_db_cmd = true;
         // }
 
         // // Update PRE_WR from Normal WR/WRA
-        // if((req_it->command == m_dram->m_commands("P_ACT") || req_it->command == m_dram->m_commands("PRE_WR")) &&
-        //     (req_it->final_command == m_dram->m_commands("WR") || req_it->final_command == m_dram->m_commands("WRA"))) {
+        // if((req_it->command == m_cmds.P_ACT || req_it->command == m_cmds.PRE_WR) &&
+        //     (req_it->final_command == m_cmds.WR || req_it->final_command == m_cmds.WRA)) {
         //     // PRE_WR from WRITE_BUFFER --> Update PRE_WR Counter
         //     s_num_pre_wr++;
         //     db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
         //     db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;       
         //     // Change Final Command from WR/WRA to PRE_WR 
-        //     req_it->final_command = m_dram->m_commands("PRE_WR");      
+        //     req_it->final_command = m_cmds.PRE_WR;      
         //     #ifdef PRINT_DB_CNT
         //     std::cout<<"PRE_WR ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
         //     std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
@@ -975,7 +1032,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         // }
 
         // // Update POST_WR 
-        // if(req_it->command == m_dram->m_commands("POST_WR")) {
+        // if(req_it->command == m_cmds.POST_WR) {
         //   // Issued DDR commands related with PRE_WR
         //   s_num_post_wr++;
         //   db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
@@ -989,17 +1046,17 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         // }
 
         // // Update PRE_RD
-        // if((req_it->command == m_dram->m_commands("ACT")  || req_it->command == m_dram->m_commands("RD") ||
-        //     req_it->command  == m_dram->m_commands("RDA") || req_it->command  == m_dram->m_commands("PRE_RD") ||
-        //     req_it->command  == m_dram->m_commands("PRE_RDA")) && (req_it->final_command == m_dram->m_commands("RD") || 
-        //     req_it->final_command == m_dram->m_commands("RDA")) && req_it->is_db_cmd) {                
+        // if((req_it->command == m_cmds.ACT  || req_it->command == m_cmds.RD ||
+        //     req_it->command  == m_cmds.RDA || req_it->command  == m_cmds.PRE_RD ||
+        //     req_it->command  == m_cmds.PRE_RDA) && (req_it->final_command == m_cmds.RD || 
+        //     req_it->final_command == m_cmds.RDA) && req_it->is_db_cmd) {                
         //   // PRE_RD from READ_BUFFER --> update PRD_RD Counter
         //   s_num_pre_rd++;
         //   db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
         //   db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
         //   // Change Final Command from RD/RDA to PRE_RD/PRE_RDA 
-        //   if(req_it->final_command == m_dram->m_commands("RD")) req_it->final_command = m_dram->m_commands("PRE_RD");
-        //   else                                                  req_it->final_command = m_dram->m_commands("PRE_RDA");
+        //   if(req_it->final_command == m_cmds.RD) req_it->final_command = m_cmds.PRE_RD;
+        //   else                                                  req_it->final_command = m_cmds.PRE_RDA;
         //   #ifdef PRINT_DB_CNT
         //   std::cout<<"PRE_RD ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
         //   std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
@@ -1009,7 +1066,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         // }
         
         // // Update POST_RD
-        // if(req_it->command  == m_dram->m_commands("POST_RD")) {
+        // if(req_it->command  == m_cmds.POST_RD) {
         //   s_num_post_rd++;
         //   db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
         //   db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
@@ -1028,15 +1085,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                                                       db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]);
                             
         if(false) {
-          if(req_it->command == m_dram->m_commands("PRE_WR"))  std::cout<<"["<<m_clk<<"] ISSUE PRE_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
+          if(req_it->command == m_cmds.PRE_WR)  std::cout<<"["<<m_clk<<"] ISSUE PRE_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
           <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;
-          if(req_it->command == m_dram->m_commands("POST_WR")) std::cout<<"["<<m_clk<<"] ISSUE POST_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
+          if(req_it->command == m_cmds.POST_WR) std::cout<<"["<<m_clk<<"] ISSUE POST_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
           <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;
-          if(req_it->command == m_dram->m_commands("PRE_RD")) std::cout<<"["<<m_clk<<"] ISSUE PRE_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
+          if(req_it->command == m_cmds.PRE_RD) std::cout<<"["<<m_clk<<"] ISSUE PRE_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
           <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;              
-          if(req_it->command == m_dram->m_commands("PRE_RDA")) std::cout<<"["<<m_clk<<"] ISSUE PRE_RDA CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
+          if(req_it->command == m_cmds.PRE_RDA) std::cout<<"["<<m_clk<<"] ISSUE PRE_RDA CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
           <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;                            
-          if(req_it->command == m_dram->m_commands("POST_RD")) std::cout<<"["<<m_clk<<"] ISSUE POST_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
+          if(req_it->command == m_cmds.POST_RD) std::cout<<"["<<m_clk<<"] ISSUE POST_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
           <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;                                          
         }
         // Exception 
@@ -1057,14 +1114,14 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           ======================= Update Stats =====================
         */
 
-        if(req_it->command == m_dram->m_commands("P_ACT")     ||
-           req_it->command == m_dram->m_commands("PRE")       ||
-           req_it->command == m_dram->m_commands("PREA")      ||
-           req_it->command == m_dram->m_commands("P_PRE")     ||
-           req_it->command == m_dram->m_commands("REFab")     ||
-           req_it->command == m_dram->m_commands("REFsb")     ||
-           req_it->command == m_dram->m_commands("REFab_end") ||
-           req_it->command == m_dram->m_commands("REFsb_end")) {
+        if(req_it->command == m_cmds.P_ACT     ||
+           req_it->command == m_cmds.PRE       ||
+           req_it->command == m_cmds.PREA      ||
+           req_it->command == m_cmds.P_PRE     ||
+           req_it->command == m_cmds.REFab     ||
+           req_it->command == m_cmds.REFsb     ||
+           req_it->command == m_cmds.REFab_end ||
+           req_it->command == m_cmds.REFsb_end) {
           // Single Cycle Command
           cmd_io_cc+=1;
           cmd_cycle_per_pch[req_it->addr_vec[psuedo_ch_idx]]+=1;
@@ -1075,44 +1132,44 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
 
         // Normal Request
-        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || 
-           req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) {
+        if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA || 
+           req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA) {
           s_narrow_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(32);
           s_wide_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(8);                            
         }
 
-        if(req_it->command == m_dram->m_commands("POST_RD") || req_it->command == m_dram->m_commands("PRE_WR") || 
-           req_it->command == m_dram->m_commands("NDP_DB_RD") || req_it->command == m_dram->m_commands("NDP_DB_WR")) {
+        if(req_it->command == m_cmds.POST_RD || req_it->command == m_cmds.PRE_WR || 
+           req_it->command == m_cmds.NDP_DB_RD || req_it->command == m_cmds.NDP_DB_WR) {
           s_narrow_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(32);
         }
 
         // NDP and D2PA Request
-        if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")          || 
-           req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")        ||
-           req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_WR") ||
-           req_it->command == m_dram->m_commands("NDP_DRAM_RDA") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) {
+        if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA          || 
+           req_it->command == m_cmds.POST_WR || req_it->command == m_cmds.POST_WRA        ||
+           req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_WR ||
+           req_it->command == m_cmds.NDP_DRAM_RDA || req_it->command == m_cmds.NDP_DRAM_WRA) {
             s_wide_io_busy_clk_per_pch[req_it->addr_vec[1]]+=(8);
         }
 
-        if(req_it->command == m_dram->m_commands("ACT"))                                                                  s_num_act++;
-        if(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("PREA"))                 s_num_pre++;
-        if(req_it->command == m_dram->m_commands("P_ACT"))                                                                s_num_p_act++;
-        if(req_it->command == m_dram->m_commands("P_PRE"))                                                                s_num_p_pre++;
-        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA"))                   s_num_rd++;
-        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA"))                   s_num_wr++;
-        if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA")) s_num_ndp_dram_rd++;
-        if(req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) s_num_ndp_dram_wr++;
-        if(req_it->command == m_dram->m_commands("NDP_DB_RD"))                                                            s_num_ndp_db_rd++;
-        if(req_it->command == m_dram->m_commands("NDP_DB_WR"))                                                            s_num_ndp_db_wr++;              
+        if(req_it->command == m_cmds.ACT)                                                                  s_num_act++;
+        if(req_it->command == m_cmds.PRE || req_it->command == m_cmds.PREA)                 s_num_pre++;
+        if(req_it->command == m_cmds.P_ACT)                                                                s_num_p_act++;
+        if(req_it->command == m_cmds.P_PRE)                                                                s_num_p_pre++;
+        if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA)                   s_num_rd++;
+        if(req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA)                   s_num_wr++;
+        if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) s_num_ndp_dram_rd++;
+        if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) s_num_ndp_dram_wr++;
+        if(req_it->command == m_cmds.NDP_DB_RD)                                                            s_num_ndp_db_rd++;
+        if(req_it->command == m_cmds.NDP_DB_WR)                                                            s_num_ndp_db_wr++;              
 
-        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) s_num_issue_reads++;
-        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR"))  s_num_issue_writes++;
-        if((req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) || 
-            (req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR"))) {
+        if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA || req_it->command == m_cmds.POST_RD) s_num_issue_reads++;
+        if(req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA || req_it->command == m_cmds.PRE_WR)  s_num_issue_writes++;
+        if((req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA || req_it->command == m_cmds.POST_RD) || 
+            (req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA || req_it->command == m_cmds.PRE_WR)) {
             s_num_trans_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
         }
 
-        if(req_it->command == m_dram->m_commands("REFab")) {
+        if(req_it->command == m_cmds.REFab) {
           int nRFC_latency = m_dram->m_timing_vals("nRFC1");
           int pch_addr = req_it->addr_vec[psuedo_ch_idx];
           s_num_refresh_cc_per_pch[pch_addr]+=nRFC_latency;
@@ -1175,63 +1232,63 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             }                                       
           }
           // Update Counter for Mode Selection
-          if(req_it->command == m_dram->m_commands("RD")     || req_it->command == m_dram->m_commands("RDA") || 
-             req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
+          if(req_it->command == m_cmds.RD     || req_it->command == m_cmds.RDA || 
+             req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA) {
             if(m_num_rd_cnts[req_it->addr_vec[psuedo_ch_idx]] == 0) throw std::runtime_error("Underflow for RD Counter");
             m_num_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("NDP_DB_RD")) {
+          } else if(req_it->command == m_cmds.NDP_DB_RD) {
             if(m_num_db_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for DB_RD Counter");
             m_num_db_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA")) {
+          } else if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) {
             if(m_num_dram_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for DRAM_RD Counter");
             m_num_dram_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("WR")     || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR")) {
+          } else if(req_it->command == m_cmds.WR     || req_it->command == m_cmds.WRA || req_it->command == m_cmds.PRE_WR) {
             if(m_num_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for WR Counter");
             m_num_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("NDP_DB_WR")) {
+          } else if(req_it->command == m_cmds.NDP_DB_WR) {
             if(m_num_db_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for DB_WR Counter");
             m_num_db_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) {
+          } else if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) {
             if(m_num_dram_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for DRAM_WR Counter");
             m_num_dram_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("POST_RD")) {
+          } else if(req_it->command == m_cmds.POST_RD) {
             if(m_num_post_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for POST_RD Counter");
             m_num_post_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")) {
+          } else if(req_it->command == m_cmds.POST_WR || req_it->command == m_cmds.POST_WRA) {
             if(m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for POST_WR Counter");
             m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
-          } else if(req_it->command == m_dram->m_commands("REFab")) {
+          } else if(req_it->command == m_cmds.REFab) {
             if(m_num_ref_cnts[req_it->addr_vec[psuedo_ch_idx]]  == 0) throw std::runtime_error("Underflow for REF Counter");            
             m_num_ref_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
           }
 
-          if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA")) {
+          if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) {
             if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] < 128)
               m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]++;
           }        
           
-          if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
+          if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA) {
             if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] >= 16)
               m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]-=16;            
           }
 
           int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
-          if(req_it->command == m_dram->m_commands("RD")     || req_it->command == m_dram->m_commands("RDA") || 
-             req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA") ||
-             req_it->command == m_dram->m_commands("WR")     || req_it->command == m_dram->m_commands("WRA") || 
-             req_it->command == m_dram->m_commands("POST_WR") || req_it->command == m_dram->m_commands("POST_WRA")) {
+          if(req_it->command == m_cmds.RD     || req_it->command == m_cmds.RDA || 
+             req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA ||
+             req_it->command == m_cmds.WR     || req_it->command == m_cmds.WRA || 
+             req_it->command == m_cmds.POST_WR || req_it->command == m_cmds.POST_WRA) {
              m_host_access_cnt_per_bank[flat_bank_id]--;             
             }
             
-            if(req_it->command == m_dram->m_commands("NDP_DRAM_RD") || req_it->command == m_dram->m_commands("NDP_DRAM_RDA") ||
-            req_it->command == m_dram->m_commands("NDP_DB_WR")   || req_it->command == m_dram->m_commands("NDP_DB_RD") ||
-            req_it->command == m_dram->m_commands("NDP_DRAM_WR") || req_it->command == m_dram->m_commands("NDP_DRAM_WRA")) {
+            if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA ||
+            req_it->command == m_cmds.NDP_DB_WR   || req_it->command == m_cmds.NDP_DB_RD ||
+            req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) {
               m_ndp_access_cnt_per_bank[flat_bank_id]--;         
           }
 
           // Move issued Read Request to pending buffer
           if (req_it->type_id == Request::Type::Read) {
-            if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) {
+            if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA || req_it->command == m_cmds.POST_RD) {
               req_it->depart = m_clk + m_dram->m_read_latency;
               pending.push_back(*req_it);  
             }
@@ -1239,26 +1296,26 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             // TODO: Add code to update statistics
           }
           
-          if(req_it->command == m_dram->m_commands("PRE_WR")) {
+          if(req_it->command == m_cmds.PRE_WR) {
             // Generate POST_WR and Enqueue to Prefetched Buffer
             Request new_req = Request(req_it->addr_vec, Request::Type::Write);
             new_req.addr          = req_it->addr;
             new_req.arrive        = req_it->arrive;
-            new_req.final_command = m_dram->m_commands("POST_WR");
+            new_req.final_command = m_cmds.POST_WR;
             m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             std::string msg = std::string(" Remove Request (PRE_WR) from Buffer ") + std::to_string(buffer->size()) + std::string(")");
             DEBUG_PRINT(m_clk, "Memory Controller", new_req.addr_vec[ch_idx], new_req.addr_vec[psuedo_ch_idx], msg);              
             buffer->remove(req_it);
             // std::cout<<"[NDP_DRAM_CTRL] Generate POST_WR and Enqueue to WR_PREFETCH_BUFFER"<<std::endl;
             m_to_wr_prefetch_buffers[new_req.addr_vec[psuedo_ch_idx]].push_back(std::make_pair(new_req, (m_dram->m_timing_vals("nBL")*4)));            
-          } else if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
+          } else if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA) {
             // Generate POST_RD and Enqueue to Prefetched Buffer
             Request new_req = Request(req_it->addr_vec, Request::Type::Read);
             new_req.addr          = req_it->addr;
             new_req.arrive        = req_it->arrive;
             new_req.source_id     = req_it->source_id;
             new_req.callback      = req_it->callback;
-            new_req.final_command = m_dram->m_commands("POST_RD");
+            new_req.final_command = m_cmds.POST_RD;
             m_num_post_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             bool is_success = false;              
 
@@ -1332,7 +1389,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       req->is_stat_updated = true;
 
       // If skip POST_RD or PRE_WR because there are D2PA Access 
-      if(!(req->final_command != m_dram->m_commands("POST_RD") || req->final_command != m_dram->m_commands("PRE_WR"))) {
+      if(!(req->final_command != m_cmds.POST_RD || req->final_command != m_cmds.PRE_WR)) {
         if (req->type_id == Request::Type::Read) 
         {
           if (is_row_hit(req)) {
@@ -1385,8 +1442,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             // Check if this requests accesses the DRAM or is being forwarded.
             // TODO add the stats back
             s_read_latency += req.depart - req.arrive;
-            if((req.command == m_dram->m_commands("RD")) || (req.command == m_dram->m_commands("RDA")) ||
-               (req.command == m_dram->m_commands("POST_RD")) || (req.command == m_dram->m_commands("POST_RDA"))) {
+            if((req.command == m_cmds.RD) || (req.command == m_cmds.RDA) ||
+               (req.command == m_cmds.POST_RD)) {
               s_normal_read_latency += req.depart - req.arrive;
             }
             // std::cout<<" RD latency ["<<(req.depart - req.arrive)<<"] ";
@@ -1534,7 +1591,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       bool request_found = false;
 
       // Update Priority Queue Empty Flag Array 
-      for(int pch_idx=0;pch_idx<m_dram->get_level_size("pseudochannel");pch_idx++) {
+      for(int pch_idx=0;pch_idx<num_pseudochannel;pch_idx++) {
         if(m_priority_buffers[pch_idx].size() != 0) {
           is_empty_priority_per_pch[pch_idx] = false;
         } else {
@@ -1590,8 +1647,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                 if(m_db_dram_rw_modes[pch_idx] == DRAM_REF) {
                   // NDP_WR && REF MODE: DB_WR
                   // Seach Buffer: WR_BUF (DB_WR)
-                  std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_WR")};
-                  if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                  // 2 std::vector<int> cmd_list = {m_cmds.NDP_DB_WR};
+                  if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],2); req_it != m_write_buffers[pch_idx].end()) {
                     request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                     req_buffer = &m_write_buffers[pch_idx];                                  
                   }   
@@ -1601,8 +1658,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   // Seach Buffer: WR_BUF (DB_WR) -> RD_BUF (PRE_RD) -> RD_BUF (DRAM_RD)
                   // Search Issuable DB_WR
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_WR")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                    // 2 std::vector<int> cmd_list = {m_cmds.NDP_DB_WR};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],2); req_it != m_write_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];                                  
                     }   
@@ -1613,8 +1670,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_RD");
+                        if(req_it->final_command == m_cmds.RD || req_it->final_command == m_cmds.RDA) {
+                          req_it->final_command = m_cmds.PRE_RD;
                           req_it->is_db_cmd = true;  
                         } else {
                           throw std::runtime_error("DB_WR/DB_NDP_WR Mode - Wrong Pick up DDR Command (Not RD/RDA)");
@@ -1624,8 +1681,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }
                   // Search Issuable DRAM_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DRAM_RD"),m_dram->m_commands("NDP_DRAM_RDA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 3 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_RD,m_cmds.NDP_DRAM_RDA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],3); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1635,8 +1692,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   // Seach Buffer: WR_BUF (DB_WR) -> PRE_WR_BUF (POST_WR) -> WR_BUF (DRAM_WR)
                   // Search Issuable DB_WR
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_WR")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                    // 2 std::vector<int> cmd_list = {m_cmds.NDP_DB_WR};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],2); req_it != m_write_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];                                  
                     }   
@@ -1650,8 +1707,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }
                   // Search Issuable DRAM_WR
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DRAM_WR"),m_dram->m_commands("NDP_DRAM_WRA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                    // 4 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_WR,m_cmds.NDP_DRAM_WRA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],4); req_it != m_write_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];                                  
                     }   
@@ -1673,8 +1730,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }    
                   // Search Issuable DB_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_RD")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 1 std::vector<int> cmd_list = {m_cmds.NDP_DB_RD};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],1); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1692,8 +1749,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }    
                   // Search Issuable RD, DB_RD, DRAM_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("RD")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 0 std::vector<int> cmd_list = {m_cmds.RD};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],0); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1704,8 +1761,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_RD");
+                        if(req_it->final_command == m_cmds.RD || req_it->final_command == m_cmds.RDA) {
+                          req_it->final_command = m_cmds.PRE_RD;
                           req_it->is_db_cmd = true;  
                         } else {
                           throw std::runtime_error("DB_WR/DRAM_RD Mode - Wrong Pick up DDR Command (Not RD/RDA)");
@@ -1715,8 +1772,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }   
                   // Search Issuable DB_RD, DRAM_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_RD"), m_dram->m_commands("NDP_DRAM_RD"),m_dram->m_commands("NDP_DRAM_RDA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 3 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_RD,m_cmds.NDP_DRAM_RDA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],3); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1734,8 +1791,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }    
                   // Search Issuable DB_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DB_RD")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 1 std::vector<int> cmd_list = {m_cmds.NDP_DB_RD};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],1); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1749,8 +1806,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }
                   // Search Issuable DRAM_WR
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DRAM_WR"),m_dram->m_commands("NDP_DRAM_WRA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                    // 4 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_WR,m_cmds.NDP_DRAM_WRA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],4); req_it != m_write_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];                                  
                     }   
@@ -1768,8 +1825,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("WR") || req_it->final_command == m_dram->m_commands("WRA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_WR");
+                        if(req_it->final_command == m_cmds.WR || req_it->final_command == m_cmds.WRA) {
+                          req_it->final_command = m_cmds.PRE_WR;
                           req_it->is_db_cmd = true;  
                         } else {
                           m_dram->print_req(*req_it);
@@ -1788,8 +1845,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("WR") || req_it->final_command == m_dram->m_commands("WRA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_WR");
+                        if(req_it->final_command == m_cmds.WR || req_it->final_command == m_cmds.WRA) {
+                          req_it->final_command = m_cmds.PRE_WR;
                           req_it->is_db_cmd = true;  
                         } else {
                           m_dram->print_req(*req_it);
@@ -1804,8 +1861,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_RD");
+                        if(req_it->final_command == m_cmds.RD || req_it->final_command == m_cmds.RDA) {
+                          req_it->final_command = m_cmds.PRE_RD;
                           req_it->is_db_cmd = true;  
                         } else {
                           throw std::runtime_error("DB_WR/DRAM_RD Mode - Wrong Pick up DDR Command (Not RD/RDA)");
@@ -1815,8 +1872,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }                  
                   // Search Issuable DRAM_RD
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DRAM_RD"),m_dram->m_commands("NDP_DRAM_RDA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],cmd_list); req_it != m_read_buffers[pch_idx].end()) {
+                    // 3 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_RD,m_cmds.NDP_DRAM_RDA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],3); req_it != m_read_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_read_buffers[pch_idx];                                  
                     }   
@@ -1831,8 +1888,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];   
                       if(request_found) {
-                        if(req_it->final_command == m_dram->m_commands("WR") || req_it->final_command == m_dram->m_commands("WRA")) {
-                          req_it->final_command = m_dram->m_commands("PRE_WR");
+                        if(req_it->final_command == m_cmds.WR || req_it->final_command == m_cmds.WRA) {
+                          req_it->final_command = m_cmds.PRE_WR;
                           req_it->is_db_cmd = true;  
                         } else {
                           m_dram->print_req(*req_it);
@@ -1850,8 +1907,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }
                   // Search Issuable DRAM_WR
                   if(!request_found) {
-                    std::vector<int> cmd_list = {m_dram->m_commands("NDP_DRAM_WR"),m_dram->m_commands("NDP_DRAM_WRA")};
-                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],cmd_list); req_it != m_write_buffers[pch_idx].end()) {
+                    // 4 std::vector<int> cmd_list = {m_cmds.NDP_DRAM_WR,m_cmds.NDP_DRAM_WRA};
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],4); req_it != m_write_buffers[pch_idx].end()) {
                       request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
                       req_buffer = &m_write_buffers[pch_idx];                                  
                     }   
@@ -1859,169 +1916,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                 }
               }
             }
- 
-
-            // Deprecated
-            // if(is_empty_priority_per_pch[pch_idx]) {
-            //   set_mode_per_pch(pch_idx);
-            //   if(!request_found /*&& prefetch_mode_before_ref_per_ch[pch_idx]*/) {                
-            //     /*=============== Prefetch Mode Before Refresh =================*/
-            //     /*
-            //       1. PRE_RD (READ_BUFFER)
-            //       2. POST_RD (RD_PREFETCH_BUFFER)
-
-            //     */            
-            //     // PRE_RD (READ_BUFFER)
-            //     // current_sch_mode_per_pch[pch_idx] = 2;
-            //     if(!request_found && m_use_prefetch) { 
-            //       if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_read_buffers[pch_idx];   
-            //         if(request_found) {
-            //           if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-            //             if(!(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("P_PRE"))) {
-            //               req_it->is_db_cmd = true;  
-            //             }
-            //           }
-            //         }                                 
-            //       }      
-            //     }
-            //     // PRE_WR
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_write_buffers[pch_idx];     
-            //       }                              
-            //     } 
-            //     /*
-            //     // POST_WR (WR_PREFETCH_BUFFER)
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                               
-            //       }      
-            //     } 
-            //     */                            
-            //     // Search POST_RD
-            //     if(!request_found && m_use_prefetch) {
-            //       if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                       
-            //       }      
-            //     }                     
-            //   } else if(!request_found && m_dram->check_pch_refrsehing_by_idx(m_channel_id,pch_idx) && m_use_prefetch) {
-            //     /*=============== Scheduling during Refresh =================*/
-            //     // current_sch_mode_per_pch[pch_idx] = 3;
-            //     // Fist Check POST_RD
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                     
-            //       }
-            //     }                     
-            //     // Second PRE_WR in WRITE BUFFER
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_write_buffers[pch_idx];     
-            //       }                              
-            //     } 
-            //   } else if(/*m_is_write_mode_per_pch[pch_idx]*/false) { // Write Mode 
-            //     /*=============== WRITE MODE  =================*/
-            //     /*
-            //       Simplify Write Mode 
-            //       X 1. PRE_WR (WRITE_BUFFER)
-            //       X 2. PRE_RD (READ_BUFFER)
-            //       X 3. POST_WR (WR_PREFETCH_BUFFER)
-            //       X 4. POST_RD (RD_PREFETCH_BUFFER)    
-            //       5. NORMAL WR (WRITE_BUFFER)             
-            //     */
-            //     // PRE_WR/NDP_DB_WRITE (WRITE_BUFFER)
-            //     // current_sch_mode_per_pch[pch_idx] = 1;
-            //     /*
-            //     if(!request_found && m_use_prefetch) {
-            //       if (req_it = m_scheduler->get_best_pre_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_write_buffers[pch_idx];     
-            //       }                              
-            //     } 
-            //       */
-            //     // PRE_RD (READ_BUFFER)
-            //     /*
-            //     if(!request_found && m_use_prefetch) { 
-            //       if (req_it = m_scheduler->get_best_pre_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_read_buffers[pch_idx];   
-            //         if(request_found) {
-            //           if(req_it->final_command == m_dram->m_commands("RD") || req_it->final_command == m_dram->m_commands("RDA")) {
-            //             if(!(req_it->command == m_dram->m_commands("PRE") || req_it->command == m_dram->m_commands("P_PRE"))) {
-            //               req_it->is_db_cmd = true;  
-            //             }
-            //           }
-            //         }                                 
-            //       }      
-            //     }
-            //     */
-            //     /*
-            //     // POST_WR (WR_PREFETCH_BUFFER)
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                               
-            //       }      
-            //     }
-            //     // POST_RD (RD_PREFETCH_BUFFER) 
-            //     if(!request_found) {
-            //       if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                      
-            //       }      
-            //     }        
-            //     */      
-            //     // NORMAL WR (WRITE_BUFFER)  
-            //     if(!request_found/*&& !m_use_prefetch*/) {
-            //       if (req_it = m_scheduler->get_best_request(m_write_buffers[pch_idx]); req_it != m_write_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_write_buffers[pch_idx];                                                                   
-            //       }      
-            //     }                
-            //   } else { // Read Mode
-            //     // Normal RD - POST RD - POST WR
-            //     // First Check Normal RD
-            //     /*=============== Read MODE  =================*/
-            //     /*
-            //       1. POST_RD (RD_PREFETCH_BUFFER)    
-            //       2. NORMAL RD (READ_BUFFER)             
-            //       3. POST_WR (WR_PREFETCH_BUFFER)
-            //     */                
-            //   //  current_sch_mode_per_pch[pch_idx] = 0;
-            //     // Search POST_WR
-            //     if(!request_found && m_use_prefetch) {
-            //       if (req_it = m_scheduler->get_best_request(m_wr_prefetch_buffers[pch_idx]); req_it != m_wr_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_wr_prefetch_buffers[pch_idx];                                                                
-            //       }      
-            //     }
-            //     // Search POST_RD
-            //     if(!request_found && m_use_prefetch) {
-            //       if (req_it = m_scheduler->get_best_request(m_rd_prefetch_buffers[pch_idx]); req_it != m_rd_prefetch_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_rd_prefetch_buffers[pch_idx];                                                                       
-            //       }      
-            //     }               
-            //     // Search Normal RD
-            //     if(!request_found) { 
-            //       if (req_it = m_scheduler->get_best_request(m_read_buffers[pch_idx]); req_it != m_read_buffers[pch_idx].end()) {
-            //         request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
-            //         req_buffer = &m_read_buffers[pch_idx];                                                                                
-            //       }      
-            //     }               
-            //   }
-            // }
-
-
-
-            if(request_found) break;
+             if(request_found) break;
           }
         }                        
         
@@ -2045,10 +1940,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
               request_found = false;
               if(req_it->is_db_cmd) {
                 req_it->is_db_cmd = false;
-                if(req_it->final_command == m_dram->m_commands("PRE_WR"))  
-                  req_it->final_command == m_dram->m_commands("WR");
+                if(req_it->final_command == m_cmds.PRE_WR)  
+                  req_it->final_command == m_cmds.WR;
                 else 
-                  req_it->final_command == m_dram->m_commands("RD");
+                  req_it->final_command == m_cmds.RD;
               }
               break;
             }

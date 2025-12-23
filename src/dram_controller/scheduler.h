@@ -21,7 +21,7 @@ class IScheduler {
     
     virtual ReqBuffer::iterator get_best_pre_request(ReqBuffer& buffer) = 0;
     
-    virtual ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) = 0;
+    virtual ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, uint32_t priority_list_index) = 0;
 
     // Deprecated Function 
     virtual ReqBuffer::iterator get_best_request_refresh_ch(ReqBuffer& buffer) = 0;

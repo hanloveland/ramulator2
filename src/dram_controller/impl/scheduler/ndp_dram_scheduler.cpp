@@ -12,27 +12,76 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     IDRAM* m_dram;
     std::vector<int> m_cmd_priority_list;             // Command priority list
     std::unordered_map<int, int> m_cmd_priority_map;  // Command -> priority mapping
+    std::array<std::vector<int>, 6> m_cmd_prio_luts;
 
+    struct CmdIds {
+      int RD = -1;
+      int RDA = -1;
+      int WR = -1;
+      int WRA = -1;
+      int NDP_DB_RD = -1;
+      int NDP_DB_WR = -1;
+      int NDP_DRAM_RD = -1;
+      int NDP_DRAM_RDA = -1;
+      int NDP_DRAM_WR = -1;
+      int NDP_DRAM_WRA = -1;
+    };    
+    CmdIds m_cmd;
+    uint32_t m_prio_idx = -1;    
   public:
     void init() override { };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
       m_dram = cast_parent<IDRAMController>()->m_dram;
+      
+      m_cmd.RD = m_dram->m_commands("RD");
+      m_cmd.RDA = m_dram->m_commands("RDA");
+      m_cmd.WR = m_dram->m_commands("WR");
+      m_cmd.WRA = m_dram->m_commands("WRA");
+      m_cmd.NDP_DB_RD = m_dram->m_commands("NDP_DB_RD");
+      m_cmd.NDP_DB_WR = m_dram->m_commands("NDP_DB_WR");
+      m_cmd.NDP_DRAM_RD = m_dram->m_commands("NDP_DRAM_RD");
+      m_cmd.NDP_DRAM_RDA = m_dram->m_commands("NDP_DRAM_RDA");
+      m_cmd.NDP_DRAM_WR = m_dram->m_commands("NDP_DRAM_WR");
+      m_cmd.NDP_DRAM_WRA = m_dram->m_commands("NDP_DRAM_WRA");
+
+      // Init m_cmd_prio_luts 
+      // m_cmd_prio_luts[0]
+      m_cmd_prio_luts[0].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[0][m_cmd.RD] = 1;
+      // m_cmd_prio_luts[1] 
+      m_cmd_prio_luts[1].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[1][m_cmd.NDP_DB_RD] = 1;
+      // m_cmd_prio_luts[2] 
+      m_cmd_prio_luts[2].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[2][m_cmd.NDP_DB_WR] = 1;
+      // m_cmd_prio_luts[3] 
+      m_cmd_prio_luts[3].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[3][m_cmd.NDP_DRAM_RD] = 2;      
+      m_cmd_prio_luts[3][m_cmd.NDP_DRAM_RDA] = 1;      
+      // m_cmd_prio_luts[4] 
+      m_cmd_prio_luts[4].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[4][m_cmd.NDP_DRAM_WR] = 2;      
+      m_cmd_prio_luts[4][m_cmd.NDP_DRAM_WRA] = 1;            
+      // m_cmd_prio_luts[5] 
+      m_cmd_prio_luts[5].assign(m_dram->m_commands.size(), 0);
+      m_cmd_prio_luts[5][m_cmd.NDP_DB_RD] = 3;      
+      m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RD] = 2;      
+      m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RDA] = 1;                     
     };
 
     void set_command_priority(const std::vector<int>& cmd_list) {
-        m_cmd_priority_list = cmd_list;
-        m_cmd_priority_map.clear();
+        // m_cmd_priority_list = cmd_list;
+        // m_cmd_priority_map.clear();
         
-        // Higher index = higher priority
-        for (size_t i = 0; i < cmd_list.size(); i++) {
-            m_cmd_priority_map[cmd_list[i]] = cmd_list.size() - i;
-        }
+        // // Higher index = higher priority
+        // for (size_t i = 0; i < cmd_list.size(); i++) {
+        //     m_cmd_priority_map[cmd_list[i]] = cmd_list.size() - i;
+        // }
     };
     
     int get_command_priority(const int cmd) const {
-        auto it = m_cmd_priority_map.find(cmd);
-        return (it != m_cmd_priority_map.end()) ? it->second : 0;
+        return m_cmd_prio_luts[m_prio_idx][cmd];        
     };
 
     ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
@@ -110,10 +159,10 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       bool over_threshold = false;
       // Check It's not in m_activity_buffer and it's request is PRE_WR
       
-      if((req->final_command == m_dram->m_commands("WR") || req->final_command == m_dram->m_commands("WRA"))) {
+      if((req->final_command == m_cmd.WR || req->final_command == m_cmd.WRA)) {
         // Check Write Fetch Buffer 
         if((m_dram->get_db_wr_fetch_per_pch(req->addr_vec)) >= 8) over_threshold = true;
-      } else if((req->final_command == m_dram->m_commands("RD") || req->final_command == m_dram->m_commands("RDA"))) {
+      } else if((req->final_command == m_cmd.RD || req->final_command == m_cmd.RDA)) {
         if((m_dram->get_db_rd_fetch_per_pch(req->addr_vec)) >= 8) over_threshold = true;
       }
       return over_threshold;
@@ -122,9 +171,9 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     bool check_pre_req(ReqBuffer::iterator req) {
       bool is_pre_enabled_req = false;
       if(req->type_id == Request::Type::Read) {
-        if(req->final_command == m_dram->m_commands("RD") || req->final_command == m_dram->m_commands("RDA")) is_pre_enabled_req = true;
+        if(req->final_command == m_cmd.RD || req->final_command == m_cmd.RDA) is_pre_enabled_req = true;
       } else {
-        if(req->final_command == m_dram->m_commands("WR") || req->final_command == m_dram->m_commands("WRA")) is_pre_enabled_req = true;
+        if(req->final_command == m_cmd.WR || req->final_command == m_cmd.WRA) is_pre_enabled_req = true;
       }
       return is_pre_enabled_req;
     }
@@ -150,16 +199,20 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       return candidate;
     }
 
-    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) override  {
+    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, uint32_t priority_list_index) override  {
       if (buffer.size() == 0) {
           return buffer.end();
       }
       
       // Update priority mapping if provided
-      if (!cmd_priority_list.empty()) {
-          set_command_priority(cmd_priority_list);
+      // if (!cmd_priority_list.empty()) {
+      //     set_command_priority(cmd_priority_list);
+      // }
+      if(priority_list_index > 5) {
+        throw std::runtime_error("Invalid Priority List Index!");
       }
-      
+      m_prio_idx = priority_list_index;
+
       // Specify command for all requests in the buffer
       for (auto& req : buffer) {
           req.command = m_dram->get_preq_command(req.final_command, req.addr_vec);

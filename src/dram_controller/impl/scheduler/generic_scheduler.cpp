@@ -114,7 +114,7 @@ class FRFCFS : public IScheduler, public Implementation {
       return buffer.end();
     } 
 
-    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, const std::vector<int>& cmd_priority_list) override  {
+    ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, uint32_t priority_list_index) override  {
       return buffer.end();
     }    
 

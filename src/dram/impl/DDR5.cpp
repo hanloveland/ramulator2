@@ -899,6 +899,7 @@ class DDR5 : public IDRAM, public Implementation {
       // pJ
       double socket_dq_energy = 18.48;
       double on_board_dq_energy = 10.08;
+      size_t total_acc = 0;
       for (int i = 0; i < num_channels; i++) {
         size_t num_trans = 0;
         for (int j = 0; j < num_ranks; j++) {
@@ -917,6 +918,7 @@ class DDR5 : public IDRAM, public Implementation {
         s_total_energy    += (dq_energy);
         s_total_dq_power  += (dq_power);
         s_total_power     += (dq_power);
+        total_acc         += (num_trans);
       }
 
       
@@ -930,6 +932,12 @@ class DDR5 : public IDRAM, public Implementation {
       std::cout<<" - DRAM Command Power (W)       : "<<s_total_cmd_power<<std::endl;
       std::cout<<" - DRAM DQ Power(W)             : "<<s_total_dq_power<<std::endl;
       std::cout<<" - Total DRAM Power (W)         : "<<s_total_power<<std::endl;
+
+      std::cout<<" ==== Total Channel Bandwidth (GB/s) Report === "<<std::endl;
+      double total_bw = (double)((double)total_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
+      std::cout<<" - Total Bandwidth                  : "<<total_bw<<std::endl;  
+      std::cout<<" - Total Host Access                : "<<total_acc<<std::endl;
+
     }
 
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
