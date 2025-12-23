@@ -16,6 +16,36 @@ class DDR5PCH : public IDRAM, public Implementation {
   private:
     int m_RH_radius = -1;
 
+    struct CmdIds {
+      int ACT = -1;
+      int P_ACT = -1;
+      int PRE = -1;
+      int PREA = -1;
+      int PREsb = -1;
+      int P_PRE = -1;
+      int RD = -1;
+      int WR = -1;
+      int RDA = -1;
+      int WRA = -1;
+      int PRE_RD = -1;
+      int PRE_WR = -1;
+      int POST_RD = -1;
+      int POST_WR = -1;
+      int PRE_RDA = -1;
+      int POST_WRA = -1;
+      int NDP_DRAM_RD = -1;
+      int NDP_DRAM_WR = -1;
+      int NDP_DRAM_RDA = -1;
+      int NDP_DRAM_WRA = -1;
+      int NDP_DB_RD = -1;
+      int NDP_DB_WR = -1;
+      int REFab = -1;
+      int REFsb = -1;
+      int REFab_end = -1;
+      int REFsb_end = -1;
+    };    
+
+    CmdIds m_cmds;        
 
   public:
     // Add pCH-NI (narrow-I/O == Off-PCB I/O) and pCH-WI (Wide-I/O == On-PCB I/O)
@@ -911,7 +941,34 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_logger->info(" Address Space (Bank) of NDP Unit Instruction Memory : {}",ndp_ins_mem_access_bk);
       m_logger->info(" Address Space (BankGroup) of NDP Unit Instruction Memory : {}",ndp_ins_mem_access_bg);     
       m_logger->info(" Address Space (0<=Bank) of NDP Unit Instruction Memory : {}",ndp_dat_mem_access_bk);
-      m_logger->info(" Address Space (0<=BankGroup) of NDP Unit Instruction Memory : {}",ndp_dat_mem_access_bg);            
+      m_logger->info(" Address Space (0<=BankGroup) of NDP Unit Instruction Memory : {}",ndp_dat_mem_access_bg);      
+      
+      m_cmds.ACT = m_commands("ACT");
+      m_cmds.P_ACT = m_commands("P_ACT");
+      m_cmds.PRE = m_commands("PRE");
+      m_cmds.PREA = m_commands("PREA");
+      m_cmds.PREsb = m_commands("PREsb");
+      m_cmds.P_PRE = m_commands("P_PRE");
+      m_cmds.RD = m_commands("RD");
+      m_cmds.WR = m_commands("WR");
+      m_cmds.RDA = m_commands("RDA");
+      m_cmds.WRA = m_commands("WRA");
+      m_cmds.PRE_RD = m_commands("PRE_RD");
+      m_cmds.PRE_WR = m_commands("PRE_WR");
+      m_cmds.POST_RD = m_commands("POST_RD");
+      m_cmds.POST_WR = m_commands("POST_WR");
+      m_cmds.PRE_RDA = m_commands("PRE_RDA");
+      m_cmds.POST_WRA = m_commands("POST_WRA");
+      m_cmds.NDP_DRAM_RD = m_commands("NDP_DRAM_RD");
+      m_cmds.NDP_DRAM_WR = m_commands("NDP_DRAM_WR");
+      m_cmds.NDP_DRAM_RDA = m_commands("NDP_DRAM_RDA");
+      m_cmds.NDP_DRAM_WRA = m_commands("NDP_DRAM_WRA");
+      m_cmds.NDP_DB_RD = m_commands("NDP_DB_RD");
+      m_cmds.NDP_DB_WR = m_commands("NDP_DB_WR");
+      m_cmds.REFab = m_commands("REFab");
+      m_cmds.REFsb = m_commands("REFsb");
+      m_cmds.REFab_end = m_commands("REFab_end");
+      m_cmds.REFsb_end = m_commands("REFsb_end");      
     };
 
     void issue_command(int command, const AddrVec_t& addr_vec) override {
@@ -1069,8 +1126,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       int new_command;
       bool is_enable_wr_prefetch = m_db_prefetch_mode[addr_vec[0]*num_pseudo_ch+addr_vec[1]] == MODE_PRE_WR;
       if(each_pch_refreshing[addr_vec[0]*num_pseudo_ch+addr_vec[1]] && is_enable_wr_prefetch &&
-        ((command == m_commands("WR")) || (command == m_commands("WRA")))) {      
-          new_command = m_commands("PRE_WR");
+        ((command == m_cmds.WR) || (command == m_cmds.WRA))) {      
+          new_command = m_cmds.PRE_WR;
       } else {
           new_command = command;
       }               
@@ -1087,10 +1144,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       // NDP_DRAM_RD --> NDP_DRAM_RD
       // NDP_DRAM_WR --> NDP_DRAM_WR 
       int new_command;
-      if((command == m_commands("WR")) || (command == m_commands("WRA"))) {      
-          new_command = m_commands("PRE_WR");
-      } else if((command == m_commands("RD")) || (command == m_commands("RDA"))) {
-          new_command = m_commands("PRE_RD");
+      if((command == m_cmds.WR) || (command == m_cmds.WRA)) {      
+          new_command = m_cmds.PRE_WR;
+      } else if((command == m_cmds.RD) || (command == m_cmds.RDA)) {
+          new_command = m_cmds.PRE_RD;
       } else {
           new_command = command;
       }              
