@@ -356,8 +356,8 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       trace_file.close();
 
       // Sort by timestamp to ensure chronological order
-      std::sort(trace_vec.begin(), trace_vec.end(), 
-                [](const Trace& a, const Trace& b) { return a.timestamp < b.timestamp; });
+      // std::sort(trace_vec.begin(), trace_vec.end(), 
+      //           [](const Trace& a, const Trace& b) { return a.timestamp < b.timestamp; });
 
       std::cout<<"Vector Size : "<<trace_vec.size()<<std::endl;
     }

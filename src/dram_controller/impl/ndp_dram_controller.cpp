@@ -577,6 +577,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     bool send(Request& req) override {
       bool is_success = false;
+      bool is_success_forwarding = false;
 
       if(req.is_ndp_req) {
         if(m_dram->is_ndp_access(req.addr_vec)) {
@@ -605,6 +606,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           req.depart = m_clk + 1;
           pending.push_back(req);
           is_success = true;
+          is_success_forwarding = true;
         }
       }
 
@@ -630,7 +632,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
       }
       
-      if(is_success) {
+      if(is_success && !is_success_forwarding) {
         switch (req.type_id) {
           case Request::Type::Read: {
             s_num_read_reqs++;
@@ -760,11 +762,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             int flat_bank_id = bk_id + bg_id * num_bank + pch_id * num_bankgroup*num_bank;
             int host_access = m_host_access_cnt_per_bank[flat_bank_id];
             int ndp_access = m_ndp_access_cnt_per_bank[flat_bank_id];
-            if(host_access < 0 || host_access > 64) {
+            // Max; Read Buffer + Write Buffer + Active Buffer + WR_PRE-BUFFER --> 74 
+            if(host_access < 0 || host_access > 75) {
               std::string msg = std::string(" Host Access Count Error (") + std::to_string(host_access) + std::string(")");
               throw std::runtime_error(msg);
             }
-            if(ndp_access < 0 || ndp_access > 64) {
+            // MAX NDP Access 
+            if(ndp_access < 0 || ndp_access > 66) {
               std::string msg = std::string(" NDP Access Count Error (") + std::to_string(ndp_access) + std::string(")");
               throw std::runtime_error(msg);
             }
