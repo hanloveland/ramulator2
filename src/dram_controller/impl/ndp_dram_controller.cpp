@@ -2031,7 +2031,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       return;
     }
 
-    bool is_finished() override {
+    bool is_finished() override {    
       bool is_dram_ctrl_finished = true;
 
       if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;

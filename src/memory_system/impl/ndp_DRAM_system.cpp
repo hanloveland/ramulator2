@@ -3,6 +3,9 @@
 #include "dram_controller/controller.h"
 #include "addr_mapper/addr_mapper.h"
 #include "dram/dram.h"
+#include <filesystem>
+#include <iostream>
+#include <fstream>
 
 // #define NDP_DEBUG
 #define DIMM_LVL_BUF
@@ -15,6 +18,8 @@
 
 
 namespace Ramulator {
+
+namespace fs = std::filesystem;
 
 class NDPDRAMSystem final : public IMemorySystem, public Implementation {
   RAMULATOR_REGISTER_IMPLEMENTATION(IMemorySystem, NDPDRAMSystem, "ndpDRAM", "A NDP-Supported DRAM-based memory system.");
@@ -121,6 +126,34 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int m_num_subch = 2;
     int num_channels = -1;
     int num_pseudochannel = -1;
+
+    /*
+      Gem5 Simulation with NDP Trace 
+    */
+
+    bool ndp_trace_enable = false;    
+    // Copy Structure within loadstore_ncore_trace.cpp
+    struct Trace {
+      uint64_t timestamp;  // When this request should be issued (in cycles)
+      bool is_write;
+      Addr_t addr;
+      std::vector<uint64_t> payload;
+    };
+
+    std::vector<Trace> ndp_trace;
+    size_t curr_ndp_idx;
+    uint64_t m_max_trace_inst;      
+    int m_next_request_id = 0;
+    size_t max_outstanding;
+    bool m_debug_mode = false;
+
+    // Outstanding requests tracking
+    struct OutstandingRequest {
+      uint64_t issue_time;
+      Addr_t addr;
+    };
+    std::unordered_map<int, OutstandingRequest> outstanding_reads;
+
 
   public:
     void init() override { 
@@ -328,6 +361,23 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       pch_lvl_hsnc_nl_addr_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
       pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<size_t>>(m_num_subch*num_pseudochannel,std::vector<size_t>(8,0)));     
     
+
+      // NDP Trace Initialization
+      ndp_trace_enable = param<bool>("ndp_trace_enable")
+      .desc("Enable NDP Trace Simulation Mode with Gem5")
+      .default_val(false);
+      
+      if(ndp_trace_enable) {
+        std::string trace_path = param<std::string>("ndp_trace")
+        .desc("Trace file path for NDP Trace")
+        .required();
+        m_logger->info(" Enable NDP Trace Simulation with Gem5 frontend");                            
+        m_logger->info("  -- NDP Trace Path: {}",trace_path);  
+        load_trace(trace_path,ndp_trace);
+        m_logger->info("  --> Loaded {} trace lines",ndp_trace.size());        
+
+        max_outstanding = 32;
+      }                                      
     };
 
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override { }
@@ -392,6 +442,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     
     void tick() override {
       m_clk++;
+      // NDP Trace Mode :  Send NDP Request to DRAM System
+      if(ndp_trace_enable) try_issue_requests(); 
       m_dram->tick();
       for (auto controller : m_controllers) {
         controller->tick();
@@ -739,14 +791,13 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       return true;
     }
 
-    bool is_finished() override {
+    bool is_finished() override {      
       bool is_dram_ctrl_finished = true;
       int num_channels = m_dram->get_level_size("channel"); 
       for (int i = 0; i < num_channels; i++) {
         if(!m_controllers[i]->is_finished())
-          is_dram_ctrl_finished = false;
-      }
-
+        is_dram_ctrl_finished = false;
+      }        
       if(all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty) {
         int m_num_dimm   = num_channels / 2;
         int m_num_subch  = 2;
@@ -853,11 +904,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;            
         
       }
-      return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
+      if(ndp_trace_enable) return true;
+      else                 return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
     }
 
     bool is_ndp_finished() override {
-      return all_ndp_idle;
+      if(ndp_trace_enable) 
+        return true;
+      else return all_ndp_idle;
     }     
     
     
@@ -955,6 +1009,183 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       else                          
         s_avg_read_latency = (float)total_latency/(float)s_num_read_requests;
     }    
+
+    // Copy Structure within loadstore_ncore_trace.cpp
+    void load_trace(const std::string& file_path_str, std::vector<Trace>& trace_vec) {
+      fs::path trace_path(file_path_str);
+      if (!fs::exists(trace_path)) {
+        throw ConfigurationError("Trace {} does not exist!", file_path_str);
+      }
+
+      std::ifstream trace_file(trace_path);
+      if (!trace_file.is_open()) {
+        throw ConfigurationError("Trace {} cannot be opened!", file_path_str);
+      }
+
+      std::string line;
+      size_t line_number = 0;
+      uint64_t default_timestamp = 0;  // For traces without timing info
+      
+      while (std::getline(trace_file, line)) {
+        line_number++;
+        
+        // Skip empty lines and comments
+        if (line.empty() || line[0] == '#') {
+          continue;
+        }
+        
+        Trace t;
+        std::vector<std::string> tokens;
+        tokenize(tokens, line, " ");
+
+        if (tokens.empty()) {
+          continue;
+        }
+
+        // Format: [TIMESTAMP] LD/ST ADDR [PAYLOAD...]
+        // Or legacy: LD/ST ADDR [PAYLOAD...]
+        
+        size_t token_offset = 0;
+        
+        // Check if first token is a timestamp (number)
+        if (tokens.size() >= 3 && std::isdigit(tokens[0][0])) {
+          t.timestamp = std::stoull(tokens[0]);
+          token_offset = 1;
+        } else if (tokens.size() >= 2) {
+          // Legacy format without timestamp - use sequential numbering
+          t.timestamp = default_timestamp++;
+          token_offset = 0;
+        } else {
+          throw ConfigurationError("Trace {} format invalid at line {}!", file_path_str, line_number);
+        }
+
+        // Parse operation
+        bool is_write = false;
+        if (tokens[token_offset] == "LD") {
+          is_write = false;
+        } else if (tokens[token_offset] == "ST") {
+          is_write = true;
+        } else {
+          throw ConfigurationError("Trace {} format invalid at line {}! Unknown operation '{}'.", 
+                                  file_path_str, line_number, tokens[token_offset]);
+        }
+
+        // Parse address
+        Addr_t addr = -1;
+        std::string addr_str = tokens[token_offset + 1];
+        if (addr_str.compare(0, 2, "0x") == 0 || addr_str.compare(0, 2, "0X") == 0) {
+          addr = std::stoll(addr_str.substr(2), nullptr, 16);
+        } else {
+          addr = std::stoll(addr_str);
+        }
+
+        t.is_write = is_write;
+        t.addr = addr;
+
+        // Parse payload if present (for writes)
+        if (is_write && tokens.size() > token_offset + 2) {
+          size_t payload_count = tokens.size() - (token_offset + 2);
+          if (payload_count == 8) {  // Expecting 8 x 64-bit values
+            for (size_t i = 0; i < 8; i++) {
+              std::string payload_str = tokens[token_offset + 2 + i];
+              if (payload_str.compare(0, 2, "0x") == 0 || payload_str.compare(0, 2, "0X") == 0) {
+                t.payload.push_back(std::stoull(payload_str.substr(2), nullptr, 16));
+              } else {
+                t.payload.push_back(std::stoull(payload_str));
+              }
+            }
+          }
+        }
+
+        trace_vec.push_back(t);
+      }
+
+      trace_file.close();
+    }
+
+    void try_issue_requests() {
+      if (curr_ndp_idx >= ndp_trace.size() && outstanding_reads.empty()) {
+          // if NDP Operation is done, reset curr_ndp_idx to zero
+          if(is_ndp_finished())
+            curr_ndp_idx = 0; 
+      }
+
+      while (curr_ndp_idx < ndp_trace.size() && 
+             outstanding_reads.size() < max_outstanding) {
+        
+        const Trace& t = ndp_trace[curr_ndp_idx];
+        
+        // Check if it's time to issue this request
+        if (t.timestamp > m_clk) {
+          break;  // Too early for this request
+        }
+
+        // Create request
+        Request req = Request(t.addr, t.is_write ? Request::Type::Write : Request::Type::Read);
+        
+        if (t.is_write && !t.payload.empty()) {
+          for (uint32_t i = 0; i < t.payload.size(); i++) {
+            req.m_payload.push_back(t.payload[i]);
+          }
+        }
+
+        // Only set callback for READ requests
+        int req_id = -1;
+        if (!t.is_write) {
+          req_id = m_next_request_id++;
+          
+          // Set callback for read completion
+          req.callback = [this, req_id](Request& completed_req) {
+            this->on_read_complete(req_id, completed_req);
+          };
+        }
+        
+        // Try to send the request
+        bool request_sent = send(req);
+        
+        if (request_sent) {
+          if (t.is_write) {
+            // Write is fire-and-forget
+            if (m_debug_mode) {
+              m_logger->debug("NDP Trace issued WRITE (addr={:#x})",t.addr);
+            }
+          } else {
+            // Track outstanding read
+            OutstandingRequest out_req;
+            out_req.issue_time = m_clk;
+            out_req.addr = t.addr;
+            
+            outstanding_reads[req_id] = out_req;
+
+            if (m_debug_mode) {
+              m_logger->debug("NDP Trace issued READ {} (addr={:#x}, outstanding={})", 
+                             req_id, t.addr, outstanding_reads.size());
+            }                           
+          }
+          
+          curr_ndp_idx++;
+        } else {        
+          break;  // Memory system busy, try next cycle
+        }
+      }
+    }
+
+    void on_read_complete(int request_id, Request& req) {
+      auto it = outstanding_reads.find(request_id);
+      
+      if (it != outstanding_reads.end()) {
+        uint64_t latency = m_clk - it->second.issue_time;        
+        if (m_debug_mode) {
+          m_logger->debug("NDP Trace READ {} completed (addr={:#x}, latency={} cycles, outstanding={})", 
+                         request_id, it->second.addr, latency, 
+                         outstanding_reads.size() - 1);
+        }
+        
+        outstanding_reads.erase(it);
+      } else {
+        m_logger->error("NDP Trace attempted to complete unknown READ request {}", request_id);
+      }
+    }      
 };
   
 }   // namespace 
