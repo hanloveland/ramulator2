@@ -632,6 +632,7 @@ class DDR5PCH : public IDRAM, public Implementation {
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("done");
                 DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status wait_done -> done"); 
+                // std::cout<<m_clk<<" - NDP Unit ["<<ch<<"]["<<pch<<"] Status DONE!"<<std::endl;
               }
 
               // NDP Status: Wait DONE END
@@ -756,7 +757,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                     if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
 
                       if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
-                        throw std::runtime_error("NDP Write when NDP unit is exec!");
+                        std::string msg = std::to_string(m_clk) + std::string("  - NDP Write when NDP unit is exec! CH:") + std::to_string(ch) + std::string(" PCH:") + std::to_string(pch);
+                        throw std::runtime_error(msg);
                       }
 
                       if(ndp_payload_valid_per_pch[pch_idx]) {

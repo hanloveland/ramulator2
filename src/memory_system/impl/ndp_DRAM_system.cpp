@@ -146,6 +146,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int m_next_request_id = 0;
     size_t max_outstanding;
     bool m_debug_mode = false;
+    int m_wait_ndp_done = 0;
 
     // Outstanding requests tracking
     struct OutstandingRequest {
@@ -1104,10 +1105,26 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     }
 
     void try_issue_requests() {
-      if (curr_ndp_idx >= ndp_trace.size() && outstanding_reads.empty()) {
+      if (curr_ndp_idx >= ndp_trace.size() && outstanding_reads.empty() && all_ndp_idle && all_nl_req_buffer_empty) {
           // if NDP Operation is done, reset curr_ndp_idx to zero
-          if(is_ndp_finished())
+          bool all_ndp_req_done = true;
+          // Check All Sub-Channel has no more NDP Request
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
+                int pch_id_per_subch = pch_id%num_pseudochannel;
+
+                if(!(m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)))
+                  all_ndp_req_done = false;
+             }
+          }
+
+          if(all_ndp_req_done) m_wait_ndp_done++;
+          if(all_ndp_req_done && m_wait_ndp_done > 160) {
+            // std::cout<<m_clk<<" - NDP TRACE DONE and Restart!!"<<std::endl;
             curr_ndp_idx = 0; 
+            m_next_request_id = 0;
+          }   
       }
 
       while (curr_ndp_idx < ndp_trace.size() && 
