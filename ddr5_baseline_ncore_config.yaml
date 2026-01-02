@@ -1,0 +1,69 @@
+Frontend:
+  impl: LoadStoreNCoreTrace
+  clock_ratio: 1
+  num_cores: 2
+  debug_mode: false
+  max_inst: 500000
+  
+  # Core 1: NDP unit with high memory bandwidth
+  core0_trace: "../spec_trace/444.namd"
+  core0_mshr_size: 32  # Large MSHR for high bandwidth
+  core0_is_ndp_trace: false
+  core0_repeat: 1
+  
+  # Core 1: CPU core with moderate memory access
+  core1_trace: "../spec_trace/403.gcc"
+  core1_mshr_size: 32  # Standard MSHR size
+  core1_is_ndp: false
+  core1_repeat: 1
+
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+              
+
+MemorySystem:
+  impl: GenericDRAM
+  clock_ratio: 1
+  trace_core_enable: false
+  trace_ndp_type: false
+  trace_path: "./trace/baseline/baseline_8K_DOT.txt"
+  # trace_path: "./trace/pch_non_ndp/pch_non_ndp_x4_8K_DOT.txt"
+  trace_core_mshr_size: 32
+
+  DRAM:
+    impl: DDR5
+    org:
+      preset: DDR5_16Gb_x4
+      channel: 2
+      rank: 4
+    timing:
+      preset: DDR5_4800B
+    RFM:
+      BRC: 0  
+    drampower_enable: true
+    voltage:
+      preset: Default
+    current:
+      preset: DDR5_4800x4
+
+  Controller:
+    impl: Generic
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: OpenRowPolicy
+      # impl: ClosedRowPolicy
+      cap: 4
+    plugins:
+
+  AddrMapper:
+    # impl: ChRaBaRoCo
+    # impl: RoCoBaRaCh
+    # impl: RoBaRaCoCh
+    # impl: RoCoRaBaCh
+    impl: RoRaCoBaCh
+    # impl: RoRaBaCoCh      
+    
