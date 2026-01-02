@@ -1045,6 +1045,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
     }
 
+    int get_dq_scaling() override {
+        return dq_scaling;
+    }
+    
     void check_future_action(int command, const AddrVec_t& addr_vec) {
       switch (command) {
         case m_commands("REFab"):

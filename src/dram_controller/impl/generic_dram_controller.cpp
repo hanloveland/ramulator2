@@ -80,6 +80,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
     std::vector<bool> is_empty_priority_per_pch;
 
+    // Memory Request Counter for Memory-System 
+    uint64_t m_host_access_cnt;
+    uint64_t m_tcore_host_access_cnt;
+
+
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -182,7 +187,10 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       register_stat(s_num_pre_wr).name("s_num_pre_wr_{}", m_channel_id);
       register_stat(s_num_post_wr).name("s_num_post_wr_{}", m_channel_id);
       register_stat(s_num_pre_rd).name("s_num_pre_rd_{}", m_channel_id);
-      register_stat(s_num_post_rd).name("s_num_post_rd_{}", m_channel_id);      
+      register_stat(s_num_post_rd).name("s_num_post_rd_{}", m_channel_id); 
+      
+      m_host_access_cnt = 0;
+      m_tcore_host_access_cnt = 0;      
     };
 
     bool send(Request& req) override {
@@ -480,6 +488,14 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
             // TODO: Add code to update statistics
           }
           
+          if(req_it->command == m_dram->m_commands("RD")     || m_dram->m_commands("RDA") || 
+             req_it->command == m_dram->m_commands("WR")     || m_dram->m_commands("WRA")) {
+              m_host_access_cnt++;
+              if(req_it->is_trace_core_req) {
+                m_tcore_host_access_cnt++;
+              }          
+          }
+
           if(use_pseudo_ch) {
             if(req_it->command == m_dram->m_commands("PRE_WR")) {
               // Generate POST_WR and Enqueue to Prefetched Buffer
@@ -773,6 +789,15 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
     virtual size_t get_host_acces_latency() {
       return s_read_latency;
+    }    
+
+    std::vector<uint64_t> get_counters() override {
+      std::vector<uint64_t> v;
+      v.reserve(2);
+      v.push_back(m_host_access_cnt);
+      v.push_back(m_tcore_host_access_cnt);
+
+      return v; 
     }    
 };
   

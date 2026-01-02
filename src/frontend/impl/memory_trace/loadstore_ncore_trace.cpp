@@ -359,7 +359,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       // std::sort(trace_vec.begin(), trace_vec.end(), 
       //           [](const Trace& a, const Trace& b) { return a.timestamp < b.timestamp; });
 
-      std::cout<<"Vector Size : "<<trace_vec.size()<<std::endl;
+      // std::cout<<"Vector Size : "<<trace_vec.size()<<std::endl;
     }
 
     void log_progress() {

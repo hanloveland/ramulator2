@@ -433,6 +433,10 @@ class DDR5 : public IDRAM, public Implementation {
       return false;
     }
 
+    int get_dq_scaling() override {
+        return 1;
+    }
+
   private:
     void set_organization() {
       // Channel width

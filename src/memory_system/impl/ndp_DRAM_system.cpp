@@ -128,10 +128,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int num_pseudochannel = -1;
 
     /*
-      Gem5 Simulation with NDP Trace 
+      Gem5 Simulation with Trace Core (Virtual Core)
     */
 
-    bool ndp_trace_enable = false;    
+    bool m_trace_core_enable = false;    
+    bool m_ndp_trace = true;
     // Copy Structure within loadstore_ncore_trace.cpp
     struct Trace {
       uint64_t timestamp;  // When this request should be issued (in cycles)
@@ -139,22 +140,22 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       Addr_t addr;
       std::vector<uint64_t> payload;
     };
-
-    std::vector<Trace> ndp_trace;
-    size_t curr_ndp_idx;
-    uint64_t m_max_trace_inst;      
+    size_t m_trace_core_mshr_size;
+    size_t m_curr_trace_idx;
+    std::vector<Trace> m_trace;
+    
     int m_next_request_id = 0;
-    size_t max_outstanding;
     bool m_debug_mode = false;
-    int m_wait_ndp_done = 0;
-
+    int m_wait_trace_done = 0;
+    
     // Outstanding requests tracking
     struct OutstandingRequest {
       uint64_t issue_time;
       Addr_t addr;
     };
-    std::unordered_map<int, OutstandingRequest> outstanding_reads;
 
+    size_t m_max_outstanding;
+    std::unordered_map<int, OutstandingRequest> m_outstanding_reads;
 
   public:
     void init() override { 
@@ -364,20 +365,25 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     
 
       // NDP Trace Initialization
-      ndp_trace_enable = param<bool>("ndp_trace_enable")
-      .desc("Enable NDP Trace Simulation Mode with Gem5")
-      .default_val(false);
+      m_trace_core_enable = param<bool>("trace_core_enable").desc("Enable Trace Simulation Core with Gem5").default_val(false);
       
-      if(ndp_trace_enable) {
-        std::string trace_path = param<std::string>("ndp_trace")
-        .desc("Trace file path for NDP Trace")
-        .required();
-        m_logger->info(" Enable NDP Trace Simulation with Gem5 frontend");                            
-        m_logger->info("  -- NDP Trace Path: {}",trace_path);  
-        load_trace(trace_path,ndp_trace);
-        m_logger->info("  --> Loaded {} trace lines",ndp_trace.size());        
+      if(m_trace_core_enable) {
+        m_ndp_trace = param<bool>("trace_ndp_type").desc("Trace Type for Trace Simulation Core").default_val(false);
+        m_logger->info(" Enable Trace Core Simulation with Gem5 frontend");                            
+        if(m_ndp_trace) m_logger->info("  -- Trace Type: NDP Workload");
+        else            m_logger->info("  -- Trace Type: Host Access Workload");
 
-        max_outstanding = 32;
+        // Set Trace Simulation Core MSHR SIze
+        m_trace_core_mshr_size = param<size_t>("trace_core_mshr_size").desc("MSHR size for Trace_Core").default_val(16);
+        m_logger->info("  -- Trace Core MSHR Size: {}",m_trace_core_mshr_size);  
+        m_max_outstanding = m_trace_core_mshr_size;
+        
+        // Load Trace File
+        std::string trace_path = param<std::string>("trace_path").desc("Trace file path for Trace Core").required();
+        m_logger->info("  -- Trace Path: {}",trace_path);  
+        load_trace(trace_path,m_trace);
+        m_logger->info("  -- Loaded {} trace lines",m_trace.size());        
+
       }                                      
     };
 
@@ -413,6 +419,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           // Check is NDP Request and set Request is_ndp_req as true (DIMM-Side NDP Controller)
           if(req.addr_vec[row_addr_idx] == ndp_ctrl_row) {
             req.is_ndp_req = true;
+            req.is_trace_core_req = true;
             int dimm_id = req.addr_vec[0]/2;
             int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];
             DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Host send NDP Request to NDP Unit");            
@@ -443,8 +450,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     
     void tick() override {
       m_clk++;
-      // NDP Trace Mode :  Send NDP Request to DRAM System
-      if(ndp_trace_enable) try_issue_requests(); 
+      // Trace Mode :  Send Trace-based Request to DRAM System
+      if(m_trace_core_enable) try_issue_requests(); 
+
       m_dram->tick();
       for (auto controller : m_controllers) {
         controller->tick();
@@ -556,6 +564,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               for(int i=0;i<8;i++) {
                 req.m_payload.push_back(1);
               }
+              req.is_trace_core_req = true;
               if(m_controllers[ch_id]->send(req)) {
                 // NDP Status transit from NDP_ISSUE_START to NDP_BEFORE_RUN
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_BEFORE_RUN;
@@ -903,14 +912,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           std::cout<<std::endl;  
         }          
         std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;            
-        
+         
       }
-      if(ndp_trace_enable) return true;
-      else                 return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
+      if(m_trace_core_enable) return true;
+      else                    return (all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty);
     }
 
     bool is_ndp_finished() override {
-      if(ndp_trace_enable) 
+      if(m_trace_core_enable) 
         return true;
       else return all_ndp_idle;
     }     
@@ -969,8 +978,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       req.ndp_id                                      = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].id;
       req.is_ndp_req                                  = true;
       req.arrive                                      = m_clk;
+      req.is_trace_core_req                           = true;
       // Send NDP-Launch Request to Memory Controller 
       bool issue_req;
+      req.is_trace_core_req = true;
       issue_req = m_controllers[ch_id]->send(req);            
       if(issue_req) {
         #ifdef NDP_DEBUG
@@ -1009,6 +1020,68 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         s_avg_read_latency = -1.0;
       else                          
         s_avg_read_latency = (float)total_latency/(float)s_num_read_requests;
+
+      std::cout << "\n=== Memory System Bandwidth (GB/s) ===\n";
+      std::cout << "Assume: 512 bits/access, BW = bytes/ns\n\n";      
+
+      int dq_scaling = m_dram->get_dq_scaling();
+      // 12 Counters per Memory Controller
+      std::vector<uint64_t> counters;
+      counters.resize(12, 0);
+      for (int i = 0; i < num_channels; i++) {
+        auto counters_per_mc = m_controllers[i]->get_counters();
+        if(counters_per_mc.size() == 12) {
+          for (int c_idx = 0; c_idx < 12; c_idx++) {
+            counters[c_idx]+= counters_per_mc[c_idx];
+          }
+        } else {
+          throw std::runtime_error("Invalid Counter Number");
+        }
+      }          
+      int tCK_ps = m_dram->m_timing_vals("tCK_ps");
+      // ---- Main window ----
+      std::cout << "[Main window]\n";
+      print_bw("Host<->DB",
+          calc_bw_gbs(counters[0]+counters[1]+counters[2], 1.0, m_clk, tCK_ps));
+      print_bw("Host<->DB HOST",
+          calc_bw_gbs(counters[0], 1.0, m_clk, tCK_ps));
+      print_bw("Host<->DB D2PA",
+          calc_bw_gbs(counters[1], 1.0, m_clk, tCK_ps));
+      print_bw("Host<->DB NDP",
+          calc_bw_gbs(counters[2], 1.0, m_clk, tCK_ps));
+
+      print_bw("DB<->DRAM",
+          calc_bw_gbs(counters[3]+counters[4]+counters[5], 1.0, m_clk, tCK_ps));          
+      print_bw("DB<->DRAM HOST",
+          calc_bw_gbs(counters[3], dq_scaling, m_clk, tCK_ps));
+      print_bw("DB<->DRAM D2PA",
+          calc_bw_gbs(counters[4], dq_scaling, m_clk, tCK_ps));
+      print_bw("DB<->DRAM NDP",
+          calc_bw_gbs(counters[5], dq_scaling, m_clk, tCK_ps));
+
+      // ---- tcore window ----
+      std::cout << "\n[tcore window]\n";
+      print_bw("tcore Host<->DB",
+          calc_bw_gbs(counters[6]+counters[7]+counters[8], 1.0, m_clk, tCK_ps));      
+      print_bw("tcore Host<->DB HOST",
+          calc_bw_gbs(counters[6], 1.0, m_clk, tCK_ps));
+      print_bw("tcore Host<->DB D2PA",
+          calc_bw_gbs(counters[7], 1.0, m_clk, tCK_ps));
+      print_bw("tcore Host<->DB NDP",
+          calc_bw_gbs(counters[8], 1.0, m_clk, tCK_ps));
+
+      print_bw("tcore DB<->DRAM",
+          calc_bw_gbs(counters[9]+counters[10]+counters[11], 1.0, m_clk, tCK_ps));             
+      print_bw("tcore DB<->DRAM HOST",
+          calc_bw_gbs(counters[9], dq_scaling, m_clk, tCK_ps));
+      print_bw("tcore DB<->DRAM D2PA",
+          calc_bw_gbs(counters[10], dq_scaling, m_clk, tCK_ps));
+      print_bw("tcore DB<->DRAM NDP",
+          calc_bw_gbs(counters[11], dq_scaling, m_clk, tCK_ps));
+
+      std::cout << std::endl;
+
+
     }    
 
     // Copy Structure within loadstore_ncore_trace.cpp
@@ -1105,32 +1178,38 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     }
 
     void try_issue_requests() {
-      if (curr_ndp_idx >= ndp_trace.size() && outstanding_reads.empty() && all_ndp_idle && all_nl_req_buffer_empty) {
-          // if NDP Operation is done, reset curr_ndp_idx to zero
-          bool all_ndp_req_done = true;
-          // Check All Sub-Channel has no more NDP Request
-          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-                int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
-                int pch_id_per_subch = pch_id%num_pseudochannel;
-
-                if(!(m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)))
-                  all_ndp_req_done = false;
-             }
+      if (m_curr_trace_idx >= m_trace.size() && m_outstanding_reads.empty()) {
+        if(m_ndp_trace) {
+          bool all_ndp_req_done = false;
+          if(all_ndp_idle && all_nl_req_buffer_empty) {
+            all_ndp_req_done = true;
+            // Check All Sub-Channel has no more NDP Request
+            for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+              for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                  int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
+                  int pch_id_per_subch = pch_id%num_pseudochannel;
+    
+                  if(!(m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)))
+                    all_ndp_req_done = false;
+               }
+            }
           }
+          if(all_ndp_req_done) m_wait_trace_done++;
+        } else {
+          m_wait_trace_done++;
+        }
 
-          if(all_ndp_req_done) m_wait_ndp_done++;
-          if(all_ndp_req_done && m_wait_ndp_done > 160) {
-            // std::cout<<m_clk<<" - NDP TRACE DONE and Restart!!"<<std::endl;
-            curr_ndp_idx = 0; 
-            m_next_request_id = 0;
-          }   
+        if(m_wait_trace_done > 1000) {
+          m_curr_trace_idx = 0; 
+          m_next_request_id = 0;
+          m_wait_trace_done = 0;
+        }   
       }
 
-      while (curr_ndp_idx < ndp_trace.size() && 
-             outstanding_reads.size() < max_outstanding) {
+      while (m_curr_trace_idx < m_trace.size() && 
+             m_outstanding_reads.size() < m_max_outstanding) {
         
-        const Trace& t = ndp_trace[curr_ndp_idx];
+        const Trace& t = m_trace[m_curr_trace_idx];
         
         // Check if it's time to issue this request
         if (t.timestamp > m_clk) {
@@ -1158,13 +1237,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         }
         
         // Try to send the request
+        req.is_trace_core_req = true;
         bool request_sent = send(req);
         
         if (request_sent) {
           if (t.is_write) {
             // Write is fire-and-forget
             if (m_debug_mode) {
-              m_logger->debug("NDP Trace issued WRITE (addr={:#x})",t.addr);
+              m_logger->debug("Trace issued WRITE (addr={:#x})",t.addr);
             }
           } else {
             // Track outstanding read
@@ -1172,15 +1252,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             out_req.issue_time = m_clk;
             out_req.addr = t.addr;
             
-            outstanding_reads[req_id] = out_req;
+            m_outstanding_reads[req_id] = out_req;
 
             if (m_debug_mode) {
-              m_logger->debug("NDP Trace issued READ {} (addr={:#x}, outstanding={})", 
-                             req_id, t.addr, outstanding_reads.size());
+              m_logger->debug("Trace issued READ {} (addr={:#x}, outstanding={})", 
+                             req_id, t.addr, m_outstanding_reads.size());
             }                           
           }
           
-          curr_ndp_idx++;
+          m_curr_trace_idx++;
         } else {        
           break;  // Memory system busy, try next cycle
         }
@@ -1188,21 +1268,44 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     }
 
     void on_read_complete(int request_id, Request& req) {
-      auto it = outstanding_reads.find(request_id);
+      auto it = m_outstanding_reads.find(request_id);
       
-      if (it != outstanding_reads.end()) {
+      if (it != m_outstanding_reads.end()) {
         uint64_t latency = m_clk - it->second.issue_time;        
         if (m_debug_mode) {
-          m_logger->debug("NDP Trace READ {} completed (addr={:#x}, latency={} cycles, outstanding={})", 
+          m_logger->debug("Trace READ {} completed (addr={:#x}, latency={} cycles, outstanding={})", 
                          request_id, it->second.addr, latency, 
-                         outstanding_reads.size() - 1);
+                         m_outstanding_reads.size() - 1);
         }
         
-        outstanding_reads.erase(it);
+        m_outstanding_reads.erase(it);
       } else {
-        m_logger->error("NDP Trace attempted to complete unknown READ request {}", request_id);
+        m_logger->error("Trace attempted to complete unknown READ request {}", request_id);
       }
     }      
+
+    static inline double calc_bw_gbs(uint64_t acc_cnt,
+                                    double dq_scaling,
+                                    uint64_t clk_cycles,
+                                    uint64_t tCK_ps)
+    {
+        if (clk_cycles == 0 || tCK_ps == 0) return 0.0;
+
+        // 512 bits/access -> bytes, time = clk * tCK (ps -> ns)
+        const double bytes = (static_cast<double>(acc_cnt) * 512.0 * dq_scaling) / 8.0;
+        const double time_ns = static_cast<double>(clk_cycles) * (static_cast<double>(tCK_ps) / 1000.0);
+        return bytes / time_ns; // GB/s
+    }
+
+    static inline void print_bw(const std::string& name, double bw)
+    {
+        std::cout << std::left << std::setw(32) << name
+                  << " : " << std::right << std::setw(10)
+                  << std::fixed << std::setprecision(3)
+                  << bw << " GB/s\n";
+    }
+    
+
 };
   
 }   // namespace 

@@ -302,6 +302,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     CmdIds m_cmds;
 
+    // Memory Request Counter for Memory-System 
+    uint64_t m_host_db_host_access_cnt;
+    uint64_t m_host_db_d2pa_access_cnt;
+    uint64_t m_host_db_ndp_access_access_cnt;
+    uint64_t m_db_dram_host_access_cnt;
+    uint64_t m_db_dram_d2pa_access_cnt;
+    uint64_t m_db_dram_ndp_access_access_cnt;
+
+    uint64_t m_tcore_host_db_host_access_cnt;
+    uint64_t m_tcore_host_db_d2pa_access_cnt;
+    uint64_t m_tcore_host_db_ndp_access_access_cnt;
+    uint64_t m_tcore_db_dram_host_access_cnt;
+    uint64_t m_tcore_db_dram_d2pa_access_cnt;
+    uint64_t m_tcore_db_dram_ndp_access_access_cnt;
+
+
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -573,6 +589,22 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_cmds.REFsb = m_dram->m_commands("REFsb");
       m_cmds.REFab_end = m_dram->m_commands("REFab_end");
       m_cmds.REFsb_end = m_dram->m_commands("REFsb_end");
+
+      // Counter Init
+      m_host_db_host_access_cnt       = 0;
+      m_host_db_d2pa_access_cnt       = 0;
+      m_host_db_ndp_access_access_cnt = 0;
+      m_db_dram_host_access_cnt       = 0;
+      m_db_dram_d2pa_access_cnt       = 0;
+      m_db_dram_ndp_access_access_cnt = 0;
+
+      m_tcore_host_db_host_access_cnt       = 0;
+      m_tcore_host_db_d2pa_access_cnt       = 0;
+      m_tcore_host_db_ndp_access_access_cnt = 0;
+      m_tcore_db_dram_host_access_cnt       = 0;
+      m_tcore_db_dram_d2pa_access_cnt       = 0;
+      m_tcore_db_dram_ndp_access_access_cnt = 0;
+
     };
 
     bool send(Request& req) override {
@@ -1266,6 +1298,41 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             m_num_ref_cnts[req_it->addr_vec[psuedo_ch_idx]]--;
           }
 
+          if(req_it->command == m_cmds.RD     || req_it->command == m_cmds.RDA || 
+             req_it->command == m_cmds.WR     || req_it->command == m_cmds.WRA) {
+              m_host_db_host_access_cnt++;
+              m_db_dram_host_access_cnt++;
+              if(req_it->is_trace_core_req) {
+                m_tcore_host_db_host_access_cnt++;
+                m_tcore_db_dram_host_access_cnt++;
+              }
+          } else if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA || 
+                    req_it->command == m_cmds.POST_WR || req_it->command == m_cmds.POST_WRA) {
+              m_db_dram_d2pa_access_cnt++;
+              if(req_it->is_trace_core_req) {
+                m_tcore_db_dram_d2pa_access_cnt++;
+              }              
+          } else if(req_it->command == m_cmds.POST_RD || 
+                    req_it->command == m_cmds.PRE_WR) {
+              m_host_db_d2pa_access_cnt++;
+              if(req_it->is_trace_core_req) {
+                m_tcore_host_db_d2pa_access_cnt++;
+              }             
+          } else if(req_it->command == m_cmds.NDP_DB_RD || req_it->command == m_cmds.NDP_DB_WR) {
+              m_host_db_ndp_access_access_cnt++;
+              if(req_it->is_trace_core_req) {
+                m_tcore_host_db_ndp_access_access_cnt++;
+              }               
+          } else if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA || 
+                    req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) {
+            m_db_dram_ndp_access_access_cnt++;
+            if(req_it->is_trace_core_req) {
+              m_tcore_db_dram_ndp_access_access_cnt++;
+            }               
+          }
+
+            
+          //
           if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) {
             if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] < 128)
               m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]++;
@@ -1303,9 +1370,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           if(req_it->command == m_cmds.PRE_WR) {
             // Generate POST_WR and Enqueue to Prefetched Buffer
             Request new_req = Request(req_it->addr_vec, Request::Type::Write);
-            new_req.addr          = req_it->addr;
-            new_req.arrive        = req_it->arrive;
-            new_req.final_command = m_cmds.POST_WR;
+            new_req.addr              = req_it->addr;
+            new_req.arrive            = req_it->arrive;
+            new_req.final_command     = m_cmds.POST_WR;
+            new_req.is_trace_core_req = req_it->is_trace_core_req;
             m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             std::string msg = std::string(" Remove Request (PRE_WR) from Buffer ") + std::to_string(buffer->size()) + std::string(")");
             DEBUG_PRINT(m_clk, "Memory Controller", new_req.addr_vec[ch_idx], new_req.addr_vec[psuedo_ch_idx], msg);              
@@ -1315,11 +1383,12 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           } else if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA) {
             // Generate POST_RD and Enqueue to Prefetched Buffer
             Request new_req = Request(req_it->addr_vec, Request::Type::Read);
-            new_req.addr          = req_it->addr;
-            new_req.arrive        = req_it->arrive;
-            new_req.source_id     = req_it->source_id;
-            new_req.callback      = req_it->callback;
-            new_req.final_command = m_cmds.POST_RD;
+            new_req.addr              = req_it->addr;
+            new_req.arrive            = req_it->arrive;
+            new_req.source_id         = req_it->source_id;
+            new_req.callback          = req_it->callback;
+            new_req.final_command     = m_cmds.POST_RD;
+            new_req.is_trace_core_req = req_it->is_trace_core_req;
             m_num_post_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             bool is_success = false;              
 
@@ -2204,6 +2273,33 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                       << std::endl;
         }
     }    
+
+    std::vector<uint64_t> get_counters() override {
+      std::vector<uint64_t> v;
+      v.reserve(12);
+
+      // Host <-> DB
+      v.push_back(m_host_db_host_access_cnt);
+      v.push_back(m_host_db_d2pa_access_cnt);
+      v.push_back(m_host_db_ndp_access_access_cnt);
+
+      // DB <-> DRAM
+      v.push_back(m_db_dram_host_access_cnt);
+      v.push_back(m_db_dram_d2pa_access_cnt);
+      v.push_back(m_db_dram_ndp_access_access_cnt);
+
+      // tcore Host <-> DB
+      v.push_back(m_tcore_host_db_host_access_cnt);
+      v.push_back(m_tcore_host_db_d2pa_access_cnt);
+      v.push_back(m_tcore_host_db_ndp_access_access_cnt);
+
+      // tcore DB <-> DRAM
+      v.push_back(m_tcore_db_dram_host_access_cnt);
+      v.push_back(m_tcore_db_dram_d2pa_access_cnt);
+      v.push_back(m_tcore_db_dram_ndp_access_access_cnt);
+
+      return v; 
+    }
 
 };
   
