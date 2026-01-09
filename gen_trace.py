@@ -15,7 +15,7 @@ NUM_BANK = 4
 NUM_ROW = 65536
 NUM_COL = 128 # 1KB/8B    
 NDP_ACC_GRA = 1 # Same with Normal Access
-
+NUM_NORMAL_COL = 128 
 # DBX Address Mapping 
 CHANNEL_BITS    = int(math.log2(NUM_CHANNEL))                 # 2 Channel
 PCHANNEL_BITS   = int(math.log2(NUM_PSEUDOCHANNEL))           # 4 Pseudo Channel  
@@ -1556,7 +1556,7 @@ def axpby_normal(f, input_size):
         Vector Z: Row 7000
         ROW5000        
     '''
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
     # src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
     # src_Y_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
     # des_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
@@ -1589,7 +1589,7 @@ def axpbypcz_normal(f, input_size):
 
         Write W      
     ''' 
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
     # src_X_addr = encode_normal_address(0, 0, 0, 0, 5000, 0)
     # src_B_addr = encode_normal_address(0, 0, 0, 0, 6000, 0)
     # src_Z_addr = encode_normal_address(0, 0, 0, 0, 7000, 0)
@@ -1619,7 +1619,7 @@ def axpy_normal(f, input_size):
         Vector Z: Row 7000
         ROW5000        
     '''
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
 
     if GEN_PCH_NORMAL_MODE:
         gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
@@ -1642,7 +1642,7 @@ def copy_normal(f, input_size):
         Vector Y: Row 6000
         ROW5000        
     '''
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
 
     if GEN_PCH_NORMAL_MODE:
         gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
@@ -1664,7 +1664,7 @@ def xmy_normal(f, input_size):
         Vector Y: Row 6000
         Vector Z: Row 7000
     '''
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
 
     if GEN_PCH_NORMAL_MODE:
         gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
@@ -1688,7 +1688,7 @@ def dot_normal(f, input_size):
         Vector Y: Row 6000
         Scalar C: Row 7000
     '''
-    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_COL
+    num_rd = int(input_size_byte_list[input_size]/8192) * NORMAL_SCALE_FACTOR * NUM_CHANNEL * NUM_NORMAL_COL
 
     if GEN_PCH_NORMAL_MODE:        
         gen_normal_req_from_row_pch(f,5000,num_rd,'LD')
