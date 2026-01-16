@@ -2,7 +2,7 @@
 #include "memory_system/memory_system.h"
 
 //#define PRINT_DB_CNT
-
+//#define STAT_RANK_IDLE_TIME
 namespace Ramulator {
 
 class GenericDRAMController final : public IDRAMController, public Implementation {
@@ -17,6 +17,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     ReqBuffer m_prefetched_buffer;        // Prefetched buffer
 
     int m_bank_addr_idx = -1;
+    int m_rank_addr_idx = -1;
+    int m_num_rank      = -1;
 
     float m_wr_low_watermark;
     float m_wr_high_watermark;
@@ -84,6 +86,18 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     uint64_t m_host_access_cnt;
     uint64_t m_tcore_host_access_cnt;
 
+    #ifdef PRINT_DB_CNT
+    // Rank-level Idle Time Counter
+    std::vector<uint64_t> s_rdwr_cnt;
+    std::vector<uint64_t> s_idle_cnt;
+    std::vector<uint64_t> s_busy_cnt;
+    std::vector<uint64_t> s_idle_interval_10_cnt; // 1-10
+    std::vector<uint64_t> s_idle_interval_100_cnt; // 10-100
+    std::vector<uint64_t> s_idle_interval_250_cnt; // 100-250
+    std::vector<uint64_t> s_idle_interval_500_cnt; // 250-500
+    std::vector<uint64_t> s_idle_interval_1000_cnt; // 500-1000
+    std::vector<uint64_t> s_idle_interval_over_1000_cnt; // over 1000  
+    #endif 
 
   public:
     void init() override {
@@ -106,6 +120,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
       m_dram = memory_system->get_ifce<IDRAM>();
       m_bank_addr_idx = m_dram->m_levels("bank");
+      m_rank_addr_idx = m_dram->m_levels("rank");
       m_priority_buffer.max_size = 512*3 + 32;
       m_active_buffer.max_size = 32*4;
       m_prefetched_buffer.max_size = 16*4;
@@ -116,8 +131,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       if(m_dram->get_level_size("pseudochannel") == -1) use_pseudo_ch = false;
       else                                              use_pseudo_ch = true;
-
-      if(use_pseudo_ch) psuedo_ch_idx = m_dram->m_levels("pseudochannel");
 
       m_num_cores = frontend->get_num_cores();
 
@@ -191,6 +204,19 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       
       m_host_access_cnt = 0;
       m_tcore_host_access_cnt = 0;      
+      
+      m_num_rank = m_dram->get_level_size("rank");  
+      #ifdef PRINT_DB_CNT
+      s_rdwr_cnt.resize(m_num_rank,0);
+      s_idle_cnt.resize(m_num_rank,0);
+      s_busy_cnt.resize(m_num_rank,0);
+      s_idle_interval_10_cnt.resize(m_num_rank,0);
+      s_idle_interval_100_cnt.resize(m_num_rank,0);
+      s_idle_interval_250_cnt.resize(m_num_rank,0);
+      s_idle_interval_500_cnt.resize(m_num_rank,0);
+      s_idle_interval_1000_cnt.resize(m_num_rank,0);
+      s_idle_interval_over_1000_cnt.resize(m_num_rank,0);
+      #endif
     };
 
     bool send(Request& req) override {
@@ -223,6 +249,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         } else {
           throw std::runtime_error("Invalid request type!");
         }
+
+        #ifdef PRINT_DB_CNT
+        if(is_success) {
+          s_rdwr_cnt[req.addr_vec[m_rank_addr_idx]]++;
+        }
+        #endif
       }
 
       if(is_success) {
@@ -262,24 +294,24 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       s_write_queue_len += m_write_buffer.size();
       s_priority_queue_len += m_priority_buffer.size();
 
-      if(use_pseudo_ch) {
-        for(int pch=0;pch<m_dram->m_organization.count[1];pch++) {
-          bool is_find = false;
-          for(auto req_it : m_read_buffer) {
-            if(req_it.addr_vec[1] == pch) is_find = true;
+      #ifdef PRINT_DB_CNT
+      for(int rk=0;rk<m_num_rank;rk++) {
+        if(s_rdwr_cnt[rk] == 0) {
+          s_idle_cnt[rk]++;
+        } else {
+          s_busy_cnt[rk]++;
+          if(s_idle_cnt[rk] > 0) {
+            if(s_idle_cnt[rk] < 10) s_idle_interval_10_cnt[rk] += s_idle_cnt[rk];
+            else if(s_idle_cnt[rk] < 100) s_idle_interval_100_cnt[rk] += s_idle_cnt[rk];
+            else if(s_idle_cnt[rk] < 250) s_idle_interval_250_cnt[rk] += s_idle_cnt[rk];
+            else if(s_idle_cnt[rk] < 500) s_idle_interval_500_cnt[rk] += s_idle_cnt[rk];
+            else if(s_idle_cnt[rk] < 1000) s_idle_interval_1000_cnt[rk] += s_idle_cnt[rk];
+            else s_idle_interval_over_1000_cnt[rk] += s_idle_cnt[rk];
           }
-          for(auto req_it : m_read_buffer) {
-            if(req_it.addr_vec[1] == pch) is_find = true;
-          }
-          for(auto req_it : m_active_buffer) {
-            if(req_it.addr_vec[1] == pch) is_find = true;
-          }
-
-          if(m_clk>io_busy_clk_per_pch[pch]) {
-          }
+          s_idle_cnt[rk] = 0;
         }
       }
-
+      #endif
       // 1. Serve completed reads
       serve_completed_reads();
 
@@ -308,182 +340,15 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         }
         m_dram->issue_command(req_it->command, req_it->addr_vec);
 
-
-        // Update PRE_WR/POST_WR Counter 
-        if(use_pseudo_ch) {
-          if(!req_it->is_actived && req_it->final_command != m_dram->m_commands("POST_RD") && 
-              (req_it->command == m_dram->m_commands("P_ACT") || req_it->command == m_dram->m_commands("PRE_WR"))) {
-            // Issued DDR commands related with PRE_WR
-            s_num_pre_wr++;
-            db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
-            db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
-            req_it->is_actived = true;
-            #ifdef PRINT_DB_CNT
-            std::cout<<"PRE_WR ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
-            std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db rd cnt "<<db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db wr cnt "<<db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;                       
-            #endif 
-          }
-          if(req_it->command == m_dram->m_commands("POST_WR")) {
-            // Issued DDR commands related with PRE_WR
-            s_num_post_wr++;
-            db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
-            db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
-            #ifdef PRINT_DB_CNT
-            std::cout<<"POST_WR ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
-            std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db rd cnt "<<db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db wr cnt "<<db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;                
-            #endif
-          }
-          if(req_it->command  == m_dram->m_commands("PRE_RD") || req_it->command  == m_dram->m_commands("PRE_RDA")) {
-            s_num_pre_rd++;
-            db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
-            db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
-            #ifdef PRINT_DB_CNT
-            std::cout<<"PRE_RD ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
-            std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db rd cnt "<<db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db wr cnt "<<db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;            
-            #endif
-          }
-          if(req_it->command  == m_dram->m_commands("POST_RD")) {
-            s_num_post_rd++;
-            db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
-            db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
-            #ifdef PRINT_DB_CNT
-            std::cout<<"POST_RD ["<<req_it->addr_vec[0]<<"]["<<req_it->addr_vec[1]<<"] |";
-            std::cout<<" db cnt "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db rd cnt "<<db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];
-            std::cout<<" db wr cnt "<<db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;
-            #endif
-          }            
-            
-
-          // Update DRAM Prefetch Counter Value
-          m_dram->set_db_fetch_per_pch(req_it->addr_vec,db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]],
-                                                        db_prefetch_rd_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]],
-                                                        db_prefetch_wr_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]);
-
-          // Update Max Prefetch Counter 
-          if(db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]] > s_num_max_prefetch_per_pch[req_it->addr_vec[psuedo_ch_idx]])
-            s_num_max_prefetch_per_pch[req_it->addr_vec[psuedo_ch_idx]] = db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]];       
-            
-              
-          if(false) {
-            if(req_it->command == m_dram->m_commands("PRE_WR"))  std::cout<<"["<<m_clk<<"] ISSUE PRE_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
-            <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;
-            if(req_it->command == m_dram->m_commands("POST_WR")) std::cout<<"["<<m_clk<<"] ISSUE POST_WR CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_wr  << "/" <<s_num_post_wr
-            <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;
-            if(req_it->command == m_dram->m_commands("PRE_RD")) std::cout<<"["<<m_clk<<"] ISSUE PRE_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
-            <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;              
-            if(req_it->command == m_dram->m_commands("PRE_RDA")) std::cout<<"["<<m_clk<<"] ISSUE PRE_RDA CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
-            <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;                            
-            if(req_it->command == m_dram->m_commands("POST_RD")) std::cout<<"["<<m_clk<<"] ISSUE POST_RD CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] / "<<s_num_pre_rd  << "/" <<s_num_post_rd
-            <<" db cnt : "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<" / "<<m_dram->get_db_fetch_per_pch(req_it->addr_vec)<<std::endl;                                          
-          }
-          // Exception 
-          if(db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]] > 16 || db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]] < 0) {
-            std::cout<<"["<<m_clk<<"] CH["<<req_it->addr_vec[0]<<"]PCH["<<req_it->addr_vec[1]<<"] Over Prefetched cnt"<<std::endl;
-            std::cout<<" - "<<db_prefetch_cnt_per_pch[req_it->addr_vec[psuedo_ch_idx]]<<std::endl;
-            exit(1);
-          }
-          }
-
-        if(use_pseudo_ch) {
-          // Convert Normal WR(A) to PRE_WR when issue WR Prefetch to DB
-          if(req_it->command  == m_dram->m_commands("P_ACT") || req_it->command  == m_dram->m_commands("PRE_WR")) {
-            if((req_it->final_command == m_dram->m_commands("WR")) || (req_it->final_command == m_dram->m_commands("WRA"))) {
-              req_it->final_command = m_dram->m_commands("PRE_WR");            
-            }
-          }
-          // if(req_it->command  == m_dram->m_commands("P_ACT") || req_it->command  == m_dram->m_commands("POST_RD")) {
-          //   if((req_it->final_command == m_dram->m_commands("RD")) || (req_it->final_command == m_dram->m_commands("RDA")))
-          //     req_it->final_command = m_dram->m_commands("POST_RD");          
-          // }          
-
-          if(req_it->command  == m_dram->m_commands("PRE_RD") || req_it->command  == m_dram->m_commands("PRE_RDA")) {
-            req_it->final_command = req_it->command;
-          }                    
-        }
-
-        if(false && req_it->addr_vec[0] == 0 && req_it->addr_vec[1] == 1) {
-
-            int act_req_cnt=0;
-            for (auto& req : m_active_buffer) {
-              if(req.addr_vec[1] == 0 && req.addr_vec[0] == 0) act_req_cnt++;
-            }
-            int rd_req_cnt=0;
-            for (auto& req : m_read_buffer) {
-              if(req.addr_vec[1] == 0 && req.addr_vec[0] == 0) rd_req_cnt++;
-            }            
-            int wr_req_cnt=0;
-            for (auto& req : m_write_buffer) {
-              if(req.addr_vec[1] == 0 && req.addr_vec[0] == 0) wr_req_cnt++;
-            }      
-
-          std::cout<<"["<<(m_clk-pre_clk)<<"] ";
-          std::cout<<" Ramined Req (active_buf/read_buf/write_buf) "<<(act_req_cnt)<<" / "<<rd_req_cnt<<" / "<<wr_req_cnt<<" - ";
-          m_dram->print_req(*req_it);
-          pre_clk = m_clk;
-        }
         
-        if(use_pseudo_ch) {
-          if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) s_num_issue_reads++;
-          if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR"))  s_num_issue_writes++;
-          if((req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") || req_it->command == m_dram->m_commands("POST_RD")) || 
-             (req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA") || req_it->command == m_dram->m_commands("PRE_WR"))) {
-              s_num_trans_per_pch[req_it->addr_vec[psuedo_ch_idx]]++;
-          }
-        } else {
-          if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
-          if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
-        }
-
-        if(req_it->command == m_dram->m_commands("REFab")) {
-          if(use_pseudo_ch) {        
-            int nRFC_latency = m_dram->m_timing_vals("nRFC1");
-            int pch_addr = req_it->addr_vec[psuedo_ch_idx];
-            s_num_refresh_cc_per_pch[pch_addr]+=nRFC_latency;
-            if(false && db_prefetch_cnt_per_pch[pch_addr]!=0) {
-             std::cout<<"Refresh start But some entry of prefetched buffer are remained CH/PCH : "<<req_it->addr_vec[0]<<"/"<<req_it->addr_vec[1]<<std::endl;
-             std::cout<<" Prefetched Counter  :"<<db_prefetch_cnt_per_pch[pch_addr]<<std::endl;
-             for (auto& req : m_prefetched_buffer) m_dram->print_req(req);
-             
-             std::cout<<" Active Buffer       :"<<m_active_buffer.size()<<std::endl;
-             for (auto& req : m_active_buffer) m_dram->print_req(req);
-
-             std::cout<<" prefetched buffer :"<<m_prefetched_buffer.size()<<std::endl;
-             for (auto& req : m_prefetched_buffer) m_dram->print_req(req);              
-
-             std::cout<<" write buffer size :"<<m_write_buffer.size()<<std::endl;
-             for (auto& req : m_write_buffer) m_dram->print_req(req); 
-             exit(1);
-            }
-          }    
-        }
-        
-        if(use_pseudo_ch) {
-          if(req_it->command == m_dram->m_commands("PRE_WR") || req_it->command == m_dram->m_commands("POST_RD")) {
-            auto& req_addr_vec = req_it->addr_vec;
-            int pch_addr = req_addr_vec[psuedo_ch_idx];
-            s_num_busy_refresh_cc_per_pch[req_it->addr_vec[psuedo_ch_idx]]+=(8*4);
-          } 
-        }
+        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
+        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
 
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {
           if (req_it->type_id == Request::Type::Read) {
-            if(use_pseudo_ch) {
-              if(!(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA"))) {
-                req_it->depart = m_clk + m_dram->m_read_latency;
-                pending.push_back(*req_it);  
-              }
-            } else {
-              req_it->depart = m_clk + m_dram->m_read_latency;
-              pending.push_back(*req_it);
-            }
+            req_it->depart = m_clk + m_dram->m_read_latency;
+            pending.push_back(*req_it);
           } else if (req_it->type_id == Request::Type::Write) {
             // TODO: Add code to update statistics
           }
@@ -494,43 +359,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
               if(req_it->is_trace_core_req) {
                 m_tcore_host_access_cnt++;
               }          
-          }
-
-          if(use_pseudo_ch) {
-            if(req_it->command == m_dram->m_commands("PRE_WR")) {
-              // Generate POST_WR and Enqueue to Prefetched Buffer
-              Request new_req = Request(req_it->addr_vec, Request::Type::Write);
-              new_req.addr          = req_it->addr;
-              new_req.arrive        = req_it->arrive;
-              new_req.final_command = m_dram->m_commands("POST_WR");
-              bool is_success = false;              
-
-              buffer->remove(req_it);
-              is_success = m_prefetched_buffer.enqueue(new_req);
-              if(!is_success) {
-                throw std::runtime_error("Fail to enque to m_prefetched_buffer");
-              }                    
-            } else if(req_it->command == m_dram->m_commands("PRE_RD") || req_it->command == m_dram->m_commands("PRE_RDA")) {
-              // Generate POST_RD and Enqueue to Prefetched Buffer
-              Request new_req = Request(req_it->addr_vec, Request::Type::Read);
-              new_req.addr          = req_it->addr;
-              new_req.arrive        = req_it->arrive;
-              new_req.source_id     = req_it->source_id;
-              new_req.callback      = req_it->callback;
-              new_req.final_command = m_dram->m_commands("POST_RD");
-              bool is_success = false;              
-
-              buffer->remove(req_it);
-              is_success = m_prefetched_buffer.enqueue(new_req);
-              if(!is_success) {
-                throw std::runtime_error("Fail to enque to m_prefetched_buffer");
-              }                    
-            } else {
-              buffer->remove(req_it);
-            }
-          } else {
-            buffer->remove(req_it);
           }          
+          #ifdef PRINT_DB_CNT
+          s_rdwr_cnt[req_it->addr_vec[m_rank_addr_idx]]--;
+          #endif
+          buffer->remove(req_it);
         } else {
           if (m_dram->m_command_meta(req_it->command).is_opening) {
             bool is_success = false;
@@ -670,20 +503,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       bool request_found = false;
 
-      // Update Priority Queue Empty Flag Array 
-      if(use_pseudo_ch) {
-        m_dram->reset_need_be_open_per_bank(m_channel_id);
-        for(int pch_idx=0;pch_idx<m_dram->get_level_size("pseudochannel");pch_idx++) {
-          is_empty_priority_per_pch[pch_idx] = true;
-          for(auto req : m_priority_buffer) {
-            if(req.addr_vec[1] == pch_idx) is_empty_priority_per_pch[pch_idx] = false;
-          }
-        }
-        for(auto req : m_active_buffer) {
-          m_dram->set_need_be_open_per_bank(req.addr_vec);
-        }
-      }
-      
+     
       // 2.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
       // what is active_buffer? (opened row requesst?)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
@@ -761,6 +581,18 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       // 10^6 T/s --> /(2^30) GB/s
       s_max_bandwidth = (float)(m_dram->m_channel_width / 8) * (float)m_dram->m_timing_vals("rate") * 1E6 / (1024*1024*1012);      
     
+      #ifdef PRINT_DB_CNT
+      for(int rk=0;rk<m_num_rank;rk++) {
+        std::cout<<" Rank ["<<rk<<"] Idle Time Breakdown (%)"<<std::endl;
+        std::cout<<"    - Busy           : "<<(100.0 * float(s_busy_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(1_10)     : "<<(100.0 * float(s_idle_interval_10_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(10_100)   : "<<(100.0 * float(s_idle_interval_100_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(100_250)  : "<<(100.0 * float(s_idle_interval_250_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(250_500)  : "<<(100.0 * float(s_idle_interval_500_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(500_1000) : "<<(100.0 * float(s_idle_interval_1000_cnt[rk]) / float(m_clk))<<std::endl;
+        std::cout<<"    - IDLE(1000) -   : "<<(100.0 * float(s_idle_interval_over_1000_cnt[rk]) / float(m_clk))<<std::endl;
+      }
+      #endif
       return;
     }
 

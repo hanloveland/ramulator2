@@ -24,13 +24,9 @@ class FRFCFS : public IScheduler, public Implementation {
     ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
       bool ready1;
       bool ready2;      
-      if(m_dram->get_use_pch()) {
-        ready1 = false;
-        ready2 = false;
-      } else {
-        ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-        ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
-      }
+
+      ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
+      ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
 
       ready1 = ready1 && req1_ready;
       ready2 = ready2 && req2_ready;
@@ -52,15 +48,7 @@ class FRFCFS : public IScheduler, public Implementation {
     }
 
     bool check_wr_fetch_over_th(ReqBuffer::iterator req) {
-      bool over_threshold = false;
-      // Check It's not in m_activity_buffer and it's request is PRE_WR
-      
-      if(m_dram->get_use_pch() && !req->is_actived && (req->command == m_dram->m_commands("P_ACT")  || 
-                                                       req->command == m_dram->m_commands("PRE_WR") ||
-                                                       req->command == m_dram->m_commands("P_PRE"))) {
-        if((m_dram->get_db_fetch_per_pch(req->addr_vec)) >= 16 ) over_threshold = true;
-      }
-      return over_threshold;
+      return false;
     }
 
     bool check_post_rw(ReqBuffer::iterator req, bool write_mode) {
