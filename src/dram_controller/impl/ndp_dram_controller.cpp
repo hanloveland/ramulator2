@@ -317,6 +317,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint64_t m_tcore_db_dram_d2pa_access_cnt;
     uint64_t m_tcore_db_dram_ndp_access_access_cnt;
 
+    bool io_boost = false;
 
   public:
     void init() override {      
@@ -604,6 +605,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_tcore_db_dram_host_access_cnt       = 0;
       m_tcore_db_dram_d2pa_access_cnt       = 0;
       m_tcore_db_dram_ndp_access_access_cnt = 0;
+
+      //
+      if(m_dram->get_io_boost() != 1) {
+        io_boost = true;
+      }
 
     };
 
@@ -1188,13 +1194,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         }
 
         if(req_it->command == m_cmds.ACT)                                                                  s_num_act++;
-        if(req_it->command == m_cmds.PRE || req_it->command == m_cmds.PREA)                 s_num_pre++;
+        if(req_it->command == m_cmds.PRE || req_it->command == m_cmds.PREA)                                s_num_pre++;
         if(req_it->command == m_cmds.P_ACT)                                                                s_num_p_act++;
         if(req_it->command == m_cmds.P_PRE)                                                                s_num_p_pre++;
-        if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA)                   s_num_rd++;
-        if(req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA)                   s_num_wr++;
-        if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) s_num_ndp_dram_rd++;
-        if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) s_num_ndp_dram_wr++;
+        if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA)                                  s_num_rd++;
+        if(req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA)                                  s_num_wr++;
+        if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA)                s_num_ndp_dram_rd++;
+        if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA)                s_num_ndp_dram_wr++;
         if(req_it->command == m_cmds.NDP_DB_RD)                                                            s_num_ndp_db_rd++;
         if(req_it->command == m_cmds.NDP_DB_WR)                                                            s_num_ndp_db_wr++;              
 
@@ -1548,99 +1554,113 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       size_t num_rd = m_num_rd_cnts[pch_idx] + m_num_post_rd_cnts[pch_idx];
       size_t num_wr = m_num_wr_cnts[pch_idx];
       size_t elaped_time = m_clk - m_last_host_rd[pch_idx];
-      switch (m_mc_db_rw_modes[pch_idx]) {
-        case DB_NDP_WR: {
-          if(m_num_db_wr_cnts[pch_idx] > 0) {
-            m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
-          } else if(m_num_wr_cnts[pch_idx] > m_wr_high_threshold) {
+      if(io_boost) {
+        if(num_wr > m_wr_high_threshold) {
+            m_mc_db_rw_modes[pch_idx] = DB_WR; 
+            m_db_dram_rw_modes[pch_idx] = DRAM_WR;                      
+        } else {
+          if(m_mc_db_rw_modes[pch_idx] == DB_WR && m_db_dram_rw_modes[pch_idx] == DRAM_WR && num_wr >= m_wr_low_threshold) {
             m_mc_db_rw_modes[pch_idx] = DB_WR;
-          } else {
+            m_db_dram_rw_modes[pch_idx] = DRAM_WR;
+          } else if(m_mc_db_rw_modes[pch_idx] == DB_WR && m_db_dram_rw_modes[pch_idx] == DRAM_WR && num_wr < m_wr_low_threshold) {
             m_mc_db_rw_modes[pch_idx] = DB_RD;
-          }            
-          break;
-        }
-        case DB_WR: {
-          if((m_num_wr_cnts[pch_idx] > m_wr_low_threshold && !(elaped_time > ndp_dram_wr_max_age && num_rd > 0)) ||
-            (num_rd == 0 && num_wr !=0)) {
-            m_mc_db_rw_modes[pch_idx] = DB_WR;
-          } else if(m_num_db_wr_cnts[pch_idx] > 0) {
-            m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
-          } else {
-            m_mc_db_rw_modes[pch_idx] = DB_RD;
+            m_db_dram_rw_modes[pch_idx] = DRAM_RD;
           }
-          break;
         }
-        case DB_RD: {
-          if(m_num_db_wr_cnts[pch_idx] > 0) {
-            m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
-          } else if((m_num_wr_cnts[pch_idx] > m_wr_high_threshold && !(m_mc_rd_timer[pch_idx] < ndp_dram_wr_max_age && num_rd > 0)) ||
-                    (num_rd == 0 && num_wr !=0)) {
-            m_mc_db_rw_modes[pch_idx] = DB_WR;
-          } else {
-            m_mc_db_rw_modes[pch_idx] = DB_RD;
-          }             
-          break;
-        }          
-        default: {
-          throw std::runtime_error("Invalid MC-DB RW Mode!");
-          break;
-        }
-      }   
+      } else {
+        switch (m_mc_db_rw_modes[pch_idx]) {
+          case DB_NDP_WR: {
+            if(m_num_db_wr_cnts[pch_idx] > 0) {
+              m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
+            } else if(m_num_wr_cnts[pch_idx] > m_wr_high_threshold) {
+              m_mc_db_rw_modes[pch_idx] = DB_WR;
+            } else {
+              m_mc_db_rw_modes[pch_idx] = DB_RD;
+            }            
+            break;
+          }
+          case DB_WR: {
+            if((m_num_wr_cnts[pch_idx] > m_wr_low_threshold && !(elaped_time > ndp_dram_wr_max_age && num_rd > 0)) ||
+              (num_rd == 0 && num_wr !=0)) {
+              m_mc_db_rw_modes[pch_idx] = DB_WR;
+            } else if(m_num_db_wr_cnts[pch_idx] > 0) {
+              m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
+            } else {
+              m_mc_db_rw_modes[pch_idx] = DB_RD;
+            }
+            break;
+          }
+          case DB_RD: {
+            if(m_num_db_wr_cnts[pch_idx] > 0) {
+              m_mc_db_rw_modes[pch_idx] = DB_NDP_WR;
+            } else if((m_num_wr_cnts[pch_idx] > m_wr_high_threshold && !(m_mc_rd_timer[pch_idx] < ndp_dram_wr_max_age && num_rd > 0)) ||
+                      (num_rd == 0 && num_wr !=0)) {
+              m_mc_db_rw_modes[pch_idx] = DB_WR;
+            } else {
+              m_mc_db_rw_modes[pch_idx] = DB_RD;
+            }             
+            break;
+          }          
+          default: {
+            throw std::runtime_error("Invalid MC-DB RW Mode!");
+            break;
+          }
+        }   
 
-      // Set DB RW Mode
-      size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
-      size_t num_dram_rd = m_num_rd_cnts[pch_idx] + m_num_dram_rd_cnts[pch_idx]; 
-      elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
-      if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
-        m_enable_pre_rd[pch_idx] = true;
-      else 
-        m_enable_pre_rd[pch_idx] = false;
-      
-      switch (m_db_dram_rw_modes[pch_idx]) {
-        case DRAM_REF: {          
-          if(m_num_ref_cnts[pch_idx] > 0) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_REF; 
-          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
-          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_WR;
-          } else {
-            m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+        // Set DB RW Mode
+        size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
+        size_t num_dram_rd = m_num_rd_cnts[pch_idx] + m_num_dram_rd_cnts[pch_idx]; 
+        elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
+        if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
+          m_enable_pre_rd[pch_idx] = true;
+        else 
+          m_enable_pre_rd[pch_idx] = false;
+        
+        switch (m_db_dram_rw_modes[pch_idx]) {
+          case DRAM_REF: {          
+            if(m_num_ref_cnts[pch_idx] > 0) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_REF; 
+            } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
+            } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_WR;
+            } else {
+              m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+            }
+            break;
           }
-          break;
-        }
-        case DRAM_WR: {
-          if(m_num_ref_cnts[pch_idx] > 0) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if(num_dram_wr > m_wr_low_threshold || (num_dram_wr > 0 && num_dram_rd == 0) ) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_WR;
-          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
-          } else {
-            m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+          case DRAM_WR: {
+            if(m_num_ref_cnts[pch_idx] > 0) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_REF;
+            } else if(num_dram_wr > m_wr_low_threshold || (num_dram_wr > 0 && num_dram_rd == 0) ) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_WR;
+            } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age)) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;
+            } else {
+              m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+            }          
+            break;          
+          }
+          case DRAM_NDP_WR: {         
+            if(m_num_ref_cnts[pch_idx] > 0) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_REF;
+            } else if((m_num_dram_wr_cnts[pch_idx] > 0 && ((m_ndp_dram_wr_timer[pch_idx] < ndp_wr_mode_min_time) || m_num_rd_cnts[pch_idx] == 0))) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
+            } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_WR;
+            } else {
+              m_db_dram_rw_modes[pch_idx] = DRAM_RD;
+            }          
+            break;
           }          
-          break;          
-        }
-        case DRAM_NDP_WR: {         
-          if(m_num_ref_cnts[pch_idx] > 0) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && ((m_ndp_dram_wr_timer[pch_idx] < ndp_wr_mode_min_time) || m_num_rd_cnts[pch_idx] == 0))) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
-          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_WR;
-          } else {
-            m_db_dram_rw_modes[pch_idx] = DRAM_RD;
-          }          
-          break;
-        }          
-        case DRAM_RD: {
-          if(m_num_ref_cnts[pch_idx] > 0) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_REF;
-          } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age) && 
-                    ((m_dram_rd_timer[pch_idx] >= dram_rd_mode_min_time) || 
-                    m_num_post_rd_cnts[pch_idx] == 8)) {
-            m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
-          } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
+          case DRAM_RD: {
+            if(m_num_ref_cnts[pch_idx] > 0) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_REF;
+            } else if((m_num_dram_wr_cnts[pch_idx] > 0 && elaped_time > ndp_dram_wr_max_age) && 
+                      ((m_dram_rd_timer[pch_idx] >= dram_rd_mode_min_time) || 
+                      m_num_post_rd_cnts[pch_idx] == 8)) {
+              m_db_dram_rw_modes[pch_idx] = DRAM_NDP_WR;              
+            } else if(num_dram_wr > m_wr_high_threshold || (num_dram_wr > 0 && num_dram_rd == 0)) {
             m_db_dram_rw_modes[pch_idx] = DRAM_WR;
           } else {
             m_db_dram_rw_modes[pch_idx] = DRAM_RD;
@@ -1652,6 +1672,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           break;
         }
       }  
+      }
     };    
 
 
@@ -1715,6 +1736,21 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
             set_mode_per_pch(pch_idx);
             if(is_empty_priority_per_pch[pch_idx]) {
+              if(io_boost) {
+                if(m_mc_db_rw_modes[pch_idx] == DB_WR && m_db_dram_rw_modes[pch_idx] == DRAM_WR) {
+                  // Only WR
+                  if (req_it = m_scheduler->get_best_request_with_priority(m_write_buffers[pch_idx],4); req_it != m_write_buffers[pch_idx].end()) {
+                    request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                    req_buffer = &m_write_buffers[pch_idx];                                  
+                  }                     
+                } else {
+                  // Only RD
+                    if (req_it = m_scheduler->get_best_request_with_priority(m_read_buffers[pch_idx],0); req_it != m_read_buffers[pch_idx].end()) {
+                      request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                      req_buffer = &m_read_buffers[pch_idx];                                  
+                    }   
+                }
+              } else {
               if(m_mc_db_rw_modes[pch_idx] == DB_NDP_WR) {
                 // ================================ DB_NDP_WR MODE ================================
                 if(m_db_dram_rw_modes[pch_idx] == DRAM_REF) {
@@ -1988,6 +2024,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
                   }                                                    
                 }
               }
+            }
             }
              if(request_found) break;
           }

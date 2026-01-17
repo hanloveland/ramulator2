@@ -12,7 +12,7 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     IDRAM* m_dram;
     std::vector<int> m_cmd_priority_list;             // Command priority list
     std::unordered_map<int, int> m_cmd_priority_map;  // Command -> priority mapping
-    std::array<std::vector<int>, 6> m_cmd_prio_luts;
+    std::array<std::vector<int>, 7> m_cmd_prio_luts;
 
     struct CmdIds {
       int RD = -1;
@@ -67,7 +67,10 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       m_cmd_prio_luts[5].assign(m_dram->m_commands.size(), 0);
       m_cmd_prio_luts[5][m_cmd.NDP_DB_RD] = 3;      
       m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RD] = 2;      
-      m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RDA] = 1;                     
+      m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RDA] = 1;             
+      // m_cmd_prio_luts[6] 
+      m_cmd_prio_luts[6].assign(m_dram->m_commands.size(), 0);   
+      m_cmd_prio_luts[6][m_cmd.WR] = 1;             
     };
 
     void set_command_priority(const std::vector<int>& cmd_list) {
@@ -208,7 +211,7 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       // if (!cmd_priority_list.empty()) {
       //     set_command_priority(cmd_priority_list);
       // }
-      if(priority_list_index > 5) {
+      if(priority_list_index > 6) {
         throw std::runtime_error("Invalid Priority List Index!");
       }
       m_prio_idx = priority_list_index;

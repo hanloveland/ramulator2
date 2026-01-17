@@ -437,6 +437,10 @@ class DDR5 : public IDRAM, public Implementation {
         return 1;
     }
 
+    int get_io_boost() override {
+      return 1;
+    }
+
   private:
     void set_organization() {
       // Channel width
