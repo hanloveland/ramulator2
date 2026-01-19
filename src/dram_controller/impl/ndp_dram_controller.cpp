@@ -607,9 +607,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_tcore_db_dram_ndp_access_access_cnt = 0;
 
       //
-      if(m_dram->get_io_boost() != 1) {
-        io_boost = true;
-      }
+      // if(m_dram->get_io_boost() == 8) {
+      //   io_boost = true;
+      // }
 
     };
 
