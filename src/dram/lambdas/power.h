@@ -85,6 +85,18 @@ namespace Bank {
   }  
 
   template <class T>
+  void  NDP_DRAM2DB_RD(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing NDP DRAM-to-DB RD counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("NDP_DRAM2DB_RD")]++;
+  }
+
+  template <class T>
+  void NDP_DB2DRAM_WR(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing NDP DB-to-DRAM WR counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("NDP_DB2DRAM_WR")]++;
+  }  
+
+  template <class T>
   void DB2MC_RD(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
     Bank::debug<T>(node, "Incrementing DB-to-MC RD counter.", clk);
     node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("DB2MC_RD")]++;

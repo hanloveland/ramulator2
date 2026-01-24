@@ -285,7 +285,7 @@ class DDR5PCH : public IDRAM, public Implementation {
     };
 
     inline static constexpr ImplDef m_cmds_counted = {
-      "ACT", "PRE", "RD", "WR", "REF", "RFM", "DRAM2DB_RD", "DB2DRAM_WR", "DB2MC_RD", "MC2DB_WR"
+      "ACT", "PRE", "RD", "WR", "REF", "RFM", "DRAM2DB_RD", "DB2DRAM_WR", "DB2MC_RD", "MC2DB_WR", "NDP_DRAM2DB_RD", "NDP_DB2DRAM_WR",
     };
 
   /************************************************
@@ -384,7 +384,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     {"ACC_BUF"           ,0 }, 
     {"ADD"               ,1 }, 
     {"MUL"               ,2 },
-    {"ADDTree"           ,3 }
+    {"ADDTree"           ,3 },
+    {"IMPL_EXEC"         ,4 },
   };     
 
   public:
@@ -1395,19 +1396,23 @@ class DDR5PCH : public IDRAM, public Implementation {
         // READ x 2 - ADD - WRITE 
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ACC_BUF")]+= (opsize*3);
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ADD")]    += opsize;
+        ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("IMPL_EXEC")] += opsize;        
       } else if(opcode == m_ndp_inst_op.at("T_V_RED")) {
         // READ(one) - READ - ADD - WRITE (one)
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ACC_BUF")]+= (opsize + 2);
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ADD")]    += opsize + 1;
+        ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("IMPL_EXEC")] += opsize;
       } else if(opcode == m_ndp_inst_op.at("T_S_RED")) {
         // READ - ADDTree - WRITE 
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ACC_BUF")]+= (opsize * 2);
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ADDTree")]+= opsize;
+        ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("IMPL_EXEC")] += opsize;
       } else if(opcode == m_ndp_inst_op.at("T_MAC")) {
         // READ - READ - MUL - ADD - WRITE 
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ACC_BUF")]+= (opsize*3);
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("ADD")]    += opsize + 1;
         ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("MUL")]    += opsize;
+        ndp_op_cnt_per_pch[pch_id][m_ndp_ops.at("IMPL_EXEC")] += opsize;
       }
     }
 
@@ -2035,12 +2040,12 @@ class DDR5PCH : public IDRAM, public Implementation {
       m_powers[m_levels["bank"]][m_commands["WR"]]           = Lambdas::Power::Bank::WR<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["PRE_RD"]]       = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["PRE_RDA"]]      = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]  = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]] = Lambdas::Power::Bank::DRAM2DB_RD<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["POST_WR"]]      = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["POST_WRA"]]     = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
-      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]] = Lambdas::Power::Bank::DB2DRAM_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RD"]]  = Lambdas::Power::Bank::NDP_DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_RDA"]] = Lambdas::Power::Bank::NDP_DRAM2DB_RD<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WR"]]  = Lambdas::Power::Bank::NDP_DB2DRAM_WR<DDR5PCH>;
+      m_powers[m_levels["bank"]][m_commands["NDP_DRAM_WRA"]] = Lambdas::Power::Bank::NDP_DB2DRAM_WR<DDR5PCH>;
 
       m_powers[m_levels["bank"]][m_commands["NDP_DB_RD"]]    = Lambdas::Power::Bank::DB2MC_RD<DDR5PCH>;
       m_powers[m_levels["bank"]][m_commands["NDP_DB_WR"]]    = Lambdas::Power::Bank::MC2DB_WR<DDR5PCH>;
@@ -2140,6 +2145,30 @@ class DDR5PCH : public IDRAM, public Implementation {
 
       // Current Hard Coding 
       // 64bits x 8, FP16 x 16 x 2
+
+
+      // Energy Per 256-bits 
+      //               | x4    | x8    | x16
+      // E_NDP_IDLE	   | 77.8  | 155.6 | 311.2 
+      // E_NDP_ACC_MEM | 105.4 | 183.2 | 338.8 
+      // E_NDP_EXEC    | 301.5 | 602.9 | 1205.8 
+      double ndp_idle_per_ndp_cycle;
+      double ndp_acc_buf_per_inst;
+      double ndp_exec_per_inst;
+
+      if(dq_scaling == 1) {
+        ndp_idle_per_ndp_cycle = 77.8; 
+        ndp_acc_buf_per_inst = 105.4 * 2;
+        ndp_exec_per_inst = 301.5 * 2;
+      } else if(dq_scaling == 2) {
+        ndp_idle_per_ndp_cycle = 155.6; 
+        ndp_acc_buf_per_inst  = 183.2 * 2;
+        ndp_exec_per_inst     = 602.9 * 2;
+      } else if (dq_scaling == 4) {
+        ndp_idle_per_ndp_cycle = 311.2; 
+        ndp_acc_buf_per_inst  = 338.8 * 2;
+        ndp_exec_per_inst     = 1205.8 * 2;
+      }
       double buf_acc_energy_per_inst = on_buffer_energy * (double) (4 * 2 * dq_scaling);
       double add_energy_per_inst     = fp16_add_energy * (double) (16 * 2 * dq_scaling);
       double mul_energy_per_inst     = fp16_mul_energy * (double) (16 * 2 * dq_scaling);
@@ -2152,7 +2181,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       double total_ndp_bw   = 0.0;
       size_t host_acc = 0; // Host <->DB 
       size_t db_acc   = 0; // DB <-> DRAMs
-      size_t ndp_acc  = 0;
+      size_t ndp_exec  = 0;
       for (int i = 0; i < num_channels; i++) {
         size_t num_socket_trans = 0;
         size_t num_on_board_trans = 0;
@@ -2163,6 +2192,9 @@ class DDR5PCH : public IDRAM, public Implementation {
         size_t num_ndp_add = 0;
         size_t num_ndp_mul = 0;
         size_t num_ndp_addtree = 0;
+        size_t num_ndp_impl_exec = 0;
+        size_t ndp_explit_exec   = 0;
+        uint64_t idle_ndp_cycle = 0;
         for (int k = 0; k < num_pseudochannels; k++) {
             for (int j = 0; j < num_ranks; j++) {
             process_rank_energy(m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j], 
@@ -2175,34 +2207,49 @@ class DDR5PCH : public IDRAM, public Implementation {
             num_on_board_trans+=   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("RD")] + 
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("WR")] +        
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] +  
-                                   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];
+                                   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")] + 
+                                   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DRAM2DB_RD")] +  
+                                   m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DB2DRAM_WR")];                                   
             num_access_buf_trans+= m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2MC_RD")] + 
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("MC2DB_WR")] + 
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] + 
                                    m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];      
-            num_ecc_decoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")];
-            num_ecc_encoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];        
-
-            ndp_acc += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] +   
-                       m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")];            
+            num_ecc_decoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DRAM2DB_RD")] + 
+                                     m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DRAM2DB_RD")] + 
+                                     m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("MC2DB_WR")];
+            num_ecc_encoder_trans += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2DRAM_WR")] + 
+                                     m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DB2DRAM_WR")] +
+                                     m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("DB2MC_RD")];        
+            ndp_explit_exec += m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DRAM2DB_RD")] +   
+                               m_power_stats[i * num_ranks * num_pseudochannels + k * num_ranks + j].cmd_counters[m_cmds_counted("NDP_DB2DRAM_WR")];         
           }
           num_ndp_acc_mem += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ACC_BUF")];
           num_ndp_add     += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ADD")];
           num_ndp_mul     += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("MUL")];
           num_ndp_addtree += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("ADDTree")];
+          num_ndp_impl_exec += ndp_op_cnt_per_pch[i * num_pseudochannels + k][m_ndp_ops.at("IMPL_EXEC")];
+          
+          // NDP Clock m_clk/4 (NDP_IDLE_POWER)
+          idle_ndp_cycle += (m_clk/4);
         }
         host_acc += num_socket_trans;
         db_acc   += num_on_board_trans;
+        ndp_exec += ndp_explit_exec;
+        idle_ndp_cycle = idle_ndp_cycle - (ndp_explit_exec * 2) - num_ndp_impl_exec;
         // DQ Power (nJ) (Include ECC)
         double channel_socket_dq_energy = (double) num_socket_trans * (double) (16 * 4) * (double) ((m_channel_width+m_parity_width)/4) * socket_dq_energy/ 1E3;
         double channel_onboard_dq_energy = (double) num_on_board_trans * (double) (16 * dq_scaling) * (double) (m_channel_width+m_parity_width) * on_board_dq_energy / 1E3;
         double channel_onboard_ecc_energy = ((double) (dq_scaling * num_ecc_decoder_trans) * ecc_decoder_energy + (double) (dq_scaling * num_ecc_encoder_trans) * ecc_encoder_energy)  / 1E3;
-        double channel_access_buf_energy = (double) (dq_scaling * num_access_buf_trans) * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_buffer_energy / 1E3;
+        // double channel_access_buf_energy = (double) (dq_scaling * num_access_buf_trans) * (double) ((m_channel_width+m_parity_width) * 16 / 64) * on_buffer_energy / 1E3;
+        double channel_access_buf_energy = (double) (num_access_buf_trans) * ndp_acc_buf_per_inst / 1E3;
+
         // NDP Energy (nJ)
-        double channel_ndp_energy = ((double)(dq_scaling * num_ndp_acc_mem)  * buf_acc_energy_per_inst + 
-                                     (double)(dq_scaling * num_ndp_add)      * add_energy_per_inst +
-                                     (double)(dq_scaling * num_ndp_mul)      * mul_energy_per_inst +
-                                     (double)(dq_scaling * num_ndp_addtree)  * addtree_energy_per_inst) / 1E3;                                 
+        // double channel_ndp_energy = ((double)(dq_scaling * num_ndp_acc_mem)  * buf_acc_energy_per_inst + 
+        //                              (double)(dq_scaling * num_ndp_add)      * add_energy_per_inst +
+        //                              (double)(dq_scaling * num_ndp_mul)      * mul_energy_per_inst +
+        //                              (double)(dq_scaling * num_ndp_addtree)  * addtree_energy_per_inst) / 1E3;
+        double channel_ndp_energy = ((double)(ndp_explit_exec + num_ndp_impl_exec/2)  * ndp_exec_per_inst + 
+                                     (double)(idle_ndp_cycle) * ndp_idle_per_ndp_cycle) / 1E3;                                          
         // access 64 bit for on buffer
         double chanenl_socket_dq_power = channel_socket_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double chanenl_onboard_dq_power = channel_onboard_dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
@@ -2244,13 +2291,13 @@ class DDR5PCH : public IDRAM, public Implementation {
       std::cout<<" ==== Total Channel Bandwidth (GB/s) Report === "<<std::endl;
       total_host_bw = (double)((double)host_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
       total_db_bw   = (double)((double)db_acc * 512.0 * (double)dq_scaling) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
-      total_ndp_bw  = (double)((double)ndp_acc * 512.0 * (double)dq_scaling) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;            
+      total_ndp_bw  = (double)((double)ndp_exec * 512.0 * (double)dq_scaling) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;            
       std::cout<<" - Total Host <-> DB Bandwidth      : "<<total_host_bw<<std::endl;  
       std::cout<<" - Total DB <-> DRAMs Bandwidth     : "<<total_db_bw<<std::endl;  
       std::cout<<" - Total NDP Bandwidth              : "<<total_ndp_bw<<std::endl;  
       std::cout<<" - Total Host Access                : "<<host_acc<<std::endl;
       std::cout<<" - Total DB Access                  : "<<db_acc<<std::endl;
-      std::cout<<" - Total NDP Access                 : "<<ndp_acc<<std::endl;
+      std::cout<<" - Total NDP Access                 : "<<ndp_exec<<std::endl;
 
       // DIMM-side NDP Status 
         std::cout<<"DIMM-side NDP Ctrl Status Stats (total cycle: "<<m_clk<<")"<<std::endl;
@@ -2301,10 +2348,10 @@ class DDR5PCH : public IDRAM, public Implementation {
                                       * rank_stats.cmd_counters[m_cmds_counted("PRE")] * TS("nRP")  * tCK_ns / 1E3;
 
       double rd_cmd_energy   = (VE("VDD") * (CE("IDD4R") - CE("IDD3N")) + VE("VPP") * (CE("IPP4R") - CE("IPP3N"))) 
-                                      * (rank_stats.cmd_counters[m_cmds_counted("RD")] + rank_stats.cmd_counters[m_cmds_counted("DRAM2DB_RD")]) * TS("nBL") * tCK_ns / 1E3;
+                                      * (rank_stats.cmd_counters[m_cmds_counted("RD")] + rank_stats.cmd_counters[m_cmds_counted("DRAM2DB_RD")] + rank_stats.cmd_counters[m_cmds_counted("NDP_DRAM2DB_RD")]) * TS("nBL") * tCK_ns / 1E3;
                                       
       double wr_cmd_energy   = (VE("VDD") * (CE("IDD4W") - CE("IDD3N")) + VE("VPP") * (CE("IPP4W") - CE("IPP3N"))) 
-                                      * (rank_stats.cmd_counters[m_cmds_counted("WR")] + rank_stats.cmd_counters[m_cmds_counted("DB2DRAM_WR")]) * TS("nBL") * tCK_ns / 1E3;
+                                      * (rank_stats.cmd_counters[m_cmds_counted("WR")] + rank_stats.cmd_counters[m_cmds_counted("DB2DRAM_WR")] + rank_stats.cmd_counters[m_cmds_counted("NDP_DB2DRAM_WR")]) * TS("nBL") * tCK_ns / 1E3;
                                       
       double ref_cmd_energy  = (VE("VDD") * (CE("IDD5B")) + VE("VPP") * (CE("IPP5B"))) 
                                       * rank_stats.cmd_counters[m_cmds_counted("REF")] * TS("nRFC1") * tCK_ns / 1E3;
