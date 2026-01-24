@@ -66,12 +66,14 @@ NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4
 NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
 NDP_TARGET_BK = 3    # To decoule host access and DRAM access
 
-PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
+# PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
+PCH_ADDRESS_SCHEME = "RoBaBgCoRaPcCH"
 # PCH_ADDRESS_SCHEME = "BaRoCoBgRaPcCH"
 # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
 # NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
 # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
-NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
+# NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
+NORMAL_ADDRESS_SCHEME = "RoBaCoRaCh"
 
 GEN_PCH_NORMAL_MODE = True
 
@@ -300,6 +302,8 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
     """
         ROCoBaBgRaPcCH
         RoBaBgRaCoPcCH
+        BaRoCoBgRaPcCH
+        RoBaBgCoRaPcCH
     """
     address = 0
     global PCH_ADDRESS_SCHEME
@@ -333,7 +337,16 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         address |= (bank             & ((1 << BANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+BANKGROUP_BITS+COLUMN_BITS+ROW_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY        
-
+    elif PCH_ADDRESS_SCHEME == "RoBaBgCoRaPcCH":
+        address |= (channel          & ((1 << CHANNEL_BITS) - 1))
+        address |= (pseudo_channel   & ((1 << PCHANNEL_BITS) - 1))      << (CHANNEL_BITS)
+        address |= (rank             & ((1 << RANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS)
+        address |= (col              & ((1 << COLUMN_BITS) - 1))        << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS)
+        address |= (bg               & ((1 << BANKGROUP_BITS) - 1))     << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS)     
+        address |= (bank             & ((1 << BANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS+BANKGROUP_BITS)        
+        address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS+BANKGROUP_BITS+BANK_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY          
     # print(f" Address Translate CH{channel},PCH{pseudo_channel},RK{rank},BG{bg},BK{bank},RO{row},CO{col} --> 0x{address:016X}\n")        
     return address
 
@@ -372,6 +385,17 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS+NORMAL_COLUMN_BITS+NORMAL_RANK_BITS)
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY        
+    elif NORMAL_ADDRESS_SCHEME == "RoBaCoRaCh":
+        address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
+        address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS)
+        address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS)
+        address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS)
+        address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS)
+        address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
+
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY     
+        
     return address
 
 def write_trace(f, instr_type, address, data_array):
