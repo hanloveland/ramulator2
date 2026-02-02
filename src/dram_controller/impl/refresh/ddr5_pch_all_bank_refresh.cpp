@@ -42,7 +42,7 @@ class DR5PCHAllBankRefresh : public IRefreshManager, public Implementation {
 
       // Prefetch Cycle (Max 8*16*1.5)
 
-      m_next_refresh_cycle = m_nrefi;
+      m_next_refresh_cycle = m_nrefi/8;
     };
 
     void tick() {

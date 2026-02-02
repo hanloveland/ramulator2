@@ -1051,7 +1051,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           calc_bw_gbs(counters[2], 1.0, m_clk, tCK_ps));
 
       print_bw("DB<->DRAM",
-          calc_bw_gbs(counters[3]+counters[4]+counters[5], 1.0, m_clk, tCK_ps));          
+          calc_bw_gbs(counters[3]+counters[4]+counters[5], dq_scaling, m_clk, tCK_ps));          
       print_bw("DB<->DRAM HOST",
           calc_bw_gbs(counters[3], dq_scaling, m_clk, tCK_ps));
       print_bw("DB<->DRAM D2PA",
@@ -1071,7 +1071,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           calc_bw_gbs(counters[8], 1.0, m_clk, tCK_ps));
 
       print_bw("tcore DB<->DRAM",
-          calc_bw_gbs(counters[9]+counters[10]+counters[11], 1.0, m_clk, tCK_ps));             
+          calc_bw_gbs(counters[9]+counters[10]+counters[11], dq_scaling, m_clk, tCK_ps));             
       print_bw("tcore DB<->DRAM HOST",
           calc_bw_gbs(counters[9], dq_scaling, m_clk, tCK_ps));
       print_bw("tcore DB<->DRAM D2PA",

@@ -16,6 +16,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     ReqBuffer m_write_buffer;             // Write request buffer
     ReqBuffer m_prefetched_buffer;        // Prefetched buffer
 
+    std::vector<ReqBuffer> m_read_buffers;        // Read requestBuffers Per Rank 
+    std::vector<ReqBuffer> m_write_buffers;       // Write request Buffers Per rank
+    std::vector<ReqBuffer> m_priority_buffers;    // high-priority requests Buffers Per Rank
+
+    size_t buf_size = 32;
+
     int m_bank_addr_idx = -1;
     int m_rank_addr_idx = -1;
     int m_num_rank      = -1;
@@ -23,6 +29,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     float m_wr_low_watermark;
     float m_wr_high_watermark;
     bool  m_is_write_mode = false;
+    std::vector<bool> m_is_write_mode_per_rank;
+    std::vector<bool> is_empty_priority_per_rank;
+    // Round-Robin Vector
+    std::vector<int> rr_rk_idx;
+
 
     size_t s_row_hits = 0;
     size_t s_row_misses = 0;
@@ -60,10 +71,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     size_t s_num_issue_reads = 0;
     size_t s_num_issue_writes = 0;
 
-    std::vector<size_t> s_num_trans_per_pch;
-    std::vector<size_t> s_num_refresh_cc_per_pch;
-    std::vector<size_t> s_num_busy_refresh_cc_per_pch;
-    std::vector<size_t> s_num_max_prefetch_per_pch;
     size_t s_num_rw_switch = 0;
 
     bool use_pseudo_ch = false;
@@ -72,15 +79,14 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     std::vector<int> db_prefetch_rd_cnt_per_pch;
     std::vector<int> db_prefetch_wr_cnt_per_pch;
 
+    std::vector<size_t> s_num_refresh_cc_per_rank;
+
     uint32_t s_num_pre_wr;
     uint32_t s_num_post_wr;
     uint32_t s_num_pre_rd;
     uint32_t s_num_post_rd;    
 
     uint32_t pre_clk = 0;
-    std::vector<int> io_busy_clk_per_pch;
-
-    std::vector<bool> is_empty_priority_per_pch;
 
     // Memory Request Counter for Memory-System 
     uint64_t m_host_access_cnt;
@@ -129,8 +135,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       // std::cout<<m_active_buffer.max_size<<std::endl;
       // exit(1);
 
-      if(m_dram->get_level_size("pseudochannel") == -1) use_pseudo_ch = false;
-      else                                              use_pseudo_ch = true;
+      // if(m_dram->get_level_size("pseudochannel") == -1) use_pseudo_ch = false;
+      // else                                              use_pseudo_ch = true;
 
       m_num_cores = frontend->get_num_cores();
 
@@ -176,25 +182,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       register_stat(s_max_bandwidth).name("max_bandwidth_{}", m_channel_id);
 
       int num_pseudochannel = m_dram->get_level_size("pseudochannel");  
-      if(num_pseudochannel != -1) {
-        s_num_trans_per_pch.resize(num_pseudochannel, 0);
-        s_num_refresh_cc_per_pch.resize(num_pseudochannel, 0);
-        s_num_busy_refresh_cc_per_pch.resize(num_pseudochannel, 0);
-        db_prefetch_cnt_per_pch.resize(num_pseudochannel, 0);
-        db_prefetch_rd_cnt_per_pch.resize(num_pseudochannel, 0);
-        db_prefetch_wr_cnt_per_pch.resize(num_pseudochannel, 0);
-        s_num_max_prefetch_per_pch.resize(num_pseudochannel, 0);
-
-
-        io_busy_clk_per_pch.resize(num_pseudochannel, 0);
-        is_empty_priority_per_pch.resize(num_pseudochannel, 0);
-        for (size_t pch_id = 0; pch_id < num_pseudochannel; pch_id++) {
-          register_stat(s_num_trans_per_pch[pch_id]).name("s_num_trans_per_pch_{}_{}", m_channel_id,pch_id);        
-          register_stat(s_num_refresh_cc_per_pch[pch_id]).name("s_num_refresh_cc_per_pch_{}_{}", m_channel_id,pch_id);      
-          register_stat(s_num_busy_refresh_cc_per_pch[pch_id]).name("s_num_busy_refresh_cc_per_pch_{}_{}", m_channel_id,pch_id);             
-          register_stat(s_num_max_prefetch_per_pch[pch_id]).name("s_num_max_prefetch_per_pch_{}_{}", m_channel_id,pch_id);             
-        }
-      }
 
       register_stat(s_num_rw_switch).name("s_num_rw_switch_{}", m_channel_id);
       register_stat(s_num_pre_wr).name("s_num_pre_wr_{}", m_channel_id);
@@ -206,6 +193,23 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       m_tcore_host_access_cnt = 0;      
       
       m_num_rank = m_dram->get_level_size("rank");  
+      
+      // Initialize Per Rank Request Buffer and set Max Request Capacity     
+      m_read_buffers.resize(m_num_rank,ReqBuffer());
+      m_write_buffers.resize(m_num_rank,ReqBuffer());
+      m_priority_buffers.resize(m_num_rank,ReqBuffer());
+
+      m_is_write_mode_per_rank.resize(m_num_rank, false);     
+      is_empty_priority_per_rank.resize(m_num_rank, false);
+      s_num_refresh_cc_per_rank.resize(m_num_rank, 0);
+      for(int i=0; i<m_num_rank; i++) {
+        m_read_buffers[i].max_size = buf_size;
+        m_write_buffers[i].max_size = buf_size;
+        m_priority_buffers[i].max_size = (512*3 + 32)/4;
+        rr_rk_idx.push_back(i);
+        register_stat(s_num_refresh_cc_per_rank[i]).name("s_num_refresh_cc_per_rank_{}_{}", m_channel_id,i);      
+      }
+
       #ifdef PRINT_DB_CNT
       s_rdwr_cnt.resize(m_num_rank,0);
       s_idle_cnt.resize(m_num_rank,0);
@@ -230,6 +234,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           return wreq.addr == req.addr;
         };
         // if existing write request which is same address with read, send to pending request queue
+        ReqBuffer& wr_buffer = m_write_buffers[req.addr_vec[m_rank_addr_idx]];    
         if (std::find_if(m_write_buffer.begin(), m_write_buffer.end(), compare_addr) != m_write_buffer.end()) {
           // The request will depart at the next cycle
           req.depart = m_clk + 1;
@@ -243,9 +248,11 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       if(!is_success) {
         req.arrive = m_clk;
         if        (req.type_id == Request::Type::Read) {
-          is_success = m_read_buffer.enqueue(req);
+          is_success = m_read_buffers[req.addr_vec[m_rank_addr_idx]].enqueue(req);
+          // is_success = m_read_buffer.enqueue(req);
         } else if (req.type_id == Request::Type::Write) {
-          is_success = m_write_buffer.enqueue(req);
+          is_success = m_write_buffers[req.addr_vec[m_rank_addr_idx]].enqueue(req);       
+          // is_success = m_write_buffer.enqueue(req);
         } else {
           throw std::runtime_error("Invalid request type!");
         }
@@ -281,7 +288,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       req.final_command = m_dram->m_request_translations(req.type_id);
 
       bool is_success = false;
-      is_success = m_priority_buffer.enqueue(req);
+      // is_success = m_priority_buffer.enqueue(req);
+      is_success = m_priority_buffers[req.addr_vec[m_rank_addr_idx]].enqueue(req);
       return is_success;
     }
 
@@ -343,6 +351,12 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         
         if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
         if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
+
+        if(req_it->command == m_dram->m_commands("REFab")) {
+          int nRFC_latency = m_dram->m_timing_vals("nRFC1");
+          int rank_addr = req_it->addr_vec[m_rank_addr_idx];
+          s_num_refresh_cc_per_rank[rank_addr]+=nRFC_latency;
+        }
 
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {
@@ -494,6 +508,30 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       }
     };
 
+    /**
+     * @brief    Checks if we need to switch to write mode per rank
+     * 
+     */
+    void set_write_mode_per_rank(int rk_idx) {      
+      if (!m_is_write_mode_per_rank[rk_idx]) {
+        if ((m_write_buffers[rk_idx].size() > m_wr_high_watermark * m_write_buffers[rk_idx].max_size) || m_read_buffers[rk_idx].size() == 0) {
+          m_is_write_mode_per_rank[rk_idx] = true;
+          s_num_rw_switch++;
+        }
+      } else {
+        if ((m_write_buffers[rk_idx].size() < m_wr_low_watermark * m_write_buffers[rk_idx].max_size) && m_read_buffers[rk_idx].size() != 0) {
+          m_is_write_mode_per_rank[rk_idx] = false;
+          s_num_rw_switch++;
+        }
+      }
+    };    
+
+    void update_rr_rank_idx() {
+      // Shift Round-Robin Pseudo Channel Index
+      rr_rk_idx.push_back(rr_rk_idx[0]);
+      rr_rk_idx.erase(rr_rk_idx.begin());
+    }
+
 
     /**
      * @brief    Helper function to find a request to schedule from the buffers.
@@ -502,8 +540,16 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     bool schedule_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
 
       bool request_found = false;
-
      
+      // Priority Queue Empty Flag Array 
+      for(int rk_idx=0;rk_idx<m_num_rank;rk_idx++) {
+        if(m_priority_buffers[rk_idx].size() != 0) {
+          is_empty_priority_per_rank[rk_idx] = false;
+        } else {
+          is_empty_priority_per_rank[rk_idx] = true;
+        }
+      }
+
       // 2.1    First, check the act buffer to serve requests that are already activating (avoid useless ACTs)
       // what is active_buffer? (opened row requesst?)
       if (req_it= m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
@@ -516,27 +562,44 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       // 2.2    If no requests can be scheduled from the act buffer, check the rest of the buffers
       if (!request_found) {
         // 2.2.1    We first check the priority buffer to prioritize e.g., maintenance requests
-        if (m_priority_buffer.size() != 0) {
-          req_buffer = &m_priority_buffer;
-          req_it = m_priority_buffer.begin();
-          req_it->command = m_dram->get_preq_command(req_it->final_command, req_it->addr_vec);
-          
-          request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+        for(auto rk_idx : rr_rk_idx) {
+          if (m_priority_buffers[rk_idx].size() != 0) {
+            req_buffer = &m_priority_buffers[rk_idx];
+            req_it = m_priority_buffers[rk_idx].begin();
+            req_it->command = m_dram->get_preq_command(req_it->final_command, req_it->addr_vec);
+            
+            request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
 
-          if (!request_found & m_priority_buffer.size() != 0) {
-            return false;
+            if(request_found) break;
+            // if (!request_found & m_priority_buffer.size() != 0) {
+            //   return false;
+            // }
           }
         }
 
         // 2.2.1    If no request to be scheduled in the priority buffer, check the read and write buffers.
         if (!request_found) {
           // Query the write policy to decide which buffer to servef
+          for(auto rk_idx : rr_rk_idx) {
+            set_write_mode_per_rank(rk_idx);
+            if(is_empty_priority_per_rank[rk_idx]) {
+              auto& buffer = m_is_write_mode_per_rank[rk_idx] ? m_write_buffers[rk_idx] : m_read_buffers[rk_idx];
+              if (req_it = m_scheduler->get_best_request(buffer); req_it != buffer.end()) {
+                request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
+                req_buffer = &buffer;
+              }
+              if(request_found) break;
+            }
+          }
+          /*
+          //Single Queue Per Channel 
           set_write_mode();
           auto& buffer = m_is_write_mode ? m_write_buffer : m_read_buffer;
           if (req_it = m_scheduler->get_best_request(buffer); req_it != buffer.end()) {
             request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
             req_buffer = &buffer;
           }
+          */
         }
       }
 
@@ -561,6 +624,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         }
       }
 
+      if(request_found) update_rr_rank_idx();
       return request_found;
     }
 

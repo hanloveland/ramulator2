@@ -34,7 +34,7 @@ class AllBankRefresh : public IRefreshManager, public Implementation {
       m_nrefi = m_dram->m_timing_vals("nREFI");
       m_ref_req_id = m_dram->m_requests("all-bank-refresh");
 
-      m_next_refresh_cycle = m_nrefi;
+      m_next_refresh_cycle = m_nrefi/8;
     };
 
     void tick() {
