@@ -258,6 +258,43 @@ class RoRaBaCoCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+// Ch/Rank/BankGroup/Bank/Row/Col
+// 0   1       2       3   4   5
+class BhRoBlBgCoRaCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, BhRoBlBgCoRaCh, "BhRoBlBgCoRaCh", "Applies a BhRoBlBgCoRaCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+
+      if(m_addr_bits[3] != 2) {
+        throw std::runtime_error("Error - BK Bits of BhRoBlBgCoRaCh scheme must be 2!");
+      }
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> Ra
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);    
+      // Address --> COL
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> BG
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);
+      // Address --> BK Low Bit
+      req.addr_vec[3] = slice_lower_bits(addr, 1);
+      // Address --> RO
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);                
+      // Address --> BK High Bit
+      req.addr_vec[3] = slice_lower_bits(addr, 1) << 1 | req.addr_vec[3];
+      // Address --> Ro/Ra/Ba/Bg/Co/Ch
+    }
+};
+
 //DDR5-pCH
 // RoBaRaCoPcCh
 // RoCoBaRaPcCh
@@ -484,6 +521,48 @@ class RoRaBkBgCoPcCh final : public LinearMapperBase, public Implementation {
     }
 };
 
+
+
+// Ch/PCH/nI/WI/Rank/BankGroup/Bank/Row/Col
+// 0   1  2  3   4       5      6   7  8
+class BhRoRaBlBgCoPcCh final : public LinearMapperBase, public Implementation {
+  RAMULATOR_REGISTER_IMPLEMENTATION(IAddrMapper, BhRoRaBlBgCoPcCh, "BhRoRaBlBgCoPcCh", "Applies a BhRoRaBlBgCoPcCh mapping to the address.");
+
+  public:
+    void init() override { };
+
+    void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
+      LinearMapperBase::setup(frontend, memory_system);
+      if(m_addr_bits[6] != 2) {
+        throw std::runtime_error("Error - BK Bits of BhRoRaBlBgCoPcCh scheme must be 2!");
+      }      
+    }
+
+    void apply(Request& req) override {
+      req.addr_vec.resize(m_num_levels, -1);
+      Addr_t addr = req.addr >> m_tx_offset;
+      // Address --> Ch 
+      req.addr_vec[0] = slice_lower_bits(addr, m_addr_bits[0]);
+      // Address --> pCh 
+      req.addr_vec[1] = slice_lower_bits(addr, m_addr_bits[1]);
+      // Address --> nI
+      req.addr_vec[2] = slice_lower_bits(addr, m_addr_bits[2]);            
+      // Address --> wI
+      req.addr_vec[3] = slice_lower_bits(addr, m_addr_bits[3]);    
+      // Address --> COL
+      req.addr_vec[8] = slice_lower_bits(addr, m_addr_bits[8]);
+      // Address --> BG
+      req.addr_vec[5] = slice_lower_bits(addr, m_addr_bits[5]);
+      // Address --> BK Low Bits
+      req.addr_vec[6] = slice_lower_bits(addr, 1);
+      // Address --> Rank (PCh has only 1 Rank)
+      req.addr_vec[4] = slice_lower_bits(addr, m_addr_bits[4]);      
+      // Address --> ROW
+      req.addr_vec[7] = slice_lower_bits(addr, m_addr_bits[7]);
+      // Address --> BK High  Bits
+      req.addr_vec[6] = req.addr_vec[6] | slice_lower_bits(addr, 1) << 1;      
+    }
+};
 
 
 class MOP4CLXOR final : public LinearMapperBase, public Implementation {

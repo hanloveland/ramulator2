@@ -20,7 +20,7 @@ class OpenRowPolicy : public IRowPolicy, public Implementation {
       // OpenRowPolicy does not need to take any actions
     };
 
-    void update_cap(int pch, int bg, int bk, uint64_t cap) override {
+    void update_cap(int pch, int rank, int bg, int bk, uint64_t cap) override {
       // DO NOT ANYTHING
     };
 
@@ -47,6 +47,7 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
     int s_num_close_reqs = 0;
 
     std::vector<uint64_t> m_col_accesses;
+    std::vector<uint64_t> m_cap_per_bank;
 
   public:
     void init() override { };
@@ -69,6 +70,7 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
       m_num_banks = m_dram->get_level_size("bank");
       
       m_col_accesses.resize(m_num_banks * m_num_bankgroups * m_num_ranks, 0);
+      m_cap_per_bank.resize(m_num_banks * m_num_bankgroups * m_num_ranks, m_cap);
 
       register_stat(s_num_close_reqs).name("num_close_reqs");
     };
@@ -112,7 +114,7 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
         
         m_col_accesses[flat_bank_id]++;
 
-        if (m_col_accesses[flat_bank_id] >= m_cap) {
+        if (m_col_accesses[flat_bank_id] >= m_cap_per_bank[flat_bank_id]) {
           Request req(req_it->addr_vec, m_PRE_req_id);
           m_ctrl->priority_send(req);
           m_col_accesses[flat_bank_id] = 0;
@@ -121,8 +123,9 @@ class ClosedRowPolicy : public IRowPolicy, public Implementation {
       }
     };
 
-    void update_cap(int pch, int bg, int bk, uint64_t cap) override {
-      // DO NOT ANYTHING
+    void update_cap(int pch, int rank, int bg, int bk, uint64_t cap) override {
+      int flat_bank_id = bk + bg * m_num_banks + rank * m_num_banks * m_num_bankgroups;
+      m_cap_per_bank[flat_bank_id] = cap;
     };    
 };
 
@@ -230,7 +233,7 @@ class ClosedRowPolicyPch : public IRowPolicy, public Implementation {
       }
     };
 
-    void update_cap(int pch, int bg, int bk, uint64_t cap) override {
+    void update_cap(int pch, int rank, int bg, int bk, uint64_t cap) override {
       int flat_bank_id = bk + bg * m_num_banks + 0 * m_num_banks * m_num_bankgroups + pch * m_num_banks * m_num_bankgroups * m_num_ranks;
       m_cap_per_bank[flat_bank_id] = cap;
     };    

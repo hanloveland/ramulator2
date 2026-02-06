@@ -16,7 +16,7 @@ class IRowPolicy {
 
   public:
     virtual void update(bool request_found, ReqBuffer::iterator& req_it) = 0;
-    virtual void update_cap(int pch, int bg, int bk, uint64_t cap) = 0;
+    virtual void update_cap(int pch, int rank, int bg, int bk, uint64_t cap) = 0;
 };
 
 }        // namespace Ramulator

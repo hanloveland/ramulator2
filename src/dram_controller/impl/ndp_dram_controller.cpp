@@ -235,6 +235,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint32_t m_prev_num_ndp_dram_wr = 0;
     uint32_t m_prev_num_ndp_db_rd = 0;
     uint32_t m_prev_num_ndp_db_wr = 0;
+
     
     std::vector <uint32_t> m_his_num_cmd;
     std::vector <uint32_t> m_his_num_rd;
@@ -319,6 +320,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     bool io_boost = false;
 
+    uint32_t m_ndp_row_hit_low_cap;
+    uint32_t m_token_per_pre_rw;
+
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -329,8 +333,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_ndp_read_high_threshold = param<float>("ndp_read_high_threshold").desc("Threshold for NDP Read Request").default_val(0.5f);
       m_ndp_write_high_threshold = param<float>("ndp_write_high_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);
       m_ndp_read_low_threshold = param<float>("ndp_read_low_threshold").desc("Threshold for NDP Read Request").default_val(0.5f);
-      m_ndp_write_low_threshold = param<float>("ndp_write_low_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);      
-
+      m_ndp_write_low_threshold = param<float>("ndp_write_low_threshold").desc("Threshold for NDP Write Request").default_val(0.5f);     
+      m_ndp_row_hit_low_cap = param<size_t>("ndp_row_hit_low_cap").desc("Row Buffer Hit Low Cap for NDP Operation").default_val(16);      
+      m_token_per_pre_rw  = param<size_t>("pre_rw_per_token").desc("Token for Pre RD/WR").default_val(16);        
       m_scheduler = create_child_ifce<IScheduler>();
       m_refresh = create_child_ifce<IRefreshManager>();    
       m_rowpolicy = create_child_ifce<IRowPolicy>();    
@@ -812,9 +817,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             }
             if(host_access == 0 || ndp_access == 0) {
               // Max Cap 
-              m_rowpolicy->update_cap(pch_id,bg_id,bk_id,128);
+              m_rowpolicy->update_cap(pch_id,0,bg_id,bk_id,128);
             } else {
-              m_rowpolicy->update_cap(pch_id,bg_id,bk_id,16);
+              m_rowpolicy->update_cap(pch_id,0,bg_id,bk_id,m_ndp_row_hit_low_cap);
             }
           }
         }             
@@ -1340,13 +1345,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             
           //
           if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) {
-            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] < 128)
+            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] < (m_token_per_pre_rw*8))
               m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]++;
           }        
           
           if(req_it->command == m_cmds.PRE_RD || req_it->command == m_cmds.PRE_RDA) {
-            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] >= 16)
-              m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]-=16;            
+            if(m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]] >= m_token_per_pre_rw)
+              m_dram_ndp_rd_token[req_it->addr_vec[psuedo_ch_idx]]-= m_token_per_pre_rw;            
           }
 
           int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
@@ -1611,7 +1616,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         size_t num_dram_wr = m_num_wr_cnts[pch_idx] + m_num_dram_wr_cnts[pch_idx] + m_num_post_wr_cnts[pch_idx];
         size_t num_dram_rd = m_num_rd_cnts[pch_idx] + m_num_dram_rd_cnts[pch_idx]; 
         elaped_time = m_clk - m_last_ndp_dram_wr[pch_idx];
-        if(m_dram_ndp_rd_token[pch_idx]>=16 || m_num_dram_rd_cnts[pch_idx] == 0)
+        if(m_dram_ndp_rd_token[pch_idx]>=m_token_per_pre_rw || m_num_dram_rd_cnts[pch_idx] == 0)
           m_enable_pre_rd[pch_idx] = true;
         else 
           m_enable_pre_rd[pch_idx] = false;
