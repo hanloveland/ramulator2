@@ -826,6 +826,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }
 
       //Update Max NDP Read/Write Requests
+      // Fix Max NDP Read/Write
+      /*
       if(m_clk%32 == 0) {
         for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
           int rd_buf_headroom = buf_size - m_read_buffers[pch_id].size();          
@@ -847,6 +849,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }         
         }
       }   
+      */
       m_avg_active_buffer+=m_active_buffer.size();
       for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
         m_avg_read_buffers[pch_id]+=m_read_buffers[pch_id].size();
