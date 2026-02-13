@@ -51,13 +51,16 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       uint64_t avg_outstanding_reads;
       uint64_t reach_max_outstanding_reads;
       uint64_t reach_controller_buffer;
+      uint64_t issued_rd;
+      uint64_t issued_wr;
+      
       
       CoreState(int id, size_t mshr_size) 
         : core_id(id), curr_idx(0), max_outstanding(mshr_size), m_max_trace_inst(0), is_ndp_trace(false), is_ndp_done(false), repeat_trace_count(0), repeat_trace(1),
           total_read_requests(0), total_write_requests(0), 
           completed_reads(0), total_read_latency(0), 
           avg_outstanding_reads(0), reach_max_outstanding_reads(0),
-          reach_controller_buffer(0) {}
+          reach_controller_buffer(0), issued_rd(0), issued_wr(0)  {}
       
       bool is_finished() const {
         return (repeat_trace_count >= repeat_trace);      
@@ -216,6 +219,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
           if (t.is_write) {
             // Write is fire-and-forget
             core->total_write_requests++;
+            core->issued_wr++;
             if (m_debug_mode) {
               m_logger->debug("Core {} issued WRITE (addr={:#x})", 
                              core->core_id, t.addr);
@@ -228,7 +232,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
             
             core->outstanding_reads[req_id] = out_req;
             core->total_read_requests++;
-
+            core->issued_rd++;
             if (m_debug_mode) {
               m_logger->debug("Core {} issued READ {} (addr={:#x}, outstanding={})", 
                              core->core_id, req_id, t.addr, core->outstanding_reads.size());
@@ -365,7 +369,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
     void log_progress() {
       m_logger->info("=== Cycle {} Progress ===", m_current_cycle);
       for (auto core : m_cores) {
-        m_logger->info("  Core {}: {}/{} issued (RD:{}, WR:{}), outstanding_reads:{}, avg_rd_latency={:.1f} cycles maxoustanding_read:{}, full_controller_buffer:{}", 
+        m_logger->info("  Core {}: {}/{} issued (RD:{}, WR:{}), outstanding_reads:{}, avg_rd_latency={:.1f} cycles, Issued Read:{}, Issued Write:{}", 
                       core->core_id, 
                       core->curr_idx, 
                       core->trace.size(),
@@ -373,11 +377,13 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
                       core->total_write_requests,
                       core->avg_outstanding_reads/stat_interval,
                       core->avg_read_latency(),
-                      core->reach_max_outstanding_reads,
-                      core->reach_controller_buffer);
+                      core->issued_rd,
+                      core->issued_wr);
         core->avg_outstanding_reads = 0;
         core->reach_max_outstanding_reads = 0;
         core->reach_controller_buffer = 0;      
+        core->issued_rd = 0;
+        core->issued_wr = 0;
       }
     }
 

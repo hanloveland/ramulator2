@@ -956,56 +956,60 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       if(pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id] >= pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size())
         pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id] = 0;
 
-      int slot_idx = pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id];        
-      
-      bool is_read;
-      if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("RD")) 
-        is_read = true;
-      else if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("WR")) 
-        is_read = false;
-      else 
-        throw std::runtime_error("Invalid NDP-launch Request Opcode!");      
+      int start_slot_idx = pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id];        
+      for(int i = 0; i < pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size(); i++) {
+        int slot_idx = (i + start_slot_idx) % pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size();
+        bool is_read;
+        if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("RD")) 
+          is_read = true;
+        else if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("WR")) 
+          is_read = false;
+        else 
+          throw std::runtime_error("Invalid NDP-launch Request Opcode!");      
 
-      // Generate Request
-      Request req = Request(0,is_read ? Request::Type::Read : Request::Type::Write);
-      m_addr_mapper->apply(req);
-      req.addr_vec[m_dram->m_levels("channel")]       = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].ch;
-      req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].pch;
-      req.addr_vec[m_dram->m_levels("bankgroup")]     = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bg;
-      req.addr_vec[m_dram->m_levels("bank")]          = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bk;
-      req.addr_vec[m_dram->m_levels("row")]           = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].row;
-      req.addr_vec[m_dram->m_levels("column")]        = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col;
-      req.ndp_id                                      = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].id;
-      req.is_ndp_req                                  = true;
-      req.arrive                                      = m_clk;
-      req.is_trace_core_req                           = true;
-      // Send NDP-Launch Request to Memory Controller 
-      bool issue_req;
-      req.is_trace_core_req = true;
-      issue_req = m_controllers[ch_id]->send(req);            
-      if(issue_req) {
-        #ifdef NDP_DEBUG
-        std::cout<<"["<<m_clk<<"] [HSNC] Send : ";
-        m_dram->print_req(req);
-        #endif         
+        // Generate Request
+        Request req = Request(0,is_read ? Request::Type::Read : Request::Type::Write);
+        m_addr_mapper->apply(req);
+        req.addr_vec[m_dram->m_levels("channel")]       = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].ch;
+        req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].pch;
+        req.addr_vec[m_dram->m_levels("bankgroup")]     = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bg;
+        req.addr_vec[m_dram->m_levels("bank")]          = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bk;
+        req.addr_vec[m_dram->m_levels("row")]           = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].row;
+        req.addr_vec[m_dram->m_levels("column")]        = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col;
+        req.ndp_id                                      = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].id;
+        req.is_ndp_req                                  = true;
+        req.arrive                                      = m_clk;
+        req.is_trace_core_req                           = true;
+        // Send NDP-Launch Request to Memory Controller 
+        bool issue_req;
+        req.is_trace_core_req = true;
+        issue_req = m_controllers[ch_id]->send(req);            
+        if(issue_req) {
+          #ifdef NDP_DEBUG
+          std::cout<<"["<<m_clk<<"] [HSNC] Send : ";
+          m_dram->print_req(req);
+          #endif         
 
-        if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt == pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opsize) {
-          // Remove Done Request
-          pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].begin() + slot_idx);
-          std::string msg = std::string(" One NL-Req Done! Remove from addresss Generator Slot (Remained ") + std::to_string(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size()) + std::string(" inst)");
-          DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, msg);
+          if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt == pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opsize) {
+            // Remove Done Request
+            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].begin() + slot_idx);
+            std::string msg = std::string(" One NL-Req Done! Remove from addresss Generator Slot (Remained ") + std::to_string(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size()) + std::string(" inst)");
+            DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, msg);
+          } else {
+            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt++;
+            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col++;
+            // Round-Robin
+            pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id]++;
+          }
+
+          // If success, stop for-loop
+          break;
         } else {
-          pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt++;
-          pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col++;
-          // Round-Robin
-          pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id]++;
+          // #ifdef NDP_DEBUG
+          // std::cout<<"["<<m_clk<<"] [HSNC] Fail Send : ";
+          // m_dram->print_req(req);
+          // #endif                
         }
-
-      } else {
-        // #ifdef NDP_DEBUG
-        // std::cout<<"["<<m_clk<<"] [HSNC] Fail Send : ";
-        // m_dram->print_req(req);
-        // #endif                
       }
     }
 
