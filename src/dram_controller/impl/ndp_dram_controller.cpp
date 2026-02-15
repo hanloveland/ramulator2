@@ -329,6 +329,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     size_t win_sz = 128;
     size_t long_win_sz = 512;
     float target_ndp_ratio;
+    size_t m_ndp_req_per_bank;
     std::vector<size_t> m_normal_acc_in_per_pch;
     std::vector<size_t> m_normal_acc_out_per_pch;
     std::vector<size_t> m_ndp_acc_in_per_pch;
@@ -373,6 +374,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_token_per_pre_rw  = param<size_t>("pre_rw_per_token").desc("Token for Pre RD/WR").default_val(16);        
       target_ndp_ratio = param<float>("target_ndp_ratio").desc("Target NDP/Host Access Issue Ratio").default_val(3.0f);
       abs_max_ndp_reqs_threshold = param<float>("abs_ndp_high_threshold").desc("Absulute Max NDP Requests").default_val(0.5f);
+      m_ndp_req_per_bank = param<size_t>("ndp_req_per_bank").desc("Max NDP request per bank").default_val(4);
       
 
       m_scheduler = create_child_ifce<IScheduler>();
@@ -2450,15 +2452,17 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     bool can_accept_ndp_request(const Request& req, int psuedo_ch_idx, int flat_bk_idx) {
         if(req.is_ndp_req) {
           if (req.type_id == Request::Type::Read) {
-              // Check total NDP read requests (NDP_DB_RD + NDP_DRAM_RD)
-              size_t ndp_rd_req = m_num_db_rd_cnts[psuedo_ch_idx] +  m_num_dram_rd_cnts[psuedo_ch_idx];
-              return ndp_rd_req < m_max_ndp_read_reqs[psuedo_ch_idx] || 
-                     ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (ndp_rd_req < abs_max_ndp_reqs));
+            // Check total NDP read requests (NDP_DB_RD + NDP_DRAM_RD)
+            size_t ndp_rd_req = m_num_db_rd_cnts[psuedo_ch_idx] +  m_num_dram_rd_cnts[psuedo_ch_idx];
+            bool enable_bk_lvl = ((ndp_rd_req < abs_max_ndp_reqs)) &&
+                                 ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] == 0 < m_ndp_req_per_bank)); 
+              return ndp_rd_req < m_max_ndp_read_reqs[psuedo_ch_idx] || enable_bk_lvl;
           } else if (req.type_id == Request::Type::Write) {
               // Check total NDP write requests (NDP_DB_WR + NDP_DRAM_WR)
-              size_t ndp_wr_req = m_num_db_wr_cnts[psuedo_ch_idx] +  m_num_dram_wr_cnts[psuedo_ch_idx];            
-              return ndp_wr_req < m_max_ndp_write_reqs[psuedo_ch_idx] ||
-                     ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (ndp_wr_req < abs_max_ndp_reqs));
+              size_t ndp_wr_req = m_num_db_wr_cnts[psuedo_ch_idx] +  m_num_dram_wr_cnts[psuedo_ch_idx];
+              bool enable_bk_lvl = ((ndp_wr_req < abs_max_ndp_reqs)) &&
+                                   ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] == 0 < m_ndp_req_per_bank));
+              return ndp_wr_req < m_max_ndp_write_reqs[psuedo_ch_idx] || enable_bk_lvl;
           }
         } 
         return true;  // Non-NDP requests always accepted
