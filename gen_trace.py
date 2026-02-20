@@ -2,6 +2,7 @@
 import math
 import os
 import shutil
+from pathlib import Path
 
 # 1 (x4), 2 (x8), 4 (x16)
 DRAM_SCALING=1
@@ -66,14 +67,24 @@ NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4
 NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
 NDP_TARGET_BK = 3    # To decoule host access and DRAM access
 
-# PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
-PCH_ADDRESS_SCHEME = "RoBaBgCoRaPcCH"
-# PCH_ADDRESS_SCHEME = "BaRoCoBgRaPcCH"
-# PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
-# NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
-# NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
-# NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
-NORMAL_ADDRESS_SCHEME = "RoBaCoRaCh"
+SPLIT_HIGH_BANK = False
+LINEAR_ACCESS = True
+GEN_BGCH = True
+if SPLIT_HIGH_BANK:
+    PCH_ADDRESS_SCHEME = "BhRoBlBgCoRaPcCH"
+else:
+    # PCH_ADDRESS_SCHEME = "RoCoBaBgRaPcCH"
+    PCH_ADDRESS_SCHEME = "RoBaBgCoRaPcCH"
+    # PCH_ADDRESS_SCHEME = "BaRoCoBgRaPcCH"
+    # PCH_ADDRESS_SCHEME = "RoBaBgRaCoPcCH"
+    
+if SPLIT_HIGH_BANK:
+    NORMAL_ADDRESS_SCHEME = "BhRoBlBgCoRaCh"
+else:
+    # NORMAL_ADDRESS_SCHEME = "RoCoBaRaCh"
+    # NORMAL_ADDRESS_SCHEME = "RoBaRaCoCh"
+    # NORMAL_ADDRESS_SCHEME = "RoRaCoBaCh"
+    NORMAL_ADDRESS_SCHEME = "RoBaCoRaCh"
 
 GEN_PCH_NORMAL_MODE = True
 
@@ -304,6 +315,7 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         RoBaBgRaCoPcCH
         BaRoCoBgRaPcCH
         RoBaBgCoRaPcCH
+        BhRoBlBgCoRaPcCH
     """
     address = 0
     global PCH_ADDRESS_SCHEME
@@ -348,6 +360,23 @@ def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY          
     # print(f" Address Translate CH{channel},PCH{pseudo_channel},RK{rank},BG{bg},BK{bank},RO{row},CO{col} --> 0x{address:016X}\n")        
+    elif PCH_ADDRESS_SCHEME == "BhRoBlBgCoRaPcCH":
+        if BANK_BITS != 2:
+            print("Bank Bits of BhRoBlBgCoRaPcCH must be 2!")
+            exit(1)
+        bank_low = bank & 1
+        bank_high = (bank >> 1) & 1
+        address |= (channel          & ((1 << CHANNEL_BITS) - 1))
+        address |= (pseudo_channel   & ((1 << PCHANNEL_BITS) - 1))      << (CHANNEL_BITS)
+        address |= (rank             & ((1 << RANK_BITS) - 1))          << (CHANNEL_BITS+PCHANNEL_BITS)
+        address |= (col              & ((1 << COLUMN_BITS) - 1))        << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS)
+        address |= (bg               & ((1 << BANKGROUP_BITS) - 1))     << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS)     
+        address |= (bank_low         & (1))                             << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS+BANKGROUP_BITS)        
+        address |= (row              & ((1 << ROW_BITS) - 1))           << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS+BANKGROUP_BITS+BANK_BITS + 1)
+        address |= (bank_high        & (1))                             << (CHANNEL_BITS+PCHANNEL_BITS+RANK_BITS+COLUMN_BITS+BANKGROUP_BITS+BANK_BITS + 1 + ROW_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY          
+
     return address
 
 def encode_normal_address(channel, rank, bg, bank, row, col):
@@ -355,6 +384,7 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         RoCoBaRaCh
         RoBaRaCoCh
         RoRaCoBaCh        
+        BhRoBlBgCoRaCh
     """
     address = 0
     global NORMAL_ADDRESS_SCHEME
@@ -392,10 +422,25 @@ def encode_normal_address(channel, rank, bg, bank, row, col):
         address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS)
         address |= (bank             & ((1 << NORMAL_BANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS)
         address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS+NORMAL_BANK_BITS)
+        # Shift by DRAM Acccess Granularity (64B)
+        address = address << GRANULARITY     
+    elif NORMAL_ADDRESS_SCHEME == "BhRoBlBgCoRaCh":
+        if BANK_BITS != 2:
+            print("Bank Bits of BhRoBlBgCoRaCh must be 2!")
+            exit(1)        
+        bank_low = bank & 1
+        bank_high = (bank >> 1) & 1                    
+        address |= (channel          & ((1 << NORMAL_CHANNEL_BITS) - 1))
+        address |= (rank             & ((1 << NORMAL_RANK_BITS) - 1))      << (NORMAL_CHANNEL_BITS)
+        address |= (col              & ((1 << NORMAL_COLUMN_BITS) - 1))    << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS)
+        address |= (bg               & ((1 << NORMAL_BANKGROUP_BITS) - 1)) << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS)
+        address |= (bank_low         & (1))                                << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS)
+        address |= (row              & ((1 << NORMAL_ROW_BITS) - 1))       << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS+1)
+        address |= (bank_high        & (1))                                << (NORMAL_CHANNEL_BITS+NORMAL_RANK_BITS+NORMAL_COLUMN_BITS+NORMAL_BANKGROUP_BITS+1+NORMAL_ROW_BITS)
 
         # Shift by DRAM Acccess Granularity (64B)
         address = address << GRANULARITY     
-        
+
     return address
 
 def write_trace(f, instr_type, address, data_array):
@@ -506,62 +551,259 @@ def dump_ndp_inst(f, inst_list, ch, pch):
             data_array[j] = inst_list[it*8+j]       
         write_trace(f,'ST',encode_address(ch, pch, 0, NDP_INS_MEM_BG, NDP_INS_MEM_BK, NDP_ROW, it),data_array)
 
-
 def gen_normal_req_from_row(f,start_row,num_req,req_type):
     cnt_req = 0
     done = False
-    for ro in range(NUM_ROW):
-        for rk in range(NUM_RANK):        
+    if SPLIT_HIGH_BANK:
+        if LINEAR_ACCESS and NORMAL_ADDRESS_SCHEME == "BhRoBlBgCoRaCh":
+            for ro in range(NUM_ROW):
+                for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
+                    for bg in range(NUM_BANKGROUP):
+                        for co in range(NUM_COL): 
+                            for rk in range(NUM_RANK):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break               
+        else:
+            for ro in range(NUM_ROW):
+                for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
+                    for co in range(NUM_COL): 
+                        for bg in range(NUM_BANKGROUP):
+                            for rk in range(NUM_RANK):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break        
+    elif GEN_BGCH:
+        for ro in range(NUM_ROW):
             for ba in range(NUM_BANK):
                 for co in range(NUM_COL): 
-                    for bg in range(NUM_BANKGROUP):
+                    for rk in range(NUM_RANK):        
                         for ch in range(NUM_CHANNEL):
-                            write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
-                            cnt_req+=1
-                            if cnt_req == num_req:
-                                done = True
-                            
+                            for bg in range(NUM_BANKGROUP):
+                                write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                cnt_req+=1
+                                if cnt_req == num_req:
+                                    done = True
+                                
+                                if done == True:
+                                    break
                             if done == True:
-                                break
+                                break    
                         if done == True:
-                            break    
+                            break 
                     if done == True:
-                        break 
+                        break
                 if done == True:
                     break
             if done == True:
-                break
-        if done == True:
-            break        
+                break             
+    else:
+        if LINEAR_ACCESS and NORMAL_ADDRESS_SCHEME == "RoBaCoRaCh":
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for bg in range(NUM_BANKGROUP):
+                        for co in range(NUM_COL): 
+                            for rk in range(NUM_RANK):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break        
+        else:
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for co in range(NUM_COL): 
+                        for bg in range(NUM_BANKGROUP):
+                            for rk in range(NUM_RANK):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break        
 
 def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
     cnt_req = 0
     done = False
-    for ro in range(NUM_ROW):
-        for ba in range(NUM_BANK):
-            for co in range(NUM_COL): 
-                for bg in range(NUM_BANKGROUP):
-                    for pch in range(int(NUM_PSEUDOCHANNEL)):        
-                        for ch in range(NUM_CHANNEL):
-                            write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))
-                                                         
-                            cnt_req+=1
-                            if cnt_req == num_req:
-                                done = True
-                            
+    if SPLIT_HIGH_BANK:    
+        if LINEAR_ACCESS and PCH_ADDRESS_SCHEME == "BhRoBlBgCoRaPcCH":
+            for ro in range(NUM_ROW):
+                for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
+                    for bg in range(NUM_BANKGROUP):
+                        for co in range(NUM_COL): 
+                            for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                            
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
                             if done == True:
-                                break
+                                break 
                         if done == True:
-                            break    
+                            break
                     if done == True:
-                        break 
+                        break
                 if done == True:
-                    break
-            if done == True:
-                break
-        if done == True:
-            break     
-
+                    break               
+        else:
+            for ro in range(NUM_ROW):
+                for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
+                    for co in range(NUM_COL): 
+                        for bg in range(NUM_BANKGROUP):
+                            for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                            
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break     
+    elif GEN_BGCH:
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for co in range(NUM_COL): 
+                        for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                            for ch in range(NUM_CHANNEL):
+                                for bg in range(NUM_BANKGROUP):
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                                
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break   
+    else:
+        if LINEAR_ACCESS and PCH_ADDRESS_SCHEME == "RoBaBgCoRaPcCH":
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for bg in range(NUM_BANKGROUP):
+                        for co in range(NUM_COL): 
+                            for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))
+                                                                
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break       
+        else:
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for co in range(NUM_COL): 
+                        for bg in range(NUM_BANKGROUP):
+                            for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                                for ch in range(NUM_CHANNEL):
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                                
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
+                                if done == True:
+                                    break    
+                            if done == True:
+                                break 
+                        if done == True:
+                            break
+                    if done == True:
+                        break
+                if done == True:
+                    break       
+                          
 def cal_it(input_size, scaling):
     if scaling == 4:
         row_size = 8192 * 2
