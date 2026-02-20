@@ -130,7 +130,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     /*
       Gem5 Simulation with Trace Core (Virtual Core)
     */
-
+    bool m_host_access = false;
     bool m_trace_core_enable = false;    
     bool m_ndp_trace = true;
     // Copy Structure within loadstore_ncore_trace.cpp
@@ -444,15 +444,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           }
       }
       
-
+      m_host_access = true;
       return is_success;
     };
     
     void tick() override {
       m_clk++;
       // Trace Mode :  Send Trace-based Request to DRAM System
-      if(m_trace_core_enable) try_issue_requests(); 
-
+      if(m_trace_core_enable && !m_host_access) try_issue_requests(); 
+      m_host_access = false;
       m_dram->tick();
       for (auto controller : m_controllers) {
         controller->tick();
