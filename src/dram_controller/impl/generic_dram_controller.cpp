@@ -105,11 +105,21 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     std::vector<uint64_t> s_idle_interval_over_1000_cnt; // over 1000  
     #endif 
 
+    // Adaptive OpenPage Policy 
+    std::vector<int> m_open_row;
+    int num_ranks = -1;    
+    int num_bankgroups = -1;
+    int num_banks = -1;
+    int rank_idx = 0;
+    int bankgroup_idx = 0;
+    int bank_idx = 0;
+    int row_idx = 0;
+    uint32_t m_adaptive_row_cap;
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
       m_wr_high_watermark = param<float>("wr_high_watermark").desc("Threshold for switching to write mode.").default_val(0.8f);
-
+      m_adaptive_row_cap = param<size_t>("adaptive_row_cap").desc("Row Buffer Hit Cap for Adaptive Open-Page Policy").default_val(16);      
       m_scheduler = create_child_ifce<IScheduler>();
       m_refresh = create_child_ifce<IRefreshManager>();    
       m_rowpolicy = create_child_ifce<IRowPolicy>();    
@@ -132,6 +142,14 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       m_prefetched_buffer.max_size = 16*4;
       m_write_buffer.max_size = 128;
       m_read_buffer.max_size = 128;
+
+      num_ranks = m_dram->get_level_size("rank");  
+      num_bankgroups = m_dram->get_level_size("bankgroup");  
+      num_banks = m_dram->get_level_size("bank");  
+      rank_idx = m_dram->m_levels("rank");
+      bankgroup_idx = m_dram->m_levels("bankgroup");
+      bank_idx = m_dram->m_levels("bank"); 
+      row_idx = m_dram->m_levels("row"); 
       // std::cout<<m_active_buffer.max_size<<std::endl;
       // exit(1);
 
@@ -221,6 +239,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       s_idle_interval_1000_cnt.resize(m_num_rank,0);
       s_idle_interval_over_1000_cnt.resize(m_num_rank,0);
       #endif
+
+      // Record Row address per bank for Adaptive Open-Page Policy
+      m_open_row.resize(num_ranks*num_bankgroups*num_banks, -1);
     };
 
     bool send(Request& req) override {
@@ -320,6 +341,28 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         }
       }
       #endif
+
+      // Update Each Row Cap       
+      for(int rk_id=0;rk_id<(num_ranks);rk_id++) {
+        auto rd_buffer = m_read_buffers[rk_id];
+        for (auto next = std::next(rd_buffer.begin(), 1); next != rd_buffer.end(); next++) {          
+          int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_banks + next->addr_vec[rank_idx] * num_bankgroups*num_banks;          
+          if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
+            // Update Cap 
+            m_rowpolicy->update_cap(0,next->addr_vec[rank_idx],next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
+          } 
+        }
+        auto wr_buffer = m_write_buffers[rk_id];
+        for (auto next = std::next(wr_buffer.begin(), 1); next != wr_buffer.end(); next++) {          
+          int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_banks + next->addr_vec[rank_idx] * num_bankgroups*num_banks;          
+          if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
+            // Update Cap 
+            m_rowpolicy->update_cap(0,next->addr_vec[rank_idx],next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
+          } 
+        }
+      }      
+
+
       // 1. Serve completed reads
       serve_completed_reads();
 
@@ -356,6 +399,25 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
           int nRFC_latency = m_dram->m_timing_vals("nRFC1");
           int rank_addr = req_it->addr_vec[m_rank_addr_idx];
           s_num_refresh_cc_per_rank[rank_addr]+=nRFC_latency;
+        }
+
+        if(req_it->command == m_dram->m_commands("ACT")) {
+          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups*num_banks;          
+          m_open_row[flat_bank_id] = req_it->addr_vec[row_idx];
+          m_rowpolicy->update_cap(0,req_it->addr_vec[rank_idx],req_it->addr_vec[bankgroup_idx],req_it->addr_vec[bank_idx],128);          
+        }
+        else if(req_it->command == m_dram->m_commands("PRE")) {
+          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups*num_banks;          
+          m_open_row[flat_bank_id] = -1;          
+        } else if(req_it->command == m_dram->m_commands("PREA")) {
+          // Reset All Bank in the Rank
+          int rank_id = req_it->addr_vec[rank_idx];
+          for(int bg_idx=0;bg_idx<num_bankgroups; bg_idx++) {
+            for(int bk_idx=0;bk_idx<num_banks; bk_idx++) {
+              int flat_bank_id = bk_idx + bg_idx * num_banks + rank_id * num_bankgroups*num_banks;          
+              m_open_row[flat_bank_id] = -1;
+            }          
+          }
         }
 
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue

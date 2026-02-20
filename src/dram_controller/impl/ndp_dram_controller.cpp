@@ -205,6 +205,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     int psuedo_ch_idx = 0;
     int bankgroup_idx = 0;
     int bank_idx = 0;
+    int row_idx = 0;
     std::vector<int> db_prefetch_cnt_per_pch;
     std::vector<int> db_prefetch_rd_cnt_per_pch;
     std::vector<int> db_prefetch_wr_cnt_per_pch;
@@ -359,6 +360,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<size_t> m_avg_wr_ndp_que_req;
     std::vector<size_t> m_avg_ndp_ratio;
     std::vector<size_t> m_pre_ndp_ratio;
+
+    // Adaptive OpenPage Policy 
+    std::vector<int> m_open_row;
+    uint32_t m_adaptive_row_cap;
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -375,7 +380,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       target_ndp_ratio = param<float>("target_ndp_ratio").desc("Target NDP/Host Access Issue Ratio").default_val(3.0f);
       abs_max_ndp_reqs_threshold = param<float>("abs_ndp_high_threshold").desc("Absulute Max NDP Requests").default_val(0.5f);
       m_ndp_req_per_bank = param<size_t>("ndp_req_per_bank").desc("Max NDP request per bank").default_val(4);
-      
+      m_adaptive_row_cap = param<size_t>("adaptive_row_cap").desc("Row Buffer Hit Cap for Adaptive Open-Page Policy").default_val(16);   
 
       m_scheduler = create_child_ifce<IScheduler>();
       m_refresh = create_child_ifce<IRefreshManager>();    
@@ -405,6 +410,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       psuedo_ch_idx = m_dram->m_levels("pseudochannel");
       bankgroup_idx = m_dram->m_levels("bankgroup");
       bank_idx = m_dram->m_levels("bank");
+      row_idx = m_dram->m_levels("row");
 
       m_use_prefetch = m_dram->get_use_prefetch();
 
@@ -685,6 +691,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       //   io_boost = true;
       // }
 
+      // Record Row address per bank for Adaptive Open-Page Policy
+      m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank,-1);  
+
     };
 
     bool send(Request& req) override {
@@ -939,7 +948,6 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       }
 
       // Update Each Row Cap 
-
       for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
         for(int bg_id=0;bg_id<num_bankgroup;bg_id++) {
           for(int bk_id=0;bk_id<num_bank;bk_id++) {
@@ -965,6 +973,26 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }
         }             
       }
+
+      for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
+        auto rd_buffer = m_read_buffers[pch_id];
+        for (auto next = std::next(rd_buffer.begin(), 1); next != rd_buffer.end(); next++) {          
+          int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_bank + next->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
+          if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
+            // Update Cap 
+            m_rowpolicy->update_cap(next->addr_vec[psuedo_ch_idx],0,next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
+          } 
+        }
+        auto wr_buffer = m_write_buffers[pch_id];
+        for (auto next = std::next(wr_buffer.begin(), 1); next != wr_buffer.end(); next++) {          
+          int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_bank + next->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
+          if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
+            // Update Cap 
+            m_rowpolicy->update_cap(next->addr_vec[psuedo_ch_idx],0,next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
+          } 
+        }
+      }
+
 
       //Update Max NDP Read/Write Requests
       // Fix Max NDP Read/Write
@@ -1410,6 +1438,26 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             m_dram->print_req(*req_it);
         }
         */
+
+        if(req_it->command == m_cmds.ACT) {
+          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
+          m_open_row[flat_bank_id] = req_it->addr_vec[row_idx];
+          m_rowpolicy->update_cap(req_it->addr_vec[psuedo_ch_idx],0,req_it->addr_vec[bankgroup_idx],req_it->addr_vec[bank_idx],128);          
+        }
+        else if(req_it->command == m_cmds.PRE) {
+          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
+          m_open_row[flat_bank_id] = -1;          
+        } else if(req_it->command == m_cmds.PREA) {
+          // Reset All Bank in the Rank (pch)
+          int pch_id = req_it->addr_vec[psuedo_ch_idx];
+          for(int bg_idx=0;bg_idx<num_bankgroup; bg_idx++) {
+            for(int bk_idx=0;bk_idx<num_bank; bk_idx++) {
+              int flat_bank_id = bk_idx + bg_idx * num_bank + pch_id * num_bankgroup*num_bank;          
+              m_open_row[flat_bank_id] = -1;
+            }          
+          }
+        }
+
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
         if (req_it->command == req_it->final_command) {          
           if(req_it->is_ndp_req) {
