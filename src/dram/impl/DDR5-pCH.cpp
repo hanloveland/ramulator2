@@ -1,5 +1,6 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
+#include <iomanip>
 
 // #define PRINT_DEBUG
 
@@ -566,6 +567,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                     ndp_inst_slot_per_pch[pch_idx][0].cnt++;
                   }
                 } else {
+                  print_ndp_all_pch_status();
+                  print_ndp_pch_inst_mem(pch_idx);                   
                   throw std::runtime_error("Invalid NDP Command during self exec mode!");
                 }
                 
@@ -637,7 +640,7 @@ class DDR5PCH : public IDRAM, public Implementation {
               }
 
               // NDP Status: Wait DONE END
-            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {      
               // NDP Status: Wait DONE
               ndp_pc_per_pch[pch_idx] = 0;
               ndp_status_per_pch[pch_idx] = m_ndp_status("idle");
@@ -669,6 +672,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                   DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec -> self_exec_barrier"); 
                 } 
                 else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
+                  print_ndp_all_pch_status();
+                  print_ndp_pch_inst_mem(pch_idx);                   
                   throw std::runtime_error("Not Allowed during self_exec");
                 } 
                 else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_OFF")) {
@@ -726,6 +731,8 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP DB Access
               if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
                 if(ndp_addr_per_pch[pch_idx][m_levels["row"]] != ndp_access_row) {
+                  print_ndp_all_pch_status();
+                  print_ndp_pch_inst_mem(pch_idx);                   
                   throw std::runtime_error("Invalid Address to access NDP!");
                 } else {
                   if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ctrl_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ctrl_access_bg) {
@@ -733,11 +740,15 @@ class DDR5PCH : public IDRAM, public Implementation {
                     if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
                       if(ndp_payload_valid_per_pch[pch_idx]) {
                         if(pipe_ndp_payload_per_pch[pch_idx][0].size() != 8) {
+                          print_ndp_all_pch_status();
+                          print_ndp_pch_inst_mem(pch_idx);                           
                           throw std::runtime_error("Invalid Payload Size!!");
                         } else {
                           if(pipe_ndp_payload_per_pch[pch_idx][0][0] == 1) {
                             if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string("NDP status : ") + std::string(m_ndp_status(ndp_status_per_pch[pch_idx]))));                                              
+                              print_ndp_all_pch_status();
+                              print_ndp_pch_inst_mem(pch_idx); 
                               throw std::runtime_error("NDP Unit start when is not idle");
                             } else {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");           
@@ -758,6 +769,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                     if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
 
                       if(ndp_status_per_pch[pch_idx] != m_ndp_status("idle")) {
+                        print_ndp_all_pch_status();
+                        print_ndp_pch_inst_mem(pch_idx);                         
                         std::string msg = std::to_string(m_clk) + std::string("  - NDP Write when NDP unit is exec! CH:") + std::to_string(ch) + std::string(" PCH:") + std::to_string(pch);
                         throw std::runtime_error(msg);
                       }
@@ -783,15 +796,21 @@ class DDR5PCH : public IDRAM, public Implementation {
                     
                   } else {
                     // Access Not Mapped Address
+                    print_ndp_all_pch_status();
+                    print_ndp_pch_inst_mem(pch_idx); 
                     throw std::runtime_error("Invalid Not Mapped NDP Address!");
                   }
                 }
               } else if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RDA"]) {
                 // NDP Exeuction with RD Data   
                 if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+                  print_ndp_all_pch_status();
+                  print_ndp_pch_inst_mem(pch_idx);         
                   throw std::runtime_error("NDP DRAM RD when NDP is idle!!");
                 } else {
                   if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                    print_ndp_all_pch_status();
+                    print_ndp_pch_inst_mem(pch_idx);         
                     throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
                   } else {
                     // Find Matching Inst
@@ -817,6 +836,8 @@ class DDR5PCH : public IDRAM, public Implementation {
                        std::cout<<"<-> DRAM RD PCH ["<<ndp_id_per_pch[pch_idx]<<"] BG ["<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]]<<"] BK ["<<ndp_addr_per_pch[pch_idx][m_levels["bank"]]<<"]"<<std::endl;
                        std::cout<<" NDP Status : "<<ndp_status_per_pch[pch_idx]<<std::endl;
                        std::cout<<" NDP PC: "<<ndp_pc_per_pch[pch_idx]<<std::endl;
+                      print_ndp_all_pch_status();
+                      print_ndp_pch_inst_mem(pch_idx);                        
                       throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
@@ -834,9 +855,13 @@ class DDR5PCH : public IDRAM, public Implementation {
               } else if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_WR"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_WRA"]) {
                 // NDP Write Back to DRAM (Data Memory)
                 if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
+                  print_ndp_all_pch_status();
+                  print_ndp_pch_inst_mem(pch_idx);                   
                   throw std::runtime_error("NDP DRAM WR when NDP is idle!!");
                 } else {
                   if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
+                    print_ndp_all_pch_status();
+                    print_ndp_pch_inst_mem(pch_idx);                     
                     throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
                   } else {
                     // Find Matching Inst
@@ -859,7 +884,9 @@ class DDR5PCH : public IDRAM, public Implementation {
                         " id "<<ndp_inst_slot_per_pch[pch_idx][i].id<<" bg "<<ndp_inst_slot_per_pch[pch_idx][i].bg<<
                         " cnt "<<ndp_inst_slot_per_pch[pch_idx][i].cnt<<
                         " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
-                       }                      
+                       }                  
+                      print_ndp_all_pch_status();
+                      print_ndp_pch_inst_mem(pch_idx);                            
                       throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM WR!!");
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
@@ -2404,7 +2431,74 @@ class DDR5PCH : public IDRAM, public Implementation {
       std::cout<<" - Command Power (W)      : "<<command_power<< " / "<< s_total_cmd_power <<std::endl;      
       std::cout<<" - Rank Power (W)         : "<<total_power<< " / "<< s_total_power <<std::endl;           
     }
+
+    void print_ndp_all_pch_status() const {
+        static constexpr const char* ndp_status_str[] = {
+            "idle", "run", "barrier", "wait_done",
+            "self_exec_wait", "self_exec", "self_exec_done",
+            "self_exec_barrier", "done"
+        };
+
+        std::cout << "=== NDP PCH Status ===" << std::endl;
+        for (int pch_idx = 0; pch_idx < (int)ndp_status_per_pch.size(); ++pch_idx) {
+            int status_val = ndp_status_per_pch[pch_idx];
+            const char* status_str = (status_val >= 0 && status_val < (int)m_ndp_status.size())
+                                     ? ndp_status_str[status_val]
+                                     : "unknown";
+    
+            std::cout << "  [PCH " << std::setw(2) << pch_idx << "]"
+                      << " status = " << std::setw(2) << status_val
+                      << " (" << std::left << std::setw(20) << status_str << ")"
+                      << " | PC = " << std::dec << std::setfill(' ') << ndp_pc_per_pch[pch_idx] << ""
+                      << std::endl;
+        }
+        std::cout << "======================" << std::endl;
+    }
+
+    void print_ndp_pch_inst_mem(int pch_idx) {
+    // Reverse map: opcode int -> string
+    static const std::map<int, std::string> ndp_opcode_str = []() {
+        std::map<int, std::string> rev;
+        for (const auto& [name, code] : m_ndp_inst_op)
+            rev[code] = name;
+        return rev;
+    }();
+
+    const auto& inst_mem = ins_mem_per_pch[pch_idx];
+    int current_pc = ndp_pc_per_pch[pch_idx];
+
+    std::cout << "=== NDP Inst Memory [PCH " << pch_idx << "] ===" << std::endl;
+    std::cout << std::left
+              << std::setw(6)  << "PC"
+              << std::setw(4)  << "CUR"
+              << std::setw(16) << "OPCODE"
+              << std::setw(8)  << "OPSIZE"
+              << std::setw(8)  << "ID"
+              << std::setw(6)  << "BG"
+              << std::setw(6)  << "BK"
+              << std::endl;
+    std::cout << std::string(54, '-') << std::endl;
+
+    for (int pc = 0; pc < (int)inst_mem.size(); ++pc) {
+        Inst_Slot inst = decoding_inst(inst_mem[pc]);
+
+        auto it = ndp_opcode_str.find(inst.opcode);
+        std::string opcode_name = (it != ndp_opcode_str.end()) ? it->second : "UNKNOWN(" + std::to_string(inst.opcode) + ")";
+
+        std::cout << std::left
+                  << std::setw(6)  << pc
+                  << std::setw(4)  << (pc == current_pc ? ">>>" : "")
+                  << std::setw(16) << opcode_name
+                  << std::setw(8)  << inst.opsize
+                  << std::setw(8)  << inst.id
+                  << std::setw(6)  << inst.bg
+                  << std::setw(6)  << inst.bk
+                  << std::endl;
+    }
+    std::cout << "========================================" << std::endl;
+    }    
 };
+
 
 
 }        // namespace Ramulator
