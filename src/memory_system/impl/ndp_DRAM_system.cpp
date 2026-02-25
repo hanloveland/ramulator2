@@ -9,6 +9,7 @@
 
 // #define NDP_DEBUG
 #define DIMM_LVL_BUF
+#define PCH_DEBUG
 
 #ifdef NDP_DEBUG
 #define DEBUG_PRINT(clk, unit_str, dimm_id, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] DIMM["<<dimm_id<<"] PCH["<<pch<<"] "<<msg<<std::endl; } while(0)
@@ -50,6 +51,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       NDP_WAIT,
       NDP_DONE
     };
+
+    // std::unordered_map<int, std::string> ndp_ctrl_status_to_str;
+
     // NDP Access Instruction Opcode
     std::map<std::string, int> m_ndp_access_inst_op = {
       {"RD",         0},
@@ -61,6 +65,42 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       {"WAIT",       6},
       {"DONE",       15}      
     };
+
+    enum NDP_Op {
+        NDP_ACC_OP_RD = 0,
+        NDP_ACC_OP_WR = 1,
+        NDP_ACC_OP_BAR = 2,
+        NDP_ACC_OP_WAIT_RES = 3,
+        NDP_ACC_OP_LOOP_START = 4,
+        NDP_ACC_OP_LOOP_END = 5,
+        NDP_ACC_OP_WAIT = 6,
+        NDP_ACC_OP_DONE = 15
+    };
+
+    std::unordered_map<int, std::string> ndp_ctrl_status_to_str = {
+      {NDP_IDLE, "NDP_IDLE"},
+      {NDP_ISSUE_START, "NDP_ISSUE_START"},
+      {NDP_BEFORE_RUN, "NDP_BEFORE_RUN"},
+      {NDP_RUN, "NDP_RUN"},
+      {NDP_BAR, "NDP_BAR"},
+      {NDP_WAIT_RES, "NDP_WAIT_RES"},
+      {NDP_WAIT, "NDP_WAIT"},
+      {NDP_DONE, "NDP_DONE"}
+    };
+
+    std::unordered_map<int, std::string> op_to_str = {
+      {NDP_ACC_OP_RD, "RD"}, 
+      {NDP_ACC_OP_WR, "WR"}, 
+      {NDP_ACC_OP_BAR, "BAR"}, 
+      {NDP_ACC_OP_WAIT_RES, "WAIT_RES"},
+      {NDP_ACC_OP_LOOP_START, "LOOP_START"}, 
+      {NDP_ACC_OP_LOOP_END, "LOOP_END"},
+      {NDP_ACC_OP_WAIT, "WAIT"}, 
+      {NDP_ACC_OP_DONE, "DONE"}
+    };    
+
+
+    // static const std::unordered_map<int, std::string> op_to_str;
     // DIMM-level request buffer 
     std::vector<std::vector<uint64_t>>                    dimm_lvl_req_buffer;
     std::vector<std::vector<std::vector<uint64_t>>>       pch_lvl_req_buffer;
@@ -92,6 +132,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     bool                                                  all_nl_req_buffer_empty;
 
 
+    #ifdef PCH_DEBUG
+    std::vector<std::vector<std::vector<AccInst_Slot>>>   pch_lvl_history;
+    int                                                   pch_lvl_history_max;
+    #endif 
     /* Deprecated variable
     std::vector<AccInst_Slot>          ndp_access_infos;
     NDP_CTRL_STATUS                    ndp_ctrl_status;
@@ -362,7 +406,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       pch_lvl_hsnc_nl_addr_empty_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
       pch_lvl_hsnc_nl_addr_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
       pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<size_t>>(m_num_subch*num_pseudochannel,std::vector<size_t>(8,0)));     
-    
+          
+      #ifdef PCH_DEBUG      
+      pch_lvl_history.resize(m_num_dimm,std::vector<std::vector<AccInst_Slot>>(m_num_subch*num_pseudochannel,std::vector<AccInst_Slot>(0,AccInst_Slot())));
+      pch_lvl_history_max = 32;
+      #endif
 
       // NDP Trace Initialization
       m_trace_core_enable = param<bool>("trace_core_enable").desc("Enable Trace Simulation Core with Gem5").default_val(false);
@@ -458,6 +506,41 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         controller->tick();
       }
 
+      #ifdef PCH_DEBUG
+        int error_pch;
+        error_pch = m_dram->get_pch_error();
+
+        if(error_pch != -1) {
+          std::cout<<" ============= PCH ERROR "<<error_pch<<"==========="<< std::endl;
+          std::cout<<" Print All PCH HSNC Status "<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) { 
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              int dram_lvl_pch_id = dimm_id*m_num_subch*num_pseudochannel + pch_id;
+              std::cout<<"["<<dimm_id<<"]["<<pch_id<<"] --> "<<dram_lvl_pch_id;
+              std::cout<<" : "<<ndp_ctrl_status_to_str.at(static_cast<NDP_CTRL_STATUS>(pch_lvl_hsnc_status[dimm_id][pch_id]))<<std::endl;                                        
+            }
+          }      
+          std::cout<<" Print All PCH Req History "<<std::endl;
+          // std::cout<<"dimm/pch_lvl_req_buffer"<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) { 
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              int dram_lvl_pch_id = dimm_id*m_num_subch*num_pseudochannel + pch_id;
+              std::cout<<"["<<dimm_id<<"]["<<pch_id<<"] --> "<<dram_lvl_pch_id<<std::endl;
+              for(int his_idx=0;his_idx<pch_lvl_history[dimm_id][pch_id].size();his_idx++) {                                              
+                std::cout<<" - ["<<his_idx<<"] OPCODE: "<<op_to_str.at(static_cast<NDP_Op>(pch_lvl_history[dimm_id][pch_id][his_idx].opcode));
+                std::cout<<", OPSIZE: "<<pch_lvl_history[dimm_id][pch_id][his_idx].opsize;
+                std::cout<<", CH: "<<pch_lvl_history[dimm_id][pch_id][his_idx].ch;
+                std::cout<<", PCH: "<<pch_lvl_history[dimm_id][pch_id][his_idx].pch;
+                std::cout<<", BG: "<<pch_lvl_history[dimm_id][pch_id][his_idx].bg;
+                std::cout<<", BK: "<<pch_lvl_history[dimm_id][pch_id][his_idx].bk;
+                std::cout<<", ROW: "<<pch_lvl_history[dimm_id][pch_id][his_idx].row<<std::endl;
+              }
+            }
+          }
+
+          throw std::runtime_error("Detecting PCH Error");   
+        }
+      #endif 
       // Loop All DIMM 
       #ifdef NDP_DEBUG      
         if(m_clk%10000 == 0) {
@@ -597,6 +680,13 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               AccInst_Slot nl_req = decode_acc_inst(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]);
               pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].begin() + 0);
               
+              #ifdef PCH_DEBUG      
+              if(pch_lvl_history[dimm_id][pch_id].size() >= pch_lvl_history_max) {
+                pch_lvl_history[dimm_id][pch_id].erase(pch_lvl_history[dimm_id][pch_id].begin() + 0);
+              }
+              pch_lvl_history[dimm_id][pch_id].push_back(nl_req);                 
+              #endif
+
               // NDP Status Transition 
               if(nl_req.opcode == m_ndp_access_inst_op.at("BAR")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_BAR;
@@ -741,7 +831,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           std::cout<<"[HSNU] DIMM["<<dimm_id<<"][SCH1][PCH3]:"<<req.m_payload[7]<<std::endl;
           #endif 
 
-          // Update pch-lvl status reg in the dimm
+          // Update pch-lvl status reg in the dimm 
           for(int i=0;i<pch_lvl_hsnc_status[dimm_id].size();i++) {
             if(pch_lvl_hsnc_status[dimm_id][i] != NDP_IDLE && req.m_payload[i] != 0) {
               throw std::runtime_error("Ovelap Write to NDP Control Register");   

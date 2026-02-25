@@ -179,6 +179,7 @@ class IDRAM : public Clocked<IDRAM> {
    virtual bool get_use_prefetch() = 0;
    virtual int get_dq_scaling() = 0;
    virtual int get_io_boost() = 0;
+   virtual int get_pch_error() = 0;
    
   /************************************************
    *        Interface to Query Device Spec

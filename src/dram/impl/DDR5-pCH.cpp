@@ -3,12 +3,15 @@
 #include <iomanip>
 
 // #define PRINT_DEBUG
+#define DEBUG_POWER
 
 #ifdef PRINT_DEBUG
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)
 #else
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do {} while(0)
 #endif
+
+#define PCH_DEBUG
 
 namespace Ramulator {
 
@@ -469,6 +472,11 @@ class DDR5PCH : public IDRAM, public Implementation {
     // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"
     std::vector<std::vector<size_t>>                pch_dsnc_status_cnt;
 
+    #ifdef PCH_DEBUG
+    bool is_pch_error = false;
+    int error_pch = -1;
+    #endif 
+
     /*
       x4 DRAM: 8BG,4BK per BG --> 32 BK with 128 COL
         - CHx/PCHx/BK3/BG7/ROW(Highest Row): HSNC-Ctrl Reg
@@ -569,7 +577,14 @@ class DDR5PCH : public IDRAM, public Implementation {
                 } else {
                   print_ndp_all_pch_status();
                   print_ndp_pch_inst_mem(pch_idx);                   
-                  throw std::runtime_error("Invalid NDP Command during self exec mode!");
+                  #ifdef PCH_DEBUG
+                    is_pch_error = true;     
+                    error_pch = pch_idx;
+                    std::cout<<"["<<pch_idx<<"] Invalid NDP Command during self exec mode!" << std::endl;
+                  #elif 
+                    throw std::runtime_error("Invalid NDP Command during self exec mode!");
+                  #endif 
+
                 }
                 
             }                               
@@ -640,7 +655,7 @@ class DDR5PCH : public IDRAM, public Implementation {
               }
 
               // NDP Status: Wait DONE END
-            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {      
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {       
               // NDP Status: Wait DONE
               ndp_pc_per_pch[pch_idx] = 0;
               ndp_status_per_pch[pch_idx] = m_ndp_status("idle");
@@ -673,8 +688,14 @@ class DDR5PCH : public IDRAM, public Implementation {
                 } 
                 else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
                   print_ndp_all_pch_status();
-                  print_ndp_pch_inst_mem(pch_idx);                   
+                  print_ndp_pch_inst_mem(pch_idx);                
+                  #ifdef PCH_DEBUG
+                  is_pch_error = true;     
+                  error_pch = pch_idx;
+                  std::cout<<"["<<pch_idx<<"] Not Allowed during self_exec" << std::endl;
+                  #elif                   
                   throw std::runtime_error("Not Allowed during self_exec");
+                  #endif                      
                 } 
                 else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_OFF")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_done");
@@ -732,8 +753,14 @@ class DDR5PCH : public IDRAM, public Implementation {
               if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DB_WR"]) {
                 if(ndp_addr_per_pch[pch_idx][m_levels["row"]] != ndp_access_row) {
                   print_ndp_all_pch_status();
-                  print_ndp_pch_inst_mem(pch_idx);                   
-                  throw std::runtime_error("Invalid Address to access NDP!");
+                  print_ndp_pch_inst_mem(pch_idx);              
+                  #ifdef PCH_DEBUG
+                    is_pch_error = true;     
+                    error_pch = pch_idx;
+                    std::cout<<"["<<pch_idx<<"] Invalid Address ("<<ndp_addr_per_pch[pch_idx][m_levels["row"]]<<") to access NDP!" << std::endl;
+                  #elif                   
+                    throw std::runtime_error("Invalid Address to access NDP!");
+                  #endif                          
                 } else {
                   if(ndp_addr_per_pch[pch_idx][m_levels["bank"]] == ndp_ctrl_access_bk && ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] == ndp_ctrl_access_bg) {
                     // Access NDP Configuration Register 
@@ -749,7 +776,13 @@ class DDR5PCH : public IDRAM, public Implementation {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, (std::string("NDP status : ") + std::string(m_ndp_status(ndp_status_per_pch[pch_idx]))));                                              
                               print_ndp_all_pch_status();
                               print_ndp_pch_inst_mem(pch_idx); 
-                              throw std::runtime_error("NDP Unit start when is not idle");
+                              #ifdef PCH_DEBUG
+                              is_pch_error = true;     
+                              error_pch = pch_idx;
+                              std::cout<<"["<<pch_idx<<"] NDP Unit start when is not idle" << std::endl;
+                              #elif                   
+                                throw std::runtime_error("NDP Unit start when is not idle");                                
+                              #endif  
                             } else {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");           
                               ndp_status_per_pch[pch_idx] = m_ndp_status("run");
@@ -772,7 +805,13 @@ class DDR5PCH : public IDRAM, public Implementation {
                         print_ndp_all_pch_status();
                         print_ndp_pch_inst_mem(pch_idx);                         
                         std::string msg = std::to_string(m_clk) + std::string("  - NDP Write when NDP unit is exec! CH:") + std::to_string(ch) + std::string(" PCH:") + std::to_string(pch);
-                        throw std::runtime_error(msg);
+                        #ifdef PCH_DEBUG
+                        is_pch_error = true;     
+                        error_pch = pch_idx;
+                        std::cout<<"["<<pch_idx<<"] " << msg << std::endl;
+                        #elif                                             
+                          throw std::runtime_error(msg);
+                        #endif                          
                       }
 
                       if(ndp_payload_valid_per_pch[pch_idx]) {
@@ -798,7 +837,13 @@ class DDR5PCH : public IDRAM, public Implementation {
                     // Access Not Mapped Address
                     print_ndp_all_pch_status();
                     print_ndp_pch_inst_mem(pch_idx); 
-                    throw std::runtime_error("Invalid Not Mapped NDP Address!");
+                    #ifdef PCH_DEBUG
+                    is_pch_error = true;     
+                    error_pch = pch_idx;
+                    std::cout<<"["<<pch_idx<<"] Invalid Not Mapped NDP Address!"<< std::endl;
+                    #elif                                             
+                      throw std::runtime_error("Invalid Not Mapped NDP Address!");
+                    #endif                         
                   }
                 }
               } else if(ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RD"] || ndp_cmd_per_pch[pch_idx] == m_commands["NDP_DRAM_RDA"]) {
@@ -806,12 +851,32 @@ class DDR5PCH : public IDRAM, public Implementation {
                 if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
                   print_ndp_all_pch_status();
                   print_ndp_pch_inst_mem(pch_idx);         
-                  throw std::runtime_error("NDP DRAM RD when NDP is idle!!");
+                  #ifdef PCH_DEBUG
+                  is_pch_error = true;     
+                  error_pch = pch_idx;
+                  std::cout<<"["<<pch_idx<<"] NDP DRAM RD when NDP is idle!!"<< std::endl;
+                  std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                  std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                  std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                  std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                  #elif                                             
+                      throw std::runtime_error("NDP DRAM RD when NDP is idle!!");
+                  #endif                                           
                 } else {
                   if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                     print_ndp_all_pch_status();
                     print_ndp_pch_inst_mem(pch_idx);         
-                    throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
+                    #ifdef PCH_DEBUG
+                    is_pch_error = true;     
+                    error_pch = pch_idx;
+                    std::cout<<"["<<pch_idx<<"] NDP DRAM RD when ndp_inst_slot is empty!!"<< std::endl;
+                    std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                    std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                    std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                    std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                    #elif                                             
+                        throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
+                    #endif                     
                   } else {
                     // Find Matching Inst
                     bool is_find = false;
@@ -838,7 +903,17 @@ class DDR5PCH : public IDRAM, public Implementation {
                        std::cout<<" NDP PC: "<<ndp_pc_per_pch[pch_idx]<<std::endl;
                       print_ndp_all_pch_status();
                       print_ndp_pch_inst_mem(pch_idx);                        
-                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
+                      #ifdef PCH_DEBUG
+                      is_pch_error = true;     
+                      error_pch = pch_idx;
+                      std::cout<<"["<<pch_idx<<"] Cannot Find Matched Instruction with NDP DRAM RD!!"<< std::endl;
+                      std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                      std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                      std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                      std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                      #elif                                             
+                          throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
+                      #endif                        
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
@@ -857,12 +932,32 @@ class DDR5PCH : public IDRAM, public Implementation {
                 if(ndp_status_per_pch[pch_idx] == m_ndp_status("idle")) {
                   print_ndp_all_pch_status();
                   print_ndp_pch_inst_mem(pch_idx);                   
-                  throw std::runtime_error("NDP DRAM WR when NDP is idle!!");
+                  #ifdef PCH_DEBUG
+                  is_pch_error = true;     
+                  error_pch = pch_idx;
+                  std::cout<<"["<<pch_idx<<"] NDP DRAM WR when NDP is idle!!"<< std::endl;
+                  std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                  std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                  std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                  std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                  #elif                                             
+                      throw std::runtime_error("NDP DRAM WR when NDP is idle!!");
+                  #endif                     
                 } else {
                   if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                     print_ndp_all_pch_status();
                     print_ndp_pch_inst_mem(pch_idx);                     
-                    throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
+                    #ifdef PCH_DEBUG
+                    is_pch_error = true;     
+                    error_pch = pch_idx;
+                    std::cout<<"["<<pch_idx<<"] NDP DRAM WR when ndp_inst_slot is empty!"<< std::endl;
+                    std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                    std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                    std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                    std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                    #elif                                             
+                        throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
+                    #endif     
                   } else {
                     // Find Matching Inst
                     bool is_find = false;
@@ -886,8 +981,18 @@ class DDR5PCH : public IDRAM, public Implementation {
                         " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
                        }                  
                       print_ndp_all_pch_status();
-                      print_ndp_pch_inst_mem(pch_idx);                            
-                      throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM WR!!");
+                      print_ndp_pch_inst_mem(pch_idx);       
+                      #ifdef PCH_DEBUG
+                      is_pch_error = true;     
+                      error_pch = pch_idx;
+                      std::cout<<"["<<pch_idx<<"] Cannot Find Matched Instruction with NDP DRAM WR!!"<< std::endl;
+                      std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                      std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
+                      std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
+                      std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
+                      #elif                                                                       
+                          throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM WR!!");
+                      #endif                                               
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
@@ -1079,6 +1184,14 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     int get_io_boost() override {
       return io_boost;
+    }
+
+    int get_pch_error() override {
+      if(is_pch_error) {
+        return error_pch;
+      } else {
+        return -1;
+      }
     }
     
     void check_future_action(int command, const AddrVec_t& addr_vec) {

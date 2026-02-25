@@ -1,6 +1,8 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
 
+#define DEBUG_POWER
+
 namespace Ramulator {
 
 class DDR5 : public IDRAM, public Implementation {
@@ -440,6 +442,10 @@ class DDR5 : public IDRAM, public Implementation {
     int get_io_boost() override {
       return 1;
     }
+
+    int get_pch_error() override {
+      return -1;
+    }    
 
   private:
     void set_organization() {
