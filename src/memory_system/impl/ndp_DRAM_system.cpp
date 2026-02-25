@@ -736,51 +736,55 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT_RES]++;
           } // NDP Status: NDP_WAIT_RES END             
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_WAIT) {
-            pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]++;
-            // NDP Status: NDP_WAIT 
-            if(pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] == pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id]) {
-              // Issue NDP RD for CONF_REG 
-              int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
-              int pch_id_per_subch = pch_id%num_pseudochannel;                
-              if(pch_lvl_polling[dimm_id][pch_id]) {
-                // issued NDP Polling Request and Wait
-                int ndp_status = m_controllers[ch_id]->get_config_reg_resp(pch_id_per_subch);
-                
-                // If the ndp_status is capable of issuing a new reques
-                if(ndp_status == -1) {
-                  // Wait More Time to get response
-                } else if(m_dram->is_ndp_issuable(ndp_status)) {
-                  // std::cout<<"["<<m_clk<<"] HSNC NDP_WAIT --> to NDP_RUN"<<dimm_id<<"/ "<<pch_id<<std::endl;
-                  pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
-                  DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_WAIT to NDP_RUN");
-                  pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = -1;
-                  pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = -1;
-                  pch_lvl_polling[dimm_id][pch_id] = false;
-                } else {
-                  // Need more time for NDP unit to issue new request and reset pch_lvl_polling to false
-                  // std::cout<<"["<<m_clk<<"] HSNC NDP is not Ready (reissue NDP RD CONF REG)"<<dimm_id<<"/ "<<pch_id<<std::endl;
-                  pch_lvl_polling[dimm_id][pch_id] = false;
-                  pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]   = 0;
-                  pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = 64*10;                  
-                }
-                
-              } else {
-                Request req = Request(0,Request::Type::Read);
-                m_addr_mapper->apply(req);
-                req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
-                req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
-                req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
-                req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
-                req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
-                req.is_ndp_req = true;
-                if(m_controllers[ch_id]->send(req)) {
-                  pch_lvl_polling[dimm_id][pch_id] = true;
-                  // std::cout<<"["<<m_clk<<"] HSNC Issue NDP RD CONFG REQ "<<dimm_id<<" / "<<pch_id<<std::endl;
-                }                
-              }                            
+            if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) {
+              send_ndp_req_to_mc(dimm_id,pch_id);
             } else {
-              pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]++;
-            }          
+              pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]++;
+              // NDP Status: NDP_WAIT 
+              if(pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] == pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id]) {
+                // Issue NDP RD for CONF_REG 
+                int ch_id = (pch_id >= num_pseudochannel ? 1 : 0) + dimm_id * m_num_subch;
+                int pch_id_per_subch = pch_id%num_pseudochannel;                
+                if(pch_lvl_polling[dimm_id][pch_id]) {
+                  // issued NDP Polling Request and Wait
+                  int ndp_status = m_controllers[ch_id]->get_config_reg_resp(pch_id_per_subch);
+                  
+                  // If the ndp_status is capable of issuing a new reques
+                  if(ndp_status == -1) {
+                    // Wait More Time to get response
+                  } else if(m_dram->is_ndp_issuable(ndp_status)) {
+                    // std::cout<<"["<<m_clk<<"] HSNC NDP_WAIT --> to NDP_RUN"<<dimm_id<<"/ "<<pch_id<<std::endl;
+                    pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
+                    DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_WAIT to NDP_RUN");
+                    pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = -1;
+                    pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = -1;
+                    pch_lvl_polling[dimm_id][pch_id] = false;
+                  } else {
+                    // Need more time for NDP unit to issue new request and reset pch_lvl_polling to false
+                    // std::cout<<"["<<m_clk<<"] HSNC NDP is not Ready (reissue NDP RD CONF REG)"<<dimm_id<<"/ "<<pch_id<<std::endl;
+                    pch_lvl_polling[dimm_id][pch_id] = false;
+                    pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]   = 0;
+                    pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = 64*10;                  
+                  }
+                  
+                } else {
+                  Request req = Request(0,Request::Type::Read);
+                  m_addr_mapper->apply(req);
+                  req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
+                  req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
+                  req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
+                  req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
+                  req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
+                  req.is_ndp_req = true;
+                  if(m_controllers[ch_id]->send(req)) {
+                    pch_lvl_polling[dimm_id][pch_id] = true;
+                    // std::cout<<"["<<m_clk<<"] HSNC Issue NDP RD CONFG REQ "<<dimm_id<<" / "<<pch_id<<std::endl;
+                  }                
+                }                            
+              } else {
+                pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]++;
+              }          
+            }
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT]++;
           } // NDP Status: NDP_WAIT END               
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_DONE) {

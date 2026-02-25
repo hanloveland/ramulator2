@@ -1170,7 +1170,8 @@ class DDR5PCH : public IDRAM, public Implementation {
         return false;
       } else {
         // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"        
-        if(ndp_status == m_ndp_status("idle") || ndp_status == m_ndp_status("run") || ndp_status == m_ndp_status("done") || ndp_status == m_ndp_status("wait_done")) {
+        if(ndp_status == m_ndp_status("idle") || ndp_status == m_ndp_status("run") || ndp_status == m_ndp_status("barrier") || 
+           ndp_status == m_ndp_status("done") || ndp_status == m_ndp_status("wait_done")) {
           return true;
         } else {
           return false;
