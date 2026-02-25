@@ -68,8 +68,8 @@ NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4
 NDP_TARGET_BK = 3    # To decoule host access and DRAM access
 
 SPLIT_HIGH_BANK = False
-LINEAR_ACCESS = True
-GEN_BGCH = True
+LINEAR_ACCESS = False
+GEN_BGCH = False
 if SPLIT_HIGH_BANK:
     PCH_ADDRESS_SCHEME = "BhRoBlBgCoRaPcCH"
 else:
@@ -1675,12 +1675,14 @@ def gemv_pch(f, input_size, scaling):
             # Load Partial Vector to Data Memory
             for bg in range(n_row_p_vec):
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             # MAC Operation 
             for _ in range(n_tile_block_row):
                 # Each Tile GEMV
                 for _ in range(n_row_p_vec): 
                     for bg in range(n_bg):                
                         ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,ndp_bk_idx,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             # Column-wise gemv ops
             if col_tile > 1:
                 jump_pc1 = len(ndp_inst_list)
