@@ -8,7 +8,8 @@ from pathlib import Path
 DRAM_SCALING=1
 
 # Default :  DRAM_SCALING=1
-NUM_CHANNEL = 2
+NUM_DIMM = 1
+NUM_CHANNEL = int(2 * NUM_DIMM)
 NUM_PSEUDOCHANNEL = 4
 NUM_RANK = 4 # Basline DRAM
 NUM_BANKGROUP = 8
@@ -177,7 +178,7 @@ def config_scale_factor(scaling_factor):
     global NUM_COL
     global NDP_ACC_GRA    
     if scaling_factor == 1:
-        NUM_CHANNEL = 2
+        NUM_CHANNEL = int(2 * NUM_DIMM)
         NUM_PSEUDOCHANNEL = 4
         NUM_BANKGROUP = 8
         NUM_BANK = 4
@@ -185,7 +186,7 @@ def config_scale_factor(scaling_factor):
         NUM_COL = 128 # 1KB/8B    
         NDP_ACC_GRA = 1 # Same with Normal Access
     elif scaling_factor == 2:
-        NUM_CHANNEL = 2
+        NUM_CHANNEL = int(2 * NUM_DIMM)
         NUM_PSEUDOCHANNEL = 4
         NUM_BANKGROUP = 8
         NUM_BANK = 4
@@ -193,7 +194,7 @@ def config_scale_factor(scaling_factor):
         NUM_COL = 128 # 1KB/128B
         NDP_ACC_GRA = 2 # 2x then normal access
     elif scaling_factor == 4:
-        NUM_CHANNEL = 2
+        NUM_CHANNEL = int(2 * NUM_DIMM)
         NUM_PSEUDOCHANNEL = 4
         NUM_BANKGROUP = 4
         NUM_BANK = 4
@@ -469,18 +470,19 @@ def inst(opcode,opsize,id,bg,bk,op1,op2,op3):
     return inst_64bit
 
 # Access Type (4) / Opsize (7)/ Channel(3) / Pseudo-Channel(2) / BG (3) / BK (3) / ROW (18) / COL (7) / ID (3) / Reserved
+# Inc Max Channel to 32 (16-DIMMs)
 def acc_inst(opcode,opsize,ch,pch,bg,bk,row,col,id,etc):
     inst_64bit = 0
     inst_64bit |= (opcode & 0xf)      << 60
     inst_64bit |= (opsize & 0x7f)     << 53
-    inst_64bit |= (ch     & 0x7)      << 50
-    inst_64bit |= (pch    & 0x3)      << 48
-    inst_64bit |= (bg     & 0x7)      << 45
-    inst_64bit |= (bk     & 0x3)      << 43
-    inst_64bit |= (row    & 0x3FFFF)  << 25
-    inst_64bit |= (col    & 0x7F)     << 18
-    inst_64bit |= (id     & 0x7)      << 15
-    inst_64bit |= (etc    & 0x7FFF)  
+    inst_64bit |= (ch     & 0x3f)     << 47
+    inst_64bit |= (pch    & 0x3)      << 45
+    inst_64bit |= (bg     & 0x7)      << 42
+    inst_64bit |= (bk     & 0x3)      << 40
+    inst_64bit |= (row    & 0x3FFFF)  << 22
+    inst_64bit |= (col    & 0x7F)     << 15
+    inst_64bit |= (id     & 0x7)      << 12
+    inst_64bit |= (etc    & 0xFFF)  
     return inst_64bit
 
 def dump_ndp_acc_inst(f, inst_list):
@@ -1751,12 +1753,14 @@ def gemv_pch(f, input_size, scaling):
     print(f"fianl_pc PC:           {fianl_pc}")
     # Generate NDP Start Request 
     data_array = [0] * 8
-    for ch in range(int(NUM_CHANNEL)):
-        for pch in range(int(NUM_PSEUDOCHANNEL)):  
-            idx = ch * 4 + pch     
-            data_array[idx] = 1   
-    
-    write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+    col = 0
+    for dimm_id in range(int(NUM_DIMM)): 
+        for ch in range(int(2)):
+            for pch in range(int(NUM_PSEUDOCHANNEL)):  
+                idx = ch * 4 + pch     
+                data_array[idx] = 1   
+        write_trace(f,'ST',encode_address(int(2 * dimm_id), 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0),data_array)
+
 
     # Make 2-D NDL-Launch Request Inst
     acc_inst_list = [[ ]]
@@ -2101,12 +2105,23 @@ if __name__ == '__main__':
     print(" ========================================================================  ")
 
     # make generated trace output path 
-    pch_ndp_trace_path = "trace/pch_ndp"
-    pch_none_ndp_trace_path = "trace/pch_non_ndp"
-    baseline_trace_path = "trace/baseline"
+    root_path = "multi_dimm/1dimm"
+    # root_path = "test_trace"
+    pch_ndp_trace_path = root_path + "/pch_ndp"
+    pch_none_ndp_trace_path = root_path + "/pch_non_ndp"
+    baseline_trace_path = root_path + "/baseline"
 
-    shutil.rmtree("trace")
-    crete_folder("trace")
+    # shutil.rmtree("trace")
+    # crete_folder("trace")
+    directory_path = Path(root_path)
+
+    if directory_path.exists() and directory_path.is_dir():
+        shutil.rmtree(root_path)
+        print(f"Directory '{directory_path}' has been removed.")
+    else:
+        print(f"Directory '{directory_path}' does not exist or is not a directory.")
+
+    crete_folder(root_path) 
     crete_folder(pch_ndp_trace_path)
     crete_folder(pch_none_ndp_trace_path)
     crete_folder(baseline_trace_path)
@@ -2116,7 +2131,7 @@ if __name__ == '__main__':
     print(" - Baseline Workload Path: ",baseline_trace_path)
 
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
-
+    '''
     for size in input_size_list:
         for bench in ["AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT"]:
             generate_trace(bench, size,baseline_trace_path, pch=False,is_ndp_ops=False, scaling_factor=1)
@@ -2129,7 +2144,14 @@ if __name__ == '__main__':
         for scaling in [1, 2, 4]:
             generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
             generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
-        
+
+    '''
+    for size in mat_input_size_list:
+        # generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
+        for scaling in [1]:
+            # generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
+            generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
+    # '''
     # for size in input_size_list:
     #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
     #     generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
