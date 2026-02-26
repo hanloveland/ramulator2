@@ -161,6 +161,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int bk_addr_idx = 0;
     int bg_addr_idx = 0;
     int col_addr_idx = 0;
+    int ch_addr_idx = 0;
     /*
     bool ndp_on = false;
     bool wait_ndp_on = false;
@@ -302,7 +303,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       bg_addr_idx   = m_dram->m_levels("bankgroup");
       bk_addr_idx   = m_dram->m_levels("bank");
       col_addr_idx  = m_dram->m_levels("column");
-
+      ch_addr_idx   = m_dram->m_levels("channel");
       // deprecated code
       /*
       issue_ndp_start.resize(num_channels*num_pseudochannel,false);
@@ -677,9 +678,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // if pch_lvl_hsnc_nl_addr_gen_slot has room and pch_lvl_hsnc_nl_req_slot has nl_req 
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() < pch_lvl_hsnc_nl_addr_gen_slot_max && pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].size() != 0) {
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Decoding NDP-NL Request");
-              AccInst_Slot nl_req = decode_acc_inst(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]);
+              AccInst_Slot nl_req = decode_acc_inst(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]);              
               pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id].begin() + 0);
               
+
               #ifdef PCH_DEBUG      
               if(pch_lvl_history[dimm_id][pch_id].size() >= pch_lvl_history_max) {
                 pch_lvl_history[dimm_id][pch_id].erase(pch_lvl_history[dimm_id][pch_id].begin() + 0);
@@ -707,6 +709,17 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("LOOP_END")) {
                 throw std::runtime_error("LOOP_END Not Implemented!!");
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("RD") || nl_req.opcode == m_ndp_access_inst_op.at("WR")) {
+                int pch_idx1 = nl_req.ch * num_pseudochannel + nl_req.pch;
+                int pch_idx2 = dimm_id * m_num_subch * num_pseudochannel + pch_id;
+                if(pch_idx1 != pch_idx2) {
+                  std::cout<<"["<<m_clk<<"] Miss pch_idx"<<std::endl;
+                  std::cout<<" dimm_id :"<<dimm_id<<std::endl;
+                  std::cout<<" pch_id :"<<pch_id<<std::endl;
+                  std::cout<<" nl_req.ch :"<<nl_req.ch<<std::endl;
+                  std::cout<<" nl_req.pch :"<<nl_req.pch<<std::endl;
+                  std::cout<<std::hex<<pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]<<std::endl;
+                  throw std::runtime_error("Miss pch_idx");
+                }                
                 pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].push_back(nl_req);                
               } else {
                 throw std::runtime_error("Invalid NDP-Lanuch Request Opcode!!");                
@@ -850,8 +863,8 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         // NDP Launch Request Buffer
         if(req.type_id == Request::Type::Write) {
           // Each DIMM has two Channel (i.e., sub-channel)
-          int dimm_id = req.addr_vec[0]/2;
-          int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];                    
+          int dimm_id = req.addr_vec[ch_addr_idx]/2;
+          int pch_id = ((req.addr_vec[ch_addr_idx]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];                    
           #ifdef DIMM_LVL_BUF
             // DIMM-level Request Buffer          
             if(dimm_lvl_req_buffer[dimm_id].size() < m_max_req_buffer_cap_per_dimm) {
@@ -1022,14 +1035,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     AccInst_Slot decode_acc_inst(uint64_t inst) {
       uint64_t opcode = (inst >> 60) & 0xf;
       uint64_t opsize = (inst >> 53) & 0x7f;
-      uint64_t ch     = (inst >> 50) & 0x7;
-      uint64_t pch    = (inst >> 48) & 0x3;
-      uint64_t bg     = (inst >> 45) & 0x7;
-      uint64_t bk     = (inst >> 43) & 0x3;
-      uint64_t row    = (inst >> 25) & 0x3FFFF;
-      uint64_t col    = (inst >> 18) & 0x7F;
-      uint64_t id     = (inst >> 15) & 0x7;
-      uint64_t etc    = (inst      ) & 0x7FFF;
+      uint64_t ch     = (inst >> 47) & 0x3f;
+      uint64_t pch    = (inst >> 45) & 0x3;
+      uint64_t bg     = (inst >> 42) & 0x7;
+      uint64_t bk     = (inst >> 40) & 0x3;
+      uint64_t row    = (inst >> 22) & 0x3FFFF;
+      uint64_t col    = (inst >> 15) & 0x7F;
+      uint64_t id     = (inst >> 12) & 0x7;
+      uint64_t etc    = (inst      ) & 0xFFF;
       #ifdef NDP_DEBUG
         std::cout<<"acc inst decoding opcode "<<opcode<<" opsize "<<opsize<<" ch "<<ch<<" pch "<<pch<<" bg "<<bg;
         std::cout<<" bk "<<bk<<" row "<<row<<" col "<<col<<" id "<<id<<" etc "<<etc<<std::endl;

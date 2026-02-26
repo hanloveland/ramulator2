@@ -475,6 +475,9 @@ class DDR5PCH : public IDRAM, public Implementation {
     #ifdef PCH_DEBUG
     bool is_pch_error = false;
     int error_pch = -1;
+
+    std::vector<std::vector<Inst_Slot>> ndp_inst_hist_per_pch; // Running NDP Instruction Slot
+    int max_ndp_inst_hist = 32;
     #endif 
 
     /*
@@ -568,6 +571,12 @@ class DDR5PCH : public IDRAM, public Implementation {
                    ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_S_RED") ||
                    ndp_inst_slot_per_pch[pch_idx][0].opcode == m_ndp_inst_op.at("T_MAC")) {
                   if(ndp_inst_slot_per_pch[pch_idx][0].opsize == ndp_inst_slot_per_pch[pch_idx][0].cnt) {
+                    #ifdef PCH_DEBUG
+                      if(ndp_inst_hist_per_pch[pch_idx].size() >= max_ndp_inst_hist) {
+                        ndp_inst_hist_per_pch[pch_idx].erase(ndp_inst_hist_per_pch[pch_idx].begin() + 0);
+                      }
+                      ndp_inst_hist_per_pch[pch_idx].push_back(ndp_inst_slot_per_pch[pch_idx][0]);  
+                    #endif
                     count_ndp_ops(ch,pch,ndp_inst_slot_per_pch[pch_idx][0].opcode,ndp_inst_slot_per_pch[pch_idx][0].opsize);                    
                     ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + 0);
                     DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, " Remove Done Request (self_exec)!!");   
@@ -871,7 +880,6 @@ class DDR5PCH : public IDRAM, public Implementation {
                     error_pch = pch_idx;
                     std::cout<<"["<<pch_idx<<"] NDP DRAM RD when ndp_inst_slot is empty!!"<< std::endl;
                     std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
-                    std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                     std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                     std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
                     #elif                                             
@@ -892,6 +900,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     }
                     if(!is_find) {
                       // Print NDP Instruction Slot 
+                      std::cout<<""<<std::endl;
                       for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
                         std::cout<<"decoding opcode "<<ndp_inst_slot_per_pch[pch_idx][i].opcode<<" opsize "<<ndp_inst_slot_per_pch[pch_idx][i].opsize<<
                         " id "<<ndp_inst_slot_per_pch[pch_idx][i].id<<" bg "<<ndp_inst_slot_per_pch[pch_idx][i].bg<<
@@ -908,7 +917,6 @@ class DDR5PCH : public IDRAM, public Implementation {
                       error_pch = pch_idx;
                       std::cout<<"["<<pch_idx<<"] Cannot Find Matched Instruction with NDP DRAM RD!!"<< std::endl;
                       std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
-                      std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                       std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                       std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
                       #elif                                             
@@ -917,6 +925,14 @@ class DDR5PCH : public IDRAM, public Implementation {
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
+
+                        #ifdef PCH_DEBUG
+                          if(ndp_inst_hist_per_pch[pch_idx].size() >= max_ndp_inst_hist) {
+                            ndp_inst_hist_per_pch[pch_idx].erase(ndp_inst_hist_per_pch[pch_idx].begin() + 0);
+                          }
+                          ndp_inst_hist_per_pch[pch_idx].push_back(ndp_inst_slot_per_pch[pch_idx][match_idx]);  
+                        #endif
+
                         count_ndp_ops(ch,pch,ndp_inst_slot_per_pch[pch_idx][match_idx].opcode,ndp_inst_slot_per_pch[pch_idx][match_idx].opsize);
                         ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + match_idx);
                         DEBUG_PRINT(m_clk, "NDP Unit", ch, pch, " Remove Done Request!!");                         
@@ -996,6 +1012,12 @@ class DDR5PCH : public IDRAM, public Implementation {
                     } else {
                       // If Opsize and Counter is equal, the ndp_inst is done, so remove this ndp_isnt from ndp_inst_slot
                       if(ndp_inst_slot_per_pch[pch_idx][match_idx].opsize == ndp_inst_slot_per_pch[pch_idx][match_idx].cnt) {
+                        #ifdef PCH_DEBUG
+                          if(ndp_inst_hist_per_pch[pch_idx].size() >= max_ndp_inst_hist) {
+                            ndp_inst_hist_per_pch[pch_idx].erase(ndp_inst_hist_per_pch[pch_idx].begin() + 0);
+                          }
+                          ndp_inst_hist_per_pch[pch_idx].push_back(ndp_inst_slot_per_pch[pch_idx][match_idx]);  
+                        #endif                        
                         ndp_inst_slot_per_pch[pch_idx].erase(ndp_inst_slot_per_pch[pch_idx].begin() + match_idx);
                       } else {
                         ndp_inst_slot_per_pch[pch_idx][match_idx].cnt++;
@@ -1668,6 +1690,12 @@ class DDR5PCH : public IDRAM, public Implementation {
       ndp_inst_slot_per_pch.resize(num_channels* num_pseudochannel,std::vector<Inst_Slot>(0,Inst_Slot()));      
       // Each PCH has 8 Loop Counter (equal TID)
       loop_cnt_per_pch.resize(num_channels * num_pseudochannel * 8 ,0);
+
+      #ifdef PCH_DEBUG
+      ndp_inst_hist_per_pch.resize(num_channels* num_pseudochannel,std::vector<Inst_Slot>(0,Inst_Slot()));  
+      max_ndp_inst_hist = 32;
+      #endif 
+
 
       // Command from MC to DB (NDP Unit)
       pipe_ndp_latency_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));
@@ -2610,6 +2638,37 @@ class DDR5PCH : public IDRAM, public Implementation {
                   << std::endl;
     }
     std::cout << "========================================" << std::endl;
+
+    std::cout << " Print All NDP Unit Issued History (32)" << std::endl;
+    
+    for (int p = 0 ; p < m_num_channels * m_num_pseudochannel; p++ ) {
+        std::cout<< " NDP Unit ["<<p<<"]"<<std::endl;
+        std::cout << std::left
+                  << std::setw(6)  << "PC"
+                  << std::setw(16) << "OPCODE"
+                  << std::setw(8)  << "OPSIZE"
+                  << std::setw(8)  << "ID"
+                  << std::setw(6)  << "BG"
+                  << std::setw(6)  << "BK"
+                  << std::setw(6)  << "CNT"
+                  << std::endl;
+        std::cout << std::string(54, '-') << std::endl;        
+        for (int i = 0; i < (int)ndp_inst_hist_per_pch[p].size(); i++) {
+
+            auto it = ndp_opcode_str.find(ndp_inst_hist_per_pch[p][i].opcode);
+            std::string opcode_name = (it != ndp_opcode_str.end()) ? it->second : "UNKNOWN(" + std::to_string(ndp_inst_hist_per_pch[p][i].opcode) + ")";
+
+            std::cout << std::left
+                      << std::setw(6)  << i
+                      << std::setw(16) << opcode_name
+                      << std::setw(8)  << ndp_inst_hist_per_pch[p][i].opsize
+                      << std::setw(8)  << ndp_inst_hist_per_pch[p][i].id
+                      << std::setw(6)  << ndp_inst_hist_per_pch[p][i].bg
+                      << std::setw(6)  << ndp_inst_hist_per_pch[p][i].bk
+                      << std::setw(6)  << ndp_inst_hist_per_pch[p][i].cnt
+                      << std::endl;
+        }        
+    }
     }    
 };
 
