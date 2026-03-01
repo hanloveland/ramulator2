@@ -2380,7 +2380,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       if(is_dram_ctrl_finished) {
         for(int i=0;i<num_pseudochannel;i++) {
-          if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0) is_dram_ctrl_finished = false;
+          if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
+             m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
+             m_to_wr_prefetch_buffers[i].size() != 0 ||
+             m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
           // m_write_buffers[i].size() != 0  || 
           // || m_wr_prefetch_buffers[i].size() != 0
           if(!is_dram_ctrl_finished) break;

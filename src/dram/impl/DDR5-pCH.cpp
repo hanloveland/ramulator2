@@ -2425,12 +2425,12 @@ class DDR5PCH : public IDRAM, public Implementation {
         double channel_access_buf_power = channel_access_buf_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double channel_onboard_ecc_power = channel_onboard_ecc_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         double channel_ndp_power = channel_ndp_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
-        s_total_dq_energy += (channel_socket_dq_energy + channel_onboard_dq_energy + channel_access_buf_energy + channel_onboard_ecc_energy);
+        s_total_dq_energy += (channel_socket_dq_energy + channel_onboard_dq_energy);
         s_total_energy    += (channel_socket_dq_energy + channel_onboard_dq_energy + channel_access_buf_energy + channel_onboard_ecc_energy + channel_ndp_energy);
-        s_total_dq_power  += (chanenl_socket_dq_power + chanenl_onboard_dq_power + channel_access_buf_power + channel_onboard_ecc_power);
+        s_total_dq_power  += (chanenl_socket_dq_power + chanenl_onboard_dq_power);
         s_total_power     += (chanenl_socket_dq_power + chanenl_onboard_dq_power + channel_access_buf_power + channel_onboard_ecc_power + channel_ndp_power);
-        total_ndp_energy += channel_ndp_energy;
-        total_ndp_power  += channel_ndp_power;
+        total_ndp_energy += (channel_ndp_energy + channel_access_buf_energy + channel_onboard_ecc_energy);
+        total_ndp_power  += (channel_ndp_power  + channel_access_buf_power + channel_onboard_ecc_power);
         std::cout<<"["<<i<<"] Channel DQ Power Report"<<std::endl;
         std::cout<<" - DQ (Socket) Energy (nJ)  : "<<channel_socket_dq_energy<<std::endl;
         std::cout<<" - DQ (OnBoard) Energy (nJ) : "<<channel_onboard_dq_energy<<std::endl;
