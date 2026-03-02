@@ -12,6 +12,18 @@ class FRFCFS : public IScheduler, public Implementation {
     IDRAM* m_dram;
     bool m_use_wr_prefetch;
     bool m_use_rd_prefetch;
+    std::vector<int> m_open_row;
+    std::vector<int> m_pre_open_row;
+    std::vector<bool> m_open_row_miss;
+    std::vector<bool> m_open_idle;
+    
+    int num_ranks = -1;    
+    int num_bankgroups = -1;
+    int num_banks = -1;
+    int rank_idx = 0;
+    int bankgroup_idx = 0;
+    int bank_idx = 0;
+    int row_idx = 0;
 
   public:
     void init() override { };
@@ -19,14 +31,62 @@ class FRFCFS : public IScheduler, public Implementation {
     void setup(IFrontEnd* frontend, IMemorySystem* memory_system) override {
       m_dram = cast_parent<IDRAMController>()->m_dram;
 
+      num_ranks = m_dram->get_level_size("rank");  
+      num_bankgroups = m_dram->get_level_size("bankgroup");  
+      num_banks = m_dram->get_level_size("bank");  
+      rank_idx = m_dram->m_levels("rank");
+      bankgroup_idx = m_dram->m_levels("bankgroup");
+      bank_idx = m_dram->m_levels("bank"); 
+      row_idx = m_dram->m_levels("row"); 
+
+      // Record Row address per bank for Adaptive Open-Page Policy
+      m_open_row.resize(num_ranks*num_bankgroups*num_banks, -1);
+      m_pre_open_row.resize(num_ranks*num_bankgroups*num_banks, -1);
+      m_open_row_miss.resize(num_ranks*num_bankgroups*num_banks, false);      
+      m_open_idle.resize(num_ranks*num_bankgroups*num_banks, true);      
     };
+
+    void update_open_row(int flat_bank_id, int row) override {
+      m_open_row[flat_bank_id] = row;
+    };
+
+    void update_pre_open_row(int flat_bank_id, int row) override {
+      m_pre_open_row[flat_bank_id] = row;
+    };
+
+    void update_open_row_miss(int flat_bank_id, bool miss) override {
+      m_open_row_miss[flat_bank_id] = miss;
+    };    
+
+    void update_bk_status(int flat_bank_id, bool idle) override {
+      m_open_idle[flat_bank_id] = idle;
+    };    
 
     ReqBuffer::iterator compare(ReqBuffer::iterator req1, ReqBuffer::iterator req2, bool req1_ready, bool req2_ready) override {
       bool ready1;
       bool ready2;      
 
-      ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-      ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
+      // BK Status Check 
+      bool req1_not_low_pri = true;
+      int req1_flat_bank_id = req1->addr_vec[bank_idx] + req1->addr_vec[bankgroup_idx] * num_banks + req1->addr_vec[rank_idx] * num_bankgroups*num_banks;  
+      if(req1->command == m_dram->m_commands("ACT") && m_open_idle[req1_flat_bank_id]) {
+        
+        if(m_open_row_miss[req1_flat_bank_id] && m_pre_open_row[req1_flat_bank_id] == req1->addr_vec[row_idx]) {
+          req1_not_low_pri = false;
+        }
+      }
+
+      bool req2_not_low_pri = true;
+      int req2_flat_bank_id = req2->addr_vec[bank_idx] + req2->addr_vec[bankgroup_idx] * num_banks + req2->addr_vec[rank_idx] * num_bankgroups*num_banks;  
+      if(req2->command == m_dram->m_commands("ACT") && m_open_idle[req2_flat_bank_id]) {
+        
+        if(m_open_row_miss[req2_flat_bank_id] && m_pre_open_row[req2_flat_bank_id] == req2->addr_vec[row_idx]) {
+          req2_not_low_pri = false;
+        }
+      }
+
+      ready1 = req1_not_low_pri && m_dram->check_ready(req1->command, req1->addr_vec);
+      ready2 = req2_not_low_pri && m_dram->check_ready(req2->command, req2->addr_vec);
 
       ready1 = ready1 && req1_ready;
       ready2 = ready2 && req2_ready;

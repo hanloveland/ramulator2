@@ -14,6 +14,19 @@ class NDPFRFCFS : public IScheduler, public Implementation {
     std::unordered_map<int, int> m_cmd_priority_map;  // Command -> priority mapping
     std::array<std::vector<int>, 7> m_cmd_prio_luts;
 
+    std::vector<int> m_open_row;
+    std::vector<int> m_pre_open_row;
+    std::vector<bool> m_open_row_miss;
+    std::vector<bool> m_open_idle;
+    
+    int num_pseudochannel = -1;    
+    int num_bankgroup = -1;
+    int num_bank = -1;
+    int psuedo_ch_idx = 0;
+    int bankgroup_idx = 0;
+    int bank_idx = 0;
+    int row_idx = 0;
+
     struct CmdIds {
       int RD = -1;
       int RDA = -1;
@@ -70,8 +83,39 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       m_cmd_prio_luts[5][m_cmd.NDP_DRAM_RDA] = 1;             
       // m_cmd_prio_luts[6] 
       m_cmd_prio_luts[6].assign(m_dram->m_commands.size(), 0);   
-      m_cmd_prio_luts[6][m_cmd.WR] = 1;             
+      m_cmd_prio_luts[6][m_cmd.WR] = 1;     
+    
+      num_pseudochannel = m_dram->get_level_size("pseudochannel");  
+      num_bankgroup = m_dram->get_level_size("bankgroup");  
+      num_bank = m_dram->get_level_size("bank");  
+      psuedo_ch_idx = m_dram->m_levels("pseudochannel");
+      bankgroup_idx = m_dram->m_levels("bankgroup");
+      bank_idx = m_dram->m_levels("bank"); 
+      row_idx = m_dram->m_levels("row"); 
+
+      // Record Row address per bank for Adaptive Open-Page Policy
+      m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank, -1);
+      m_pre_open_row.resize(num_pseudochannel*num_bankgroup*num_bank, -1);
+      m_open_row_miss.resize(num_pseudochannel*num_bankgroup*num_bank, false);      
+      m_open_idle.resize(num_pseudochannel*num_bankgroup*num_bank, true);  
+            
     };
+
+    void update_open_row(int flat_bank_id, int row) override {
+      m_open_row[flat_bank_id] = row;
+    };
+
+    void update_pre_open_row(int flat_bank_id, int row) override {
+      m_pre_open_row[flat_bank_id] = row;
+    };
+
+    void update_open_row_miss(int flat_bank_id, bool miss) override {
+      m_open_row_miss[flat_bank_id] = miss;
+    };    
+
+    void update_bk_status(int flat_bank_id, bool idle) override {
+      m_open_idle[flat_bank_id] = idle;
+    };   
 
     void set_command_priority(const std::vector<int>& cmd_list) {
         // m_cmd_priority_list = cmd_list;
@@ -91,8 +135,26 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       bool ready1;
       bool ready2;
   
-      ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-      ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
+      bool req1_not_low_pri = true;
+      int req1_flat_bank_id = req1->addr_vec[bank_idx] + req1->addr_vec[bankgroup_idx] * num_bank + req1->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;  
+      if(req1->command == m_dram->m_commands("ACT") && m_open_idle[req1_flat_bank_id]) {
+        
+        if(m_open_row_miss[req1_flat_bank_id] && m_pre_open_row[req1_flat_bank_id] == req1->addr_vec[row_idx]) {
+          req1_not_low_pri = false;
+        }
+      }
+
+      bool req2_not_low_pri = true;
+      int req2_flat_bank_id = req2->addr_vec[bank_idx] + req2->addr_vec[bankgroup_idx] * num_bank + req2->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;  
+      if(req2->command == m_dram->m_commands("ACT") && m_open_idle[req2_flat_bank_id]) {
+        
+        if(m_open_row_miss[req2_flat_bank_id] && m_pre_open_row[req2_flat_bank_id] == req2->addr_vec[row_idx]) {
+          req2_not_low_pri = false;
+        }
+      }
+
+      ready1 = req1_not_low_pri && m_dram->check_ready(req1->command, req1->addr_vec);
+      ready2 = req2_not_low_pri && m_dram->check_ready(req2->command, req2->addr_vec);
 
       ready1 = ready1 && req1_ready;
       ready2 = ready2 && req2_ready;
@@ -117,8 +179,26 @@ class NDPFRFCFS : public IScheduler, public Implementation {
       bool ready1, ready2;
       int  priority1, priority2;
 
-      ready1 = m_dram->check_ready(req1->command, req1->addr_vec);
-      ready2 = m_dram->check_ready(req2->command, req2->addr_vec);
+      bool req1_not_low_pri = true;
+      int req1_flat_bank_id = req1->addr_vec[bank_idx] + req1->addr_vec[bankgroup_idx] * num_bank + req1->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;  
+      if(req1->command == m_dram->m_commands("ACT") && m_open_idle[req1_flat_bank_id]) {
+        
+        if(m_open_row_miss[req1_flat_bank_id] && m_pre_open_row[req1_flat_bank_id] == req1->addr_vec[row_idx]) {
+          req1_not_low_pri = false;
+        }
+      }
+
+      bool req2_not_low_pri = true;
+      int req2_flat_bank_id = req2->addr_vec[bank_idx] + req2->addr_vec[bankgroup_idx] * num_bank + req2->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;  
+      if(req2->command == m_dram->m_commands("ACT") && m_open_idle[req2_flat_bank_id]) {
+        
+        if(m_open_row_miss[req2_flat_bank_id] && m_pre_open_row[req2_flat_bank_id] == req2->addr_vec[row_idx]) {
+          req2_not_low_pri = false;
+        }
+      }
+
+      ready1 = req1_not_low_pri && m_dram->check_ready(req1->command, req1->addr_vec);
+      ready2 = req2_not_low_pri && m_dram->check_ready(req2->command, req2->addr_vec);
       
       priority1 = get_command_priority(req1->command);
       priority2 = get_command_priority(req2->command);

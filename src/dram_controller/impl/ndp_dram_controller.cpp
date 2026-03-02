@@ -363,6 +363,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
     // Adaptive OpenPage Policy 
     std::vector<int> m_open_row;
+    std::vector<int> m_pre_open_row;
+    std::vector<bool> m_open_row_miss;
+
     uint32_t m_adaptive_row_cap;
   public:
     void init() override {      
@@ -693,6 +696,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       // Record Row address per bank for Adaptive Open-Page Policy
       m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank,-1);  
+      m_pre_open_row.resize(num_pseudochannel*num_bankgroup*num_bank, -1);
+      m_open_row_miss.resize(num_pseudochannel*num_bankgroup*num_bank, false);      
 
     };
 
@@ -980,6 +985,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_bank + next->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
           if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
             // Update Cap 
+            m_open_row_miss[flat_bank_id] = true;
+            m_scheduler->update_open_row_miss(flat_bank_id,true);            
             m_rowpolicy->update_cap(next->addr_vec[psuedo_ch_idx],0,next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
           } 
         }
@@ -988,6 +995,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           int flat_bank_id = next->addr_vec[bank_idx] + next->addr_vec[bankgroup_idx] * num_bank + next->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
           if((m_open_row[flat_bank_id] != -1) && (m_open_row[flat_bank_id] != next->addr_vec[row_idx])) {
             // Update Cap 
+            m_open_row_miss[flat_bank_id] = true;
+            m_scheduler->update_open_row_miss(flat_bank_id,true);            
             m_rowpolicy->update_cap(next->addr_vec[psuedo_ch_idx],0,next->addr_vec[bankgroup_idx],next->addr_vec[bank_idx],m_adaptive_row_cap);
           } 
         }
@@ -1441,19 +1450,33 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
         if(req_it->command == m_cmds.ACT) {
           int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
+          m_open_row_miss[flat_bank_id] = false;
           m_open_row[flat_bank_id] = req_it->addr_vec[row_idx];
+          m_pre_open_row[flat_bank_id] = -1;
+          m_scheduler->update_open_row_miss(flat_bank_id,false); 
+          m_scheduler->update_open_row(flat_bank_id,req_it->addr_vec[row_idx]);
+          m_scheduler->update_pre_open_row(flat_bank_id,-1);
+          m_scheduler->update_bk_status(flat_bank_id,false);          
           m_rowpolicy->update_cap(req_it->addr_vec[psuedo_ch_idx],0,req_it->addr_vec[bankgroup_idx],req_it->addr_vec[bank_idx],128);          
         }
         else if(req_it->command == m_cmds.PRE) {
           int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;          
-          m_open_row[flat_bank_id] = -1;          
+          m_pre_open_row[flat_bank_id] = m_open_row[flat_bank_id];
+          m_open_row[flat_bank_id] = -1;  
+          m_scheduler->update_open_row(flat_bank_id,-1);
+          m_scheduler->update_pre_open_row(flat_bank_id,m_pre_open_row[flat_bank_id]);   
+          m_scheduler->update_bk_status(flat_bank_id,true);                      
         } else if(req_it->command == m_cmds.PREA) {
           // Reset All Bank in the Rank (pch)
           int pch_id = req_it->addr_vec[psuedo_ch_idx];
           for(int bg_idx=0;bg_idx<num_bankgroup; bg_idx++) {
             for(int bk_idx=0;bk_idx<num_bank; bk_idx++) {
-              int flat_bank_id = bk_idx + bg_idx * num_bank + pch_id * num_bankgroup*num_bank;          
+              int flat_bank_id = bk_idx + bg_idx * num_bank + pch_id * num_bankgroup*num_bank;    
+              m_pre_open_row[flat_bank_id] = m_open_row[flat_bank_id];         
               m_open_row[flat_bank_id] = -1;
+              m_scheduler->update_open_row(flat_bank_id,-1);
+              m_scheduler->update_pre_open_row(flat_bank_id,m_pre_open_row[flat_bank_id]);        
+              m_scheduler->update_bk_status(flat_bank_id,true);                     
             }          
           }
         }
@@ -2392,6 +2415,26 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       return (is_dram_ctrl_finished);
     }
+
+    bool is_abs_finished() override {    
+      bool is_dram_ctrl_finished = true;
+
+      if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;
+
+      if(is_dram_ctrl_finished) {
+        for(int i=0;i<num_pseudochannel;i++) {
+          if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
+             m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
+             m_to_wr_prefetch_buffers[i].size() != 0 ||
+             m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
+          // m_write_buffers[i].size() != 0  || 
+          // || m_wr_prefetch_buffers[i].size() != 0
+          if(!is_dram_ctrl_finished) break;
+        }
+      }
+
+      return (is_dram_ctrl_finished);
+    }    
 
     bool is_empty_ndp_req() override {
       if(num_ndp_rd_req == 0 && num_ndp_wr_req == 0) return true;

@@ -34,6 +34,7 @@ struct Request {
   bool is_ndp_req = false;      // NDP-related Request
   int ndp_id = -1;              // NDP-related Request ID
   bool is_trace_core_req = false; // Request is from Trace_core 
+  bool is_host_req = false; // Request is from Host Processor 
 
   Clk_t arrive = -1;   // Clock cycle when the request arrive at the memory controller
   Clk_t depart = -1;   // Clock cycle when the request depart the memory controller

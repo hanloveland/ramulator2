@@ -50,7 +50,8 @@ class IDRAMController : public Clocked<IDRAMController> {
      */
     virtual void tick() = 0;
 
-    virtual bool is_finished() = 0;
+    virtual bool is_finished() = 0; // Check Only All RDs are Done
+    virtual bool is_abs_finished() = 0; // check RD/WR are Done
     virtual bool is_empty_ndp_req() = 0;
     virtual bool is_empty_ndp_req(int pch_idx) = 0;
     virtual int  get_config_reg_resp(int pch_idx) = 0;

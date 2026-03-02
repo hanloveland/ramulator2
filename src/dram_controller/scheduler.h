@@ -23,6 +23,12 @@ class IScheduler {
     
     virtual ReqBuffer::iterator get_best_request_with_priority(ReqBuffer& buffer, uint32_t priority_list_index) = 0;
 
+    virtual void update_open_row(int flat_bank_id, int row) = 0;
+    virtual void update_pre_open_row(int flat_bank_id, int row) = 0;
+    virtual void update_open_row_miss(int flat_bank_id, bool miss) = 0;
+    virtual void update_bk_status(int flat_bank_id, bool idle) = 0;
+
+    
     // Deprecated Function 
     virtual ReqBuffer::iterator get_best_request_refresh_ch(ReqBuffer& buffer) = 0;
 

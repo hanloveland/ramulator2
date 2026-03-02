@@ -135,6 +135,11 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     bool send(Request req) override {
       m_addr_mapper->apply(req);
       int channel_id = req.addr_vec[0];
+      if(!(req.is_trace_core_req)) {
+        req.is_host_req = true;
+      } else {
+        req.is_host_req = false;
+      }
       bool is_success = m_controllers[channel_id]->send(req);
 
       if (is_success) {
@@ -208,9 +213,16 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       bool is_dram_ctrl_finished = true;
       int num_channels = m_dram->get_level_size("channel"); 
       for (int i = 0; i < num_channels; i++) {
-        if(!m_controllers[i]->is_finished())
-          is_dram_ctrl_finished = false;
+
+        if(m_trace_core_enable) {
+          if(!m_controllers[i]->is_finished())
+            is_dram_ctrl_finished = false;
+        } else {
+          if(!m_controllers[i]->is_abs_finished())
+            is_dram_ctrl_finished = false;
+        }
       }
+
 
       return (is_dram_ctrl_finished);
     }    
