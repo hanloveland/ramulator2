@@ -1920,13 +1920,15 @@ class DDR5PCH : public IDRAM, public Implementation {
         {(22+(1*8)+16),(38+(1*8)+24),(44+(1*8)+33),(50+(1*8)+37),(54+(1*8)+40),(60+(1*8)+45)}, 
       };     
       
-      int io_boost_idx;
-      switch (io_boost) {
-        case 1:     io_boost_idx =  0;
-        case 2:     io_boost_idx =  1;
-        case 4:     io_boost_idx =  2;
-        default:    io_boost_idx = -1;
-      }      
+      int io_boost_idx = [](int io_boost_lvl) -> int { 
+        switch (io_boost_lvl) {
+          case 1:  return 0;
+          case 2:  return 1;
+          case 4:  return 2;
+          default: return -1;
+        }
+      }(io_boost);
+           
       m_timing_vals("nCCDS_WTR") = nCCDS_WTR_TABLE[io_boost_idx][rate_id];
       m_timing_vals("nCCDL_WTR") = nCCDL_WTR_TABLE[io_boost_idx][rate_id];
 
