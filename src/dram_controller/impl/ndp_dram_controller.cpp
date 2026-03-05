@@ -321,6 +321,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint64_t m_tcore_db_dram_d2pa_access_cnt;
     uint64_t m_tcore_db_dram_ndp_access_access_cnt;
 
+
+    uint64_t m_host_acceess_rec_counter;
+    uint64_t m_host_acceess_iss_counter;
+    uint64_t m_host_rd_acceess_rec_counter;
+    uint64_t m_host_rd_acceess_iss_counter;
+
+
     bool io_boost = false;
 
     uint32_t m_ndp_row_hit_low_cap;
@@ -663,6 +670,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_tcore_db_dram_d2pa_access_cnt       = 0;
       m_tcore_db_dram_ndp_access_access_cnt = 0;
 
+      m_host_acceess_rec_counter     = 0;
+      m_host_acceess_iss_counter     = 0;
+      m_host_rd_acceess_rec_counter  = 0;
+      m_host_rd_acceess_iss_counter  = 0;      
+
       m_normal_acc_in_per_pch.resize(num_pseudochannel,0);
       m_normal_acc_out_per_pch.resize(num_pseudochannel,0);
       m_ndp_acc_in_per_pch.resize(num_pseudochannel,0);
@@ -819,6 +831,14 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(is_success && !req.is_ndp_req && req.type_id == Request::Type::Read) {
         m_last_host_rd[req.addr_vec[psuedo_ch_idx]] = req.arrive;
       }
+
+      if(is_success && !is_success_forwarding && req.is_host_req) {
+        m_host_acceess_rec_counter++;
+        if(req.type_id == Request::Type::Read) {
+          m_host_rd_acceess_rec_counter++;
+        }
+      }
+
       return is_success;
     };
 
@@ -1495,6 +1515,17 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
               num_ndp_wr_req--;
               num_ndp_wr_req_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
             }                                       
+          }
+          if(req_it->is_host_req) {
+          if(req_it->command == m_cmds.RD      || req_it->command == m_cmds.RDA || 
+             req_it->command == m_cmds.POST_RD || 
+             req_it->command == m_cmds.WR      || req_it->command == m_cmds.WRA || 
+             req_it->command == m_cmds.POST_WR || req_it->command == m_cmds.POST_WRA) {
+              m_host_acceess_iss_counter++;
+              if(req_it->type_id == Request::Type::Read) { 
+                m_host_rd_acceess_iss_counter++;
+              }      
+            }      
           }
           // Update Counter for Mode Selection
           if(req_it->command == m_cmds.RD     || req_it->command == m_cmds.RDA || 
@@ -2415,19 +2446,30 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     bool is_finished() override {    
       bool is_dram_ctrl_finished = true;
 
-      if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;
+      if(m_host_rd_acceess_rec_counter != m_host_rd_acceess_iss_counter) is_dram_ctrl_finished = false;
+      
+      // if((m_active_buffer.size() != 0)|| (pending.size() != 0)) is_dram_ctrl_finished = false;
 
-      if(is_dram_ctrl_finished) {
-        for(int i=0;i<num_pseudochannel;i++) {
-          if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
-             m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
-             m_to_wr_prefetch_buffers[i].size() != 0 ||
-             m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
-          // m_write_buffers[i].size() != 0  || 
-          // || m_wr_prefetch_buffers[i].size() != 0
-          if(!is_dram_ctrl_finished) break;
-        }
-      }
+      // if(is_dram_ctrl_finished) {
+      //   for(int i=0;i<num_ranks;i++) {
+      //     if(m_read_buffers[i].size() != 0 || m_write_buffers[i].size() != 0) is_dram_ctrl_finished = false;
+      //     if(!is_dram_ctrl_finished) break;
+      //   }
+      // }  
+
+      // if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;
+
+      // if(is_dram_ctrl_finished) {
+      //   for(int i=0;i<num_pseudochannel;i++) {
+      //     if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
+      //        m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
+      //        m_to_wr_prefetch_buffers[i].size() != 0 ||
+      //        m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
+      //     // m_write_buffers[i].size() != 0  || 
+      //     // || m_wr_prefetch_buffers[i].size() != 0
+      //     if(!is_dram_ctrl_finished) break;
+      //   }
+      // }
 
       return (is_dram_ctrl_finished);
     }
@@ -2435,19 +2477,21 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     bool is_abs_finished() override {    
       bool is_dram_ctrl_finished = true;
 
-      if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;
+      if(m_host_acceess_rec_counter != m_host_acceess_iss_counter) is_dram_ctrl_finished = false;
 
-      if(is_dram_ctrl_finished) {
-        for(int i=0;i<num_pseudochannel;i++) {
-          if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
-             m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
-             m_to_wr_prefetch_buffers[i].size() != 0 ||
-             m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
-          // m_write_buffers[i].size() != 0  || 
-          // || m_wr_prefetch_buffers[i].size() != 0
-          if(!is_dram_ctrl_finished) break;
-        }
-      }
+      // if((m_active_buffer.size() != 0) || (pending.size() != 0)) is_dram_ctrl_finished = false;
+
+      // if(is_dram_ctrl_finished) {
+      //   for(int i=0;i<num_pseudochannel;i++) {
+      //     if(m_read_buffers[i].size() != 0 || m_rd_prefetch_buffers[i].size() != 0 ||
+      //        m_write_buffers[i].size() != 0 || m_wr_prefetch_buffers[i].size() != 0 ||
+      //        m_to_wr_prefetch_buffers[i].size() != 0 ||
+      //        m_to_rd_prefetch_buffers[i].size() != 0 ) is_dram_ctrl_finished = false;
+      //     // m_write_buffers[i].size() != 0  || 
+      //     // || m_wr_prefetch_buffers[i].size() != 0
+      //     if(!is_dram_ctrl_finished) break;
+      //   }
+      // }
 
       return (is_dram_ctrl_finished);
     }    

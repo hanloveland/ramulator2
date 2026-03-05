@@ -780,9 +780,6 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       if(m_host_rd_acceess_rec_counter != m_host_rd_acceess_iss_counter) is_dram_ctrl_finished = false;
       
-      if(m_clk%50000 == 0) {
-        std::cout<<" m_host_rd_acceess_rec_counter "<< m_host_rd_acceess_rec_counter << " / m_host_rd_acceess_iss_counter "<<m_host_rd_acceess_iss_counter<<std::endl;
-      }
       // if((m_active_buffer.size() != 0)|| (pending.size() != 0)) is_dram_ctrl_finished = false;
 
       // if(is_dram_ctrl_finished) {

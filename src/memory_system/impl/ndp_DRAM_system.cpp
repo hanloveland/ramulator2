@@ -944,8 +944,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       bool is_dram_ctrl_finished = true;
       int num_channels = m_dram->get_level_size("channel"); 
       for (int i = 0; i < num_channels; i++) {
-        if(!m_controllers[i]->is_finished())
-        is_dram_ctrl_finished = false;
+
+        if(m_trace_core_enable) {
+          if(!m_controllers[i]->is_finished())
+            is_dram_ctrl_finished = false;
+        } else {
+          if(!m_controllers[i]->is_abs_finished())
+            is_dram_ctrl_finished = false;
+        }
       }        
       if(all_ndp_idle && is_dram_ctrl_finished && all_nl_req_buffer_empty) {
         int m_num_dimm   = num_channels / 2;
