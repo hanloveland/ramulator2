@@ -367,6 +367,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<bool> m_open_row_miss;
 
     uint32_t m_adaptive_row_cap;
+
+    std::vector<uint64_t> m_lat_vec;
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -729,6 +731,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         ReqBuffer& wr_buffer = m_write_buffers[req.addr_vec[psuedo_ch_idx]];        
         if (std::find_if(wr_buffer.begin(), wr_buffer.end(), compare_addr) != wr_buffer.end()) {
           // The request will depart at the next cycle
+          req.arrive = m_clk;
           req.depart = m_clk + 1;
           pending.push_back(req);
           is_success = true;
@@ -1611,6 +1614,8 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             new_req.arrive            = req_it->arrive;
             new_req.final_command     = m_cmds.POST_WR;
             new_req.is_trace_core_req = req_it->is_trace_core_req;
+            new_req.is_host_req       = req_it->is_host_req;
+            
             m_num_post_wr_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             std::string msg = std::string(" Remove Request (PRE_WR) from Buffer ") + std::to_string(buffer->size()) + std::string(")");
             DEBUG_PRINT(m_clk, "Memory Controller", new_req.addr_vec[ch_idx], new_req.addr_vec[psuedo_ch_idx], msg);              
@@ -1626,6 +1631,7 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             new_req.callback          = req_it->callback;
             new_req.final_command     = m_cmds.POST_RD;
             new_req.is_trace_core_req = req_it->is_trace_core_req;
+            new_req.is_host_req       = req_it->is_host_req;
             m_num_post_rd_cnts[req_it->addr_vec[psuedo_ch_idx]]++;
             bool is_success = false;              
 
@@ -1748,15 +1754,25 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         auto& req = pending[0];
         if (req.depart <= m_clk) {
           // Request received data from dram
-          if (req.depart - req.arrive > 1) {
+          uint64_t a_read_latency = req.depart - req.arrive;
+          if (a_read_latency > 1) {
             // Check if this requests accesses the DRAM or is being forwarded.
             // TODO add the stats back
-            s_read_latency += req.depart - req.arrive;
+            s_read_latency += a_read_latency;
             if((req.command == m_cmds.RD) || (req.command == m_cmds.RDA) ||
                (req.command == m_cmds.POST_RD)) {
-              s_normal_read_latency += req.depart - req.arrive;
+              s_normal_read_latency += a_read_latency;
             }
-            // std::cout<<" RD latency ["<<(req.depart - req.arrive)<<"] ";
+            if(req.is_host_req) {
+              if(a_read_latency > 10000) {
+                std::cout<<" Read Latency over 1000 - "<<a_read_latency<<std::endl;
+                std::cout<<" current "<<m_clk<<std::endl;
+                std::cout<<" depart "<<req.depart<<std::endl;
+                std::cout<<" arrive "<<req.arrive<<std::endl;
+                m_dram->print_req(req);
+              }
+              m_lat_vec.push_back(a_read_latency);
+            }            
             // m_dram->print_req(req);
           }
 
@@ -2622,6 +2638,17 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       v.push_back(m_tcore_db_dram_ndp_access_access_cnt);
 
       return v; 
+    }
+
+    uint64_t get_req_latency() override {
+
+      if(m_lat_vec.size() != 0) {
+        auto& req_latency = m_lat_vec[0];
+        m_lat_vec.erase(m_lat_vec.begin());
+        return req_latency;
+      } else {
+        return 0;
+      }
     }
 
 };

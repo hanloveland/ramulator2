@@ -202,6 +202,24 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     size_t m_max_outstanding;
     std::unordered_map<int, OutstandingRequest> m_outstanding_reads;
 
+    // Latency Tracking
+    static constexpr uint32_t BIN_WIDTH = 1;           // 1 cycle per bin
+    static constexpr uint32_t MAX_LAT   = 2000000;     // adjust for your sim
+    static constexpr uint32_t NUM_BINS  = (MAX_LAT / BIN_WIDTH) + 2;    
+
+    // Histograms
+    std::array<uint64_t, NUM_BINS> hist_{};      // latency
+    std::array<uint64_t, NUM_BINS> q_hist_{};    // queueing (optional)
+    std::array<uint64_t, NUM_BINS> s_hist_{};    // service  (optional)
+
+    // Aggregates
+    uint64_t total_reads_ = 0;
+    uint64_t sum_lat_     = 0;
+    uint64_t max_lat_     = 0;
+    uint64_t overflow_    = 0;
+
+    uint64_t read_latency;    
+
   public:
     void init() override { 
       Logger_t m_logger;
@@ -474,6 +492,12 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Host send NDP Request to NDP Unit");            
           } 
 
+          if(!(req.is_trace_core_req)) {
+            req.is_host_req = true;
+          } else {
+            req.is_host_req = false;
+          }
+
           is_success = m_controllers[channel_id]->send(req);
           if (is_success) {
             switch (req.type_id) {
@@ -505,6 +529,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       m_dram->tick();
       for (auto controller : m_controllers) {
         controller->tick();
+        while(1) {
+          read_latency = controller->get_req_latency();
+          if(read_latency == 0) {
+            break;
+          } else {
+            record_latency(read_latency);
+          }
+        }        
       }
 
       #ifdef PCH_DEBUG
@@ -1192,6 +1224,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       std::cout << std::endl;
 
+      report();    
 
     }    
 
@@ -1416,6 +1449,49 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                   << bw << " GB/s\n";
     }
     
+    inline void record_latency(uint64_t lat) {
+      ++total_reads_;
+      sum_lat_ += lat;
+      max_lat_ = std::max(max_lat_, lat);
+
+      const uint64_t idx = lat / BIN_WIDTH;
+      if (idx < NUM_BINS - 1) {
+        hist_[idx] += 1;
+      } else {
+        hist_[NUM_BINS - 1] += 1;
+        ++overflow_;
+      }
+    }
+
+    uint64_t percentile_from_hist(double p) const {
+      // Returns smallest latency L such that CDF(L) >= p
+      const uint64_t total = total_reads_;
+      const uint64_t target = (uint64_t)std::ceil(p * (double)total);
+      uint64_t cdf = 0;
+      for (uint32_t i = 0; i < NUM_BINS; ++i) {
+        cdf += hist_[i];
+        if (cdf >= target) {
+          // convert bin index to representative latency
+          if (i == NUM_BINS - 1) return MAX_LAT; // overflow bucket
+          return (uint64_t)i * BIN_WIDTH;
+        }
+      }
+      return MAX_LAT;
+    }
+
+    void report() const {
+      const uint64_t total = total_reads_;
+      std::cout << "READ latency samples: " << total << "\n";
+      if (total == 0) return;
+
+      std::cout << "  avg: "  << (double)sum_lat_ / (double)total << " cycles\n";
+      std::cout << "  p50: "  << percentile_from_hist(0.50) << " cycles\n";
+      std::cout << "  p95: "  << percentile_from_hist(0.95) << " cycles\n";
+      std::cout << "  p99: "  << percentile_from_hist(0.99) << " cycles\n";
+      std::cout << "  p999: " << percentile_from_hist(0.999) << " cycles\n";
+      std::cout << "  max: "  << max_lat_ << " cycles\n";
+      std::cout << "  overflow: " << overflow_ << "\n";
+    }
 
 };
   

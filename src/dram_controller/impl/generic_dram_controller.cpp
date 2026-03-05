@@ -121,6 +121,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     int bank_idx = 0;
     int row_idx = 0;
     uint32_t m_adaptive_row_cap;
+
+    // Record Read Latency
+    std::vector<uint64_t> m_lat_vec;
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -271,6 +274,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         ReqBuffer& wr_buffer = m_write_buffers[req.addr_vec[m_rank_addr_idx]];    
         if (std::find_if(m_write_buffer.begin(), m_write_buffer.end(), compare_addr) != m_write_buffer.end()) {
           // The request will depart at the next cycle
+          req.arrive = m_clk;
           req.depart = m_clk + 1;
           pending.push_back(req);
           is_success_forwarding = true;
@@ -577,12 +581,17 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         auto& req = pending[0];
         if (req.depart <= m_clk) {
           // Request received data from dram
-          if (req.depart - req.arrive > 1) {
+          uint64_t a_read_latency = req.depart - req.arrive;
+          if (a_read_latency > 1) {
             // Check if this requests accesses the DRAM or is being forwarded.
             // TODO add the stats back
-            s_read_latency += req.depart - req.arrive;
+            s_read_latency += a_read_latency;
             // std::cout<<" RD latency ["<<(req.depart - req.arrive)<<"] ";
             // m_dram->print_req(req);
+
+            if(req.is_host_req) {
+              m_lat_vec.push_back(a_read_latency);
+            }
           }
 
           if (req.callback) {
@@ -816,7 +825,7 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       return -1;
     }      
 
-    virtual size_t get_host_acces_latency() {
+    size_t get_host_acces_latency() {
       return s_read_latency;
     }    
 
@@ -828,6 +837,17 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
 
       return v; 
     }    
+
+    uint64_t get_req_latency() override {
+
+      if(m_lat_vec.size() != 0) {
+        auto& req_latency = m_lat_vec[0];
+        m_lat_vec.erase(m_lat_vec.begin());
+        return req_latency;
+      } else {
+        return 0;
+      }
+    }
 };
   
 }   // namespace Ramulator
