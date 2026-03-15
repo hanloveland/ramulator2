@@ -570,6 +570,24 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               }
             }
           }
+          std::cout<<" Print All PCH Remained Req in Slot "<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) { 
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              int dram_lvl_pch_id = dimm_id*m_num_subch*num_pseudochannel + pch_id;
+              std::cout<<"["<<dimm_id<<"]["<<pch_id<<"] --> "<<dram_lvl_pch_id<<std::endl;
+              for(int his_idx=0;his_idx<pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size();his_idx++) {       
+                auto nl_req_it = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][his_idx];                                        
+                std::cout<<" - ["<<his_idx<<"] OPCODE: "<<op_to_str.at(static_cast<NDP_Op>(nl_req_it.opcode));
+                std::cout<<", OPSIZE: "<<nl_req_it.opsize;
+                std::cout<<", CNT: "<<nl_req_it.cnt;
+                std::cout<<", CH: "<<nl_req_it.ch;
+                std::cout<<", PCH: "<<nl_req_it.pch;
+                std::cout<<", BG: "<<nl_req_it.bg;
+                std::cout<<", BK: "<<nl_req_it.bk;
+                std::cout<<", ROW: "<<nl_req_it.row<<std::endl;
+              }
+            }
+          }            
 
           throw std::runtime_error("Detecting PCH Error");   
         }

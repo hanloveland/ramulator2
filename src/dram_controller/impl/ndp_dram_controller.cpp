@@ -34,6 +34,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     std::vector<std::vector<std::pair<Request, int>>> m_to_rd_prefetch_buffers;
     std::vector<std::vector<std::pair<Request, int>>> m_to_wr_prefetch_buffers;
 
+    std::vector<std::vector<std::pair<Request, int>>> m_pending_ndp_rd;
+    std::vector<std::vector<std::pair<Request, int>>> m_pending_ndp_wr;
+
     // Decoupled Priority Mode (MC <-> DB / DB <-> DRAM)
     enum MC_DB_RW_MODE {
       DB_NDP_WR, 
@@ -376,6 +379,10 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint32_t m_adaptive_row_cap;
 
     std::vector<uint64_t> m_lat_vec;
+
+    int m_ndp_read_latecny;
+    int m_ndp_write_latecny;
+
   public:
     void init() override {      
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -490,6 +497,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       m_to_rd_prefetch_buffers.resize(num_pseudochannel);
       m_to_wr_prefetch_buffers.resize(num_pseudochannel);
+
+      m_pending_ndp_rd.resize(num_pseudochannel);
+      m_pending_ndp_wr.resize(num_pseudochannel);
 
       m_channel_stats.resize(num_pseudochannel);
       m_periodic_channel_stats.resize(num_pseudochannel);
@@ -712,6 +722,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank,-1);  
       m_pre_open_row.resize(num_pseudochannel*num_bankgroup*num_bank, -1);
       m_open_row_miss.resize(num_pseudochannel*num_bankgroup*num_bank, false);      
+
+      m_ndp_read_latecny = m_dram->m_timing_vals("nCL") + m_dram->m_timing_vals("nBL");
+      m_ndp_write_latecny = m_dram->m_timing_vals("nCWL") + m_dram->m_timing_vals("nBL");
 
     };
 
@@ -972,7 +985,25 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             }    
             m_to_wr_prefetch_buffers[pch_id].erase(m_to_wr_prefetch_buffers[pch_id].begin());
           }
-        }        
+        }
+        
+        if(m_pending_ndp_rd[pch_id].size() != 0) {
+          for(int i=0;i<m_pending_ndp_rd[pch_id].size();i++) {
+            m_pending_ndp_rd[pch_id][i].second-=1;
+          }
+          if(m_pending_ndp_rd[pch_id][0].second == 0) {
+            m_pending_ndp_rd[pch_id].erase(m_pending_ndp_rd[pch_id].begin());
+          }
+        }
+
+        if(m_pending_ndp_wr[pch_id].size() != 0) {
+          for(int i=0;i<m_pending_ndp_wr[pch_id].size();i++) {
+            m_pending_ndp_wr[pch_id][i].second-=1;
+          }
+          if(m_pending_ndp_wr[pch_id][0].second == 0) {
+            m_pending_ndp_wr[pch_id].erase(m_pending_ndp_wr[pch_id].begin());
+          }
+        }                
       }
 
       // Update Each Row Cap 
@@ -1634,8 +1665,14 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
               req_it->depart = m_clk + m_dram->m_read_latency;
               pending.push_back(*req_it);  
             }
+            else if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA) {
+              m_pending_ndp_rd[req_it->addr_vec[psuedo_ch_idx]].push_back(std::make_pair(*req_it,m_ndp_read_latecny));
+            }
           } else if (req_it->type_id == Request::Type::Write) {
-            // TODO: Add code to update statistics
+            // TODO: Add code to update statistics'
+            if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA) {
+              m_pending_ndp_wr[req_it->addr_vec[psuedo_ch_idx]].push_back(std::make_pair(*req_it,m_ndp_write_latecny));
+            }
           }
           
           if(req_it->command == m_cmds.PRE_WR) {
@@ -2502,8 +2539,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     }
 
     bool is_empty_ndp_req(int pch_idx) override {
-      if(num_ndp_rd_req_per_pch[pch_idx] == 0 && num_ndp_wr_req_per_pch[pch_idx] == 0) return true;
-      else                                                                             return false;
+      bool pending_ndp_req_empth = true;
+      if(m_pending_ndp_rd[pch_idx].size() != 0 || m_pending_ndp_wr[pch_idx].size() != 0)
+        pending_ndp_req_empth = false;
+      if(num_ndp_rd_req_per_pch[pch_idx] == 0 && num_ndp_wr_req_per_pch[pch_idx] == 0 && pending_ndp_req_empth) return true;
+      else                                                                                                      return false;
     }    
 
     int get_config_reg_resp(int pch_idx) override {

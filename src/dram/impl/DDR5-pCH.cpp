@@ -478,6 +478,16 @@ class DDR5PCH : public IDRAM, public Implementation {
 
     std::vector<std::vector<Inst_Slot>> ndp_inst_hist_per_pch; // Running NDP Instruction Slot
     int max_ndp_inst_hist = 32;
+
+    int ch_idx = 0;
+    int psuedo_ch_idx = 0;
+    int bankgroup_idx = 0;
+    int bank_idx = 0;
+    int row_idx = 0;
+
+    // CH, PCH, RANK, BG, BK, ROW
+    std::map<std::tuple<int, int, int, int, int, int>, uint64_t> m_row_access_counts;    
+
     #endif 
 
     /*
@@ -1168,7 +1178,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       pipe_ndp_addr_per_pch[pch_idx].push_back(addr_vec);      
       pipe_ndp_id_per_pch[pch_idx].push_back(thread_id);    
       std::string msg = std::string(" Issue NDP Command to DIMM : ") + std::string(m_commands.at(command));
-      DEBUG_PRINT(m_clk, "Memory Controller", addr_vec[m_levels["channel"]], addr_vec[m_levels["pseudochannel"]], msg);          
+      DEBUG_PRINT(m_clk, "Memory Controller", addr_vec[m_levels["channel"]], addr_vec[m_levels["pseudochannel"]], msg);      
+      
+      // auto key = std::make_tuple(addr_vec[ch_idx], addr_vec[psuedo_ch_idx], 0, addr_vec[bankgroup_idx], addr_vec[bank_idx], addr_vec[row_idx]);
+      // m_row_access_counts[key]++;;      
     }
 
     int get_ndp_response(int ch_id, int pch_id) override {
@@ -1694,6 +1707,12 @@ class DDR5PCH : public IDRAM, public Implementation {
       #ifdef PCH_DEBUG
       ndp_inst_hist_per_pch.resize(num_channels* num_pseudochannel,std::vector<Inst_Slot>(0,Inst_Slot()));  
       max_ndp_inst_hist = 32;
+
+      ch_idx = m_levels("channel");
+      psuedo_ch_idx = m_levels("pseudochannel");
+      bankgroup_idx = m_levels("bankgroup");
+      bank_idx = m_levels("bank");
+      row_idx = m_levels("row");      
       #endif 
 
 
@@ -2671,6 +2690,49 @@ class DDR5PCH : public IDRAM, public Implementation {
                       << std::endl;
         }        
     }
+
+    std::cout << "========================================" << std::endl;
+
+    std::cout << " Print All Instruction Slot of NDP Unit " << std::endl;
+
+    for (int p = 0 ; p < m_num_channels * m_num_pseudochannel; p++ ) {
+        std::cout<< " NDP Unit ["<<p<<"]"<<std::endl;
+        std::cout << std::left
+                  << std::setw(6)  << "PC"
+                  << std::setw(16) << "OPCODE"
+                  << std::setw(8)  << "OPSIZE"
+                  << std::setw(8)  << "ID"
+                  << std::setw(6)  << "BG"
+                  << std::setw(6)  << "BK"
+                  << std::setw(6)  << "CNT"
+                  << std::endl;
+        std::cout << std::string(54, '-') << std::endl;        
+        for (int i = 0; i < (int)ndp_inst_slot_per_pch[p].size(); i++) {
+
+            auto it = ndp_opcode_str.find(ndp_inst_slot_per_pch[p][i].opcode);
+            std::string opcode_name = (it != ndp_opcode_str.end()) ? it->second : "UNKNOWN(" + std::to_string(ndp_inst_slot_per_pch[p][i].opcode) + ")";
+
+            std::cout << std::left
+                      << std::setw(6)  << i
+                      << std::setw(16) << opcode_name
+                      << std::setw(8)  << ndp_inst_slot_per_pch[p][i].opsize
+                      << std::setw(8)  << ndp_inst_slot_per_pch[p][i].id
+                      << std::setw(6)  << ndp_inst_slot_per_pch[p][i].bg
+                      << std::setw(6)  << ndp_inst_slot_per_pch[p][i].bk
+                      << std::setw(6)  << ndp_inst_slot_per_pch[p][i].cnt
+                      << std::endl;
+        }        
+    }
+
+    std::cout << " Print All Access History " << std::endl;
+    
+    std::cout << "CH/PCH/Rank/BankGroup/Bank/Row: AccessCount" << std::endl;
+
+    for (const auto& [key, count] : m_row_access_counts) {
+      auto [ch, pch, rank, bg, ba, ro] = key;
+      std::cout << fmt::format("{},{},{},{},{},{},{}", ch, pch, rank, bg, ba, ro, count) << std::endl;
+    }
+
     }    
 };
 
