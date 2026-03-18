@@ -18,6 +18,7 @@ target_sources(
   # impl/HBM2.cpp
   # impl/HBM3.cpp
   impl/DDR5-pCH.cpp
+  impl/DDR5-AsyncDIMM.cpp
 )
 
 target_link_libraries(

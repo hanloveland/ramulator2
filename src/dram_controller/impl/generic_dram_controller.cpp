@@ -471,8 +471,8 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
             // TODO: Add code to update statistics
           }
           
-          if(req_it->command == m_dram->m_commands("RD")     || m_dram->m_commands("RDA") || 
-             req_it->command == m_dram->m_commands("WR")     || m_dram->m_commands("WRA")) {
+          if(req_it->command == m_dram->m_commands("RD")  || req_it->command == m_dram->m_commands("RDA") ||
+             req_it->command == m_dram->m_commands("WR")  || req_it->command == m_dram->m_commands("WRA")) {
               m_host_access_cnt++;
               if(req_it->is_trace_core_req) {
                 m_tcore_host_access_cnt++;

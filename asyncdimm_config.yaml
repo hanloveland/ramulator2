@@ -1,0 +1,59 @@
+Frontend:
+  impl: LoadStoreNCoreTrace
+  clock_ratio: 1
+  num_cores: 1
+  debug_mode: false
+  max_inst: 500000
+  
+
+  core0_trace: "../spec_trace/403.gcc"
+  core0_mshr_size: 32
+  core0_is_ndp_trace: false
+  core0_repeat: 1
+
+  Translation:
+    impl: NoTranslation
+    max_addr: 2147483648
+
+MemorySystem:
+  impl: AsyncDIMM
+  clock_ratio: 1
+  debug_fsm_sync: false  # Set true to verify NMA MC shadow FSM sync every cycle
+  debug_mode: false
+  # NMA trace configuration (uncomment for NMA Mode testing)
+  # trace_core_enable: true
+  # trace_nma_type: true
+  # trace_core_mshr_size: 16
+  # trace_path: "path/to/nma_trace.trace"
+
+  DRAM:
+    impl: DDR5-AsyncDIMM
+    org:
+      preset: DDR5_16Gb_x4
+      channel: 2
+      rank: 4
+      dq: 4
+    timing:
+      preset: DDR5_4800B
+    RFM:
+      BRC: 0
+    drampower_enable: true
+    voltage:
+      preset: Default
+    current:
+      preset: DDR5_4800x4    
+
+  Controller:
+    impl: AsyncDIMMHost
+    Scheduler:
+      impl: FRFCFS
+    RefreshManager:
+      impl: AllBank
+    RowPolicy:
+      impl: ClosedRowPolicy
+      cap: 128
+    plugins:
+    adaptive_row_cap: 8
+
+  AddrMapper:
+    impl: RoBaCoRaCh

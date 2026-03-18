@@ -14,6 +14,8 @@ target_sources(
   # impl/dummy_controller.cpp
   impl/generic_dram_controller.cpp
   impl/ndp_dram_controller.cpp
+  impl/asyncdimm_host_controller.cpp
+  impl/asyncdimm_nma_controller.cpp
   # impl/prac_dram_controller.cpp
   
   # impl/scheduler/bh_scheduler.cpp
