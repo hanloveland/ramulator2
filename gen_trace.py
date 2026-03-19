@@ -71,6 +71,7 @@ NDP_TARGET_BK = 3    # To decoule host access and DRAM access
 SPLIT_HIGH_BANK = False
 LINEAR_ACCESS = False
 GEN_BGCH = False
+FIX_BANK=True
 if SPLIT_HIGH_BANK:
     PCH_ADDRESS_SCHEME = "BhRoBlBgCoRaPcCH"
 else:
@@ -580,7 +581,10 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
                     if done == True:
                         break
                 if done == True:
-                    break               
+                    break       
+        elif FIX_BANK:
+            print("not supported FIX BANK with SPLIT_HIGH_BANK")
+            exit(1)                            
         else:
             for ro in range(NUM_ROW):
                 for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
@@ -606,29 +610,33 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
                 if done == True:
                     break        
     elif GEN_BGCH:
-        for ro in range(NUM_ROW):
-            for ba in range(NUM_BANK):
-                for co in range(NUM_COL): 
-                    for rk in range(NUM_RANK):        
-                        for ch in range(NUM_CHANNEL):
-                            for bg in range(NUM_BANKGROUP):
-                                write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
-                                cnt_req+=1
-                                if cnt_req == num_req:
-                                    done = True
-                                
+        if FIX_BANK:
+            print("not supported FIX BANK with SPLIT_HIGH_BANK")
+            exit(1)
+        else:
+            for ro in range(NUM_ROW):
+                for ba in range(NUM_BANK):
+                    for co in range(NUM_COL): 
+                        for rk in range(NUM_RANK):        
+                            for ch in range(NUM_CHANNEL):
+                                for bg in range(NUM_BANKGROUP):
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    cnt_req+=1
+                                    if cnt_req == num_req:
+                                        done = True
+                                    
+                                    if done == True:
+                                        break
                                 if done == True:
-                                    break
+                                    break    
                             if done == True:
-                                break    
+                                break 
                         if done == True:
-                            break 
+                            break
                     if done == True:
                         break
                 if done == True:
-                    break
-            if done == True:
-                break             
+                    break             
     else:
         if LINEAR_ACCESS and NORMAL_ADDRESS_SCHEME == "RoBaCoRaCh":
             for ro in range(NUM_ROW):
@@ -655,13 +663,13 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
                 if done == True:
                     break        
         else:
-            for ro in range(NUM_ROW):
-                for ba in range(NUM_BANK):
+            if FIX_BANK:
+                for ro in range(NUM_ROW):
                     for co in range(NUM_COL): 
                         for bg in range(NUM_BANKGROUP):
                             for rk in range(NUM_RANK):        
                                 for ch in range(NUM_CHANNEL):
-                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                    write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, NDP_TARGET_BK, start_row+ro, co))
                                     cnt_req+=1
                                     if cnt_req == num_req:
                                         done = True
@@ -675,9 +683,31 @@ def gen_normal_req_from_row(f,start_row,num_req,req_type):
                         if done == True:
                             break
                     if done == True:
-                        break
-                if done == True:
-                    break        
+                        break                 
+            else:
+                for ro in range(NUM_ROW):
+                    for ba in range(NUM_BANK):
+                        for co in range(NUM_COL): 
+                            for bg in range(NUM_BANKGROUP):
+                                for rk in range(NUM_RANK):        
+                                    for ch in range(NUM_CHANNEL):
+                                        write_normal_trace(f,req_type,encode_normal_address(ch, rk, bg, ba, start_row+ro, co))
+                                        cnt_req+=1
+                                        if cnt_req == num_req:
+                                            done = True
+                                        
+                                        if done == True:
+                                            break
+                                    if done == True:
+                                        break    
+                                if done == True:
+                                    break 
+                            if done == True:
+                                break
+                        if done == True:
+                            break
+                    if done == True:
+                        break        
 
 def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
     cnt_req = 0
@@ -706,7 +736,10 @@ def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
                     if done == True:
                         break
                 if done == True:
-                    break               
+                    break    
+        elif FIX_BANK:
+            print("not supported FIX BANK with SPLIT_HIGH_BANK")
+            exit(1)                                 
         else:
             for ro in range(NUM_ROW):
                 for ba in range(int(NUM_BANK/2),int(NUM_BANK-1)):
@@ -732,6 +765,10 @@ def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
                 if done == True:
                     break     
     elif GEN_BGCH:
+        if FIX_BANK:
+            print("not supported FIX BANK with SPLIT_HIGH_BANK")
+            exit(1)
+        else:
             for ro in range(NUM_ROW):
                 for ba in range(NUM_BANK):
                     for co in range(NUM_COL): 
@@ -782,13 +819,13 @@ def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
                 if done == True:
                     break       
         else:
-            for ro in range(NUM_ROW):
-                for ba in range(NUM_BANK):
+            if FIX_BANK:
+                for ro in range(NUM_ROW):
                     for co in range(NUM_COL): 
                         for bg in range(NUM_BANKGROUP):
                             for pch in range(int(NUM_PSEUDOCHANNEL)):        
                                 for ch in range(NUM_CHANNEL):
-                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                                
+                                    write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, NDP_TARGET_BK, start_row+ro, co))                                                                
                                     cnt_req+=1
                                     if cnt_req == num_req:
                                         done = True
@@ -802,9 +839,31 @@ def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
                         if done == True:
                             break
                     if done == True:
-                        break
-                if done == True:
-                    break       
+                        break                   
+            else:
+                for ro in range(NUM_ROW):
+                    for ba in range(NUM_BANK):
+                        for co in range(NUM_COL): 
+                            for bg in range(NUM_BANKGROUP):
+                                for pch in range(int(NUM_PSEUDOCHANNEL)):        
+                                    for ch in range(NUM_CHANNEL):
+                                        write_normal_trace(f,req_type,encode_address(ch, pch, 0, bg, ba, start_row+ro, co))                                                                
+                                        cnt_req+=1
+                                        if cnt_req == num_req:
+                                            done = True
+                                        
+                                        if done == True:
+                                            break
+                                    if done == True:
+                                        break    
+                                if done == True:
+                                    break 
+                            if done == True:
+                                break
+                        if done == True:
+                            break
+                    if done == True:
+                        break       
                           
 def cal_it(input_size, scaling):
     if scaling == 4:
@@ -1590,6 +1649,14 @@ def gemv_pch(f, input_size, scaling):
         n_tile_block_row = 32
     elif tmp1 >= 16:
         n_tile_block_row = 16
+    elif tmp1 >= 8:
+        n_tile_block_row = 8        
+    elif tmp1 >= 4:
+        n_tile_block_row = 4
+    elif tmp1 >= 2:
+        n_tile_block_row = 2             
+    elif tmp1 >= 1:
+        n_tile_block_row = 1        
     else:
         print("Error: too small n_tile_block_row")
         exit(1)      
@@ -1607,6 +1674,10 @@ def gemv_pch(f, input_size, scaling):
     # n_tile_block_row * n_row_p_vec * n_bg * 1 or 2 < 1024 
     # Iteration Tile Block 
     iteration_tile_block = int(vec_size/(n_tile_block_row*n_tile_row))
+    if iteration_tile_block == 0:
+        n_tile_block_row =  int(vec_size/n_tile_row)
+        print(f" - resize n_tile_block_row to {n_tile_block_row}")    
+        iteration_tile_block = int(vec_size/(n_tile_block_row*n_tile_row))
     print(f" - iteration_tile_block: {iteration_tile_block}")
     # results vector colum size (block)
     # n_tile_block_row*n_tile_row/(n_ch * n_pch)
@@ -2105,8 +2176,8 @@ if __name__ == '__main__':
     print(" ========================================================================  ")
 
     # make generated trace output path 
-    root_path = "multi_dimm/1dimm"
-    # root_path = "test_trace"
+    # root_path = "multi_dimm/16dimm"
+    root_path = "trace_single_bk"
     pch_ndp_trace_path = root_path + "/pch_ndp"
     pch_none_ndp_trace_path = root_path + "/pch_non_ndp"
     baseline_trace_path = root_path + "/baseline"
@@ -2131,7 +2202,7 @@ if __name__ == '__main__':
     print(" - Baseline Workload Path: ",baseline_trace_path)
 
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
-    '''
+    # '''
     for size in input_size_list:
         for bench in ["AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT"]:
             generate_trace(bench, size,baseline_trace_path, pch=False,is_ndp_ops=False, scaling_factor=1)
@@ -2146,12 +2217,13 @@ if __name__ == '__main__':
             generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
 
     '''
-    for size in mat_input_size_list:
-        # generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
+    # for size in mat_input_size_list:
+    for size in ["128K"]:        
+        generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
         for scaling in [1]:
-            # generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
+            generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
             generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
-    # '''
+    '''
     # for size in input_size_list:
     #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
     #     generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
