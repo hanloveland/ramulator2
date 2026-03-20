@@ -328,6 +328,15 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
      * Completes reads (into pending for callback) and writes immediately.
      */
     void drain_offloads_for_rank(int rank_id) {
+      // Clear stale refresh requests in priority buffer for this rank
+      // (REFO requests that weren't issued before C2H transition)
+      if (rank_id >= 0 && rank_id < m_num_rank) {
+        while (m_priority_buffers[rank_id].size() > 1) {
+          // Keep at most 1 pending refresh (the current interval's)
+          m_priority_buffers[rank_id].remove(m_priority_buffers[rank_id].begin());
+        }
+      }
+
       // Drain RU entries for this rank
       for (auto it = m_return_unit.begin(); it != m_return_unit.end(); ) {
         if (it->req.addr_vec[m_rank_addr_idx] == rank_id) {

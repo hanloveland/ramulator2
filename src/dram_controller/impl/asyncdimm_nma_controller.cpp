@@ -812,9 +812,10 @@ class AsyncDIMMNMAController {
      *   REQ → CMD: REQ FIFO empty OR PRE was just issued from REQ FIFO
      */
     void try_issue_concurrent_command() {
-      // Refresh has highest priority
+      // Refresh has highest priority — block ALL other commands until refresh completes
       if (m_nma_refresh_pending) {
-        if (try_issue_nma_refresh()) return;
+        try_issue_nma_refresh();
+        return;  // No CMD/REQ FIFO commands while refresh pending
       }
 
       for (int i = 0; i < m_total_banks; i++) {
@@ -1289,9 +1290,10 @@ class AsyncDIMMNMAController {
      *   - One command per NMA tick.
      */
     void try_issue_nma_command() {
-      // Refresh has highest priority
+      // Refresh has highest priority — block ALL other commands until refresh completes
       if (m_nma_refresh_pending) {
-        if (try_issue_nma_refresh()) return;
+        try_issue_nma_refresh();
+        return;
       }
 
       // Round-robin over banks: check front of each FIFO
