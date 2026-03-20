@@ -2072,6 +2072,168 @@ def gemv_normal(f, input_size):
     print(f"  - RD Matrix: {num_rd * num_row}")    
     print(f"  - WR Vecotr: {num_rd}")    
 
+###############################################################################
+# AsyncDIMM Trace Generation
+#
+# AsyncDIMM uses base DDR5 (no pseudo-channel), rank-level NMA MC.
+# Address mapping: RoBaCoRaCh (same as NORMAL_ADDRESS_SCHEME = "RoBaCoRaCh")
+# NMAInst: unified 64-bit encoding with embedded row/col (no separate AccInst)
+#
+# Magic-path addresses (per system init):
+#   inst-buffer: row=MAX, bg=MAX-1, bk=MAX
+#   ctrl-register: row=MAX, bg=MAX, bk=MAX
+###############################################################################
+
+# AsyncDIMM DRAM parameters
+ASYNCDIMM_NUM_CHANNEL    = 2
+ASYNCDIMM_NUM_RANK       = 4
+ASYNCDIMM_NUM_BANKGROUP  = 8
+ASYNCDIMM_NUM_BANK       = 4
+ASYNCDIMM_NUM_ROW        = 65536
+ASYNCDIMM_NUM_COL        = 128   # 1KB row / 8B
+ASYNCDIMM_GRANULARITY    = 6     # 64B
+
+# AsyncDIMM NMA control region
+ASYNCDIMM_NMA_ROW     = ASYNCDIMM_NUM_ROW - 1      # 65535
+ASYNCDIMM_NMA_CTRL_BG = ASYNCDIMM_NUM_BANKGROUP - 1  # 7
+ASYNCDIMM_NMA_CTRL_BK = ASYNCDIMM_NUM_BANK - 1       # 3
+ASYNCDIMM_NMA_BUF_BG  = ASYNCDIMM_NUM_BANKGROUP - 2  # 6
+ASYNCDIMM_NMA_BUF_BK  = ASYNCDIMM_NUM_BANK - 1       # 3
+ASYNCDIMM_NDP_TARGET_BK = 3
+
+# NMAInst_Slot 64-bit encoding (matches request.h NMAInst_Slot)
+# [63:58] comp_opcode(6b) [57:51] opsize(7b) [50:48] bg(3b) [47:46] bk(2b)
+# [45:28] row(18b) [27:21] col(7b) [20:18] id(3b) [17:12] reserved(6b) [11:0] etc(12b)
+def nma_inst(comp_opcode, opsize, bg, bk, row, col, id, etc=0):
+    inst_64bit = 0
+    inst_64bit |= (comp_opcode & 0x3F)  << 58
+    inst_64bit |= (opsize      & 0x7F)  << 51
+    inst_64bit |= (bg          & 0x7)   << 48
+    inst_64bit |= (bk          & 0x3)   << 46
+    inst_64bit |= (row         & 0x3FFFF) << 28
+    inst_64bit |= (col         & 0x7F)  << 21
+    inst_64bit |= (id          & 0x7)   << 18
+    inst_64bit |= (etc         & 0xFFF)
+    return inst_64bit
+
+def nma_inst_loop(loop_cnt, jump_pc):
+    """Encode LOOP NMAInst: etc = (loop_cnt << 6) | jump_pc"""
+    etc = ((loop_cnt & 0x3F) << 6) | (jump_pc & 0x3F)
+    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, 0, 0, 0, etc)
+
+def encode_asyncdimm_address(channel, rank, bg, bank, row, col):
+    """Encode address for AsyncDIMM RoBaCoRaCh mapping (no pseudo-channel)."""
+    ch_bits  = int(math.log2(ASYNCDIMM_NUM_CHANNEL))    # 1
+    ra_bits  = int(math.log2(ASYNCDIMM_NUM_RANK))       # 2
+    co_bits  = int(math.log2(ASYNCDIMM_NUM_COL))        # 7
+    bg_bits  = int(math.log2(ASYNCDIMM_NUM_BANKGROUP))  # 3
+    ba_bits  = int(math.log2(ASYNCDIMM_NUM_BANK))       # 2
+    ro_bits  = int(math.log2(ASYNCDIMM_NUM_ROW))        # 16
+
+    address = 0
+    address |= (channel & ((1 << ch_bits) - 1))
+    address |= (rank    & ((1 << ra_bits) - 1))  << (ch_bits)
+    address |= (col     & ((1 << co_bits) - 1))  << (ch_bits + ra_bits)
+    address |= (bg      & ((1 << bg_bits) - 1))  << (ch_bits + ra_bits + co_bits)
+    address |= (bank    & ((1 << ba_bits) - 1))  << (ch_bits + ra_bits + co_bits + bg_bits)
+    address |= (row     & ((1 << ro_bits) - 1))  << (ch_bits + ra_bits + co_bits + bg_bits + ba_bits)
+    address = address << ASYNCDIMM_GRANULARITY
+    return address
+
+def dump_asyncdimm_nma_inst(f, inst_list, ch, rank):
+    """Write NMAInst list to inst-buffer address for a specific channel/rank.
+    Each WR carries 8 x 64-bit NMAInst as payload."""
+    num_inst = len(inst_list)
+    it = num_inst // 8
+    remain = num_inst % 8
+    data_array = [0] * 8
+    for i in range(it):
+        for j in range(8):
+            data_array[j] = inst_list[i * 8 + j]
+        addr = encode_asyncdimm_address(ch, rank, ASYNCDIMM_NMA_BUF_BG,
+                                        ASYNCDIMM_NMA_BUF_BK, ASYNCDIMM_NMA_ROW, i)
+        write_trace(f, 'ST', addr, data_array)
+    if remain != 0:
+        data_array = [0] * 8
+        for j in range(remain):
+            data_array[j] = inst_list[it * 8 + j]
+        addr = encode_asyncdimm_address(ch, rank, ASYNCDIMM_NMA_BUF_BG,
+                                        ASYNCDIMM_NMA_BUF_BK, ASYNCDIMM_NMA_ROW, it)
+        write_trace(f, 'ST', addr, data_array)
+
+def asyncdimm_start_nma(f, ch, rank):
+    """Write ctrl-reg to trigger NMA start for a specific rank.
+    payload[rank] = 1 signals start for that rank."""
+    data_array = [0] * 8
+    data_array[rank] = 1
+    addr = encode_asyncdimm_address(ch, rank, ASYNCDIMM_NMA_CTRL_BG,
+                                    ASYNCDIMM_NMA_CTRL_BK, ASYNCDIMM_NMA_ROW, 0)
+    write_trace(f, 'ST', addr, data_array)
+
+def asyncdimm_cal_it(input_size):
+    """Calculate iteration count and working parameters for AsyncDIMM.
+    AsyncDIMM: base DDR5, 8 BG, 4 BK, 128 col/row (1KB), no pCH."""
+    row_size = 8192   # 1KB * 8 (8B per col access, 128 cols * 64B = 8KB per row)
+    opsize = 127      # 0-indexed: 128 column accesses per instruction
+
+    vec_size = input_size_byte_list[input_size]
+    # Each rank: 8 BG available, each BG processes one row per iteration
+    num_working_bg = 8
+    max_size_per_iter = num_working_bg * row_size  # 8 * 8KB = 64KB per iteration
+
+    if vec_size > max_size_per_iter:
+        iteration = vec_size // max_size_per_iter
+        return iteration, num_working_bg, opsize
+    else:
+        # Scale down opsize for smaller inputs
+        ratio = max_size_per_iter // vec_size
+        return 1, num_working_bg, max(0, opsize // ratio)
+
+def copy_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM COPY: Y = X
+    NMAInst sequence per rank:
+      For each bg in [0, num_working_bg):
+        LOAD(opsize, bg, bk, src_row=5000+i, col=0)
+      For each bg in [0, num_working_bg):
+        WBD(opsize, bg, bk, dst_row=7000+i, col=0)
+      LOOP(iteration-1, jump_pc=0) if iteration > 1
+      EXIT
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+
+    print(f"  AsyncDIMM COPY: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    # Generate NMAInst + start trigger per rank per channel
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            # Build NMAInst list
+            nma_inst_list = []
+            jump_pc = 0
+            for bg in range(num_working_bg):
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 5000, 0, 0))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 7000, 0, 0))
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+
+            # Write NMAInst to inst-buffer
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+
+            # Write ctrl-reg (start trigger)
+            asyncdimm_start_nma(f, ch, rk)
+
+
 def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, scaling_factor=-1):
     global GEN_PCH_NORMAL_MODE
     if pch:
@@ -2166,6 +2328,31 @@ def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, sc
 
     print(f"-> Generated memory traces in '{file_name}'.")
 
+def generate_asyncdimm_trace(workload, size, output_path=''):
+    """Generate trace for AsyncDIMM NMA workload (base DDR5, rank-level NMA MC)."""
+    asyncdimm_workloads = {"COPY"}  # Extend as more workloads are implemented
+
+    if workload not in asyncdimm_workloads:
+        print(f"Error: AsyncDIMM workload '{workload}' not implemented. Available: {asyncdimm_workloads}")
+        return
+
+    if size not in input_size_list:
+        print(f"Error: Invalid size '{size}'")
+        return
+
+    file_name = f"asyncdimm_nma_{size}_{workload}.txt"
+    file_name = output_path + "/" + file_name
+
+    with open(file_name, 'w') as f:
+        if workload == "COPY":
+            copy_asyncdimm(f, size)
+        else:
+            print(f"Error: AsyncDIMM workload '{workload}' not implemented")
+            return
+
+    print(f"-> Generated AsyncDIMM trace in '{file_name}'.")
+
+
 def crete_folder(folder_path):
     if not os.path.exists(folder_path):
         os.mkdir(folder_path)
@@ -2197,9 +2384,17 @@ if __name__ == '__main__':
     crete_folder(pch_none_ndp_trace_path)
     crete_folder(baseline_trace_path)
 
+    asyncdimm_trace_path = root_path + "/asyncdimm_nma"
+    crete_folder(asyncdimm_trace_path)
+
     print(" - PCH NDP Workload Path: ",pch_ndp_trace_path)
     print(" - PCH Non-NDP Workload Path: ",pch_none_ndp_trace_path)
     print(" - Baseline Workload Path: ",baseline_trace_path)
+    print(" - AsyncDIMM NMA Workload Path: ",asyncdimm_trace_path)
+
+    # AsyncDIMM NMA traces
+    for size in input_size_list:
+        generate_asyncdimm_trace("COPY", size, asyncdimm_trace_path)
 
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
     # '''

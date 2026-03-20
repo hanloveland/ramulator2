@@ -181,10 +181,21 @@ struct NMAInst_Slot {
   };
 
   // Memory access type derived from comp_opcode
+  //
+  // Data operand definitions:
+  //   X   : Vector from DRAM            → DRAM RD required
+  //   Y   : Vector from NMA VMA buffer  → no DRAM access (already loaded)
+  //   Y2  : Vector from NMA VMA buffer  → no DRAM access (already loaded)
+  //   Z   : Vector result → written to VMA buffer (no DRAM write)
+  //   z   : Scalar result → written to VMA buffer (no DRAM write)
+  //   a   : Scalar constant embedded in instruction
+  //
+  // NOTE: The "T_" prefix means both operands come from VMA (Y, Y2).
+  //       No DRAM access is needed; these are VMA-internal compute operations.
   enum class MemAccessType {
-    READ,       // RD × opsize (or opsize×2 for transposed)
-    WRITE,      // WR × opsize
-    NONE,       // Compute-only or control
+    READ,       // RD × opsize — X is fetched from DRAM (bg/bk/row/col in instruction)
+    WRITE,      // WR × opsize — Y (VMA) written back to DRAM (WBD only)
+    NONE,       // VMA-internal or scalar-const compute; no DRAM access
     CONTROL,    // BARRIER, EXIT, LOOP
   };
 
@@ -220,19 +231,51 @@ struct NMAInst_Slot {
 
   /**
    * Get the memory access type for this instruction's comp_opcode.
+   *
+   * Opcodes that read X from DRAM → READ:
+   *   LOAD       Z = X
+   *   LOAD_ADD   Z = X + a      (a: scalar const, X: DRAM)
+   *   LOAD_MUL   Z = X * a
+   *   ADD        Z = X + Y      (X: DRAM, Y: VMA)
+   *   MUL        Z = X * Y
+   *   V_RED      Z += X
+   *   S_RED      z = SUM(X)
+   *   MAC        Z += X * Y
+   *   SCALE_ADD  Z = aX + Y
+   *
+   * Opcodes that write Y (VMA) back to DRAM → WRITE:
+   *   WBD        X = Y          (Y: VMA → DRAM)
+   *
+   * Opcodes that use only VMA data (Y, Y2); no DRAM access → NONE:
+   *   T_ADD      Z = Y + Y2
+   *   T_MUL      Z = Y * Y2
+   *   T_V_RED    Z += Y
+   *   T_S_RED    z = SUM(Y)
+   *   T_MAC      Z += Y * Y2
+   *
+   * Control → CONTROL:
+   *   BARRIER, EXIT, LOOP
    */
   MemAccessType get_mem_access_type() const {
     switch (comp_opcode) {
+      // All non-T ops that read X from DRAM
       case LOAD: case LOAD_ADD: case LOAD_MUL:
+      case ADD:  case MUL:
       case V_RED: case S_RED: case MAC: case SCALE_ADD:
-      case T_ADD: case T_MUL: case T_V_RED: case T_S_RED: case T_MAC:
         return MemAccessType::READ;
+
+      // Write-back: Y (VMA) → DRAM
       case WBD:
         return MemAccessType::WRITE;
-      case ADD: case MUL:
+
+      // T_* ops: both operands in VMA; no DRAM access
+      case T_ADD: case T_MUL: case T_V_RED: case T_S_RED: case T_MAC:
         return MemAccessType::NONE;
+
+      // Control
       case BARRIER: case EXIT: case LOOP:
         return MemAccessType::CONTROL;
+
       default:
         return MemAccessType::NONE;
     }
@@ -240,19 +283,19 @@ struct NMAInst_Slot {
 
   /**
    * Get total number of DRAM accesses for this instruction.
-   * Transposed opcodes (16-20) require double the accesses.
+   * All READ/WRITE ops access DRAM opsize times (no 2× multiplier).
+   * T_* ops (NONE) and CONTROL ops require 0 DRAM accesses.
    */
   int get_total_accesses() const {
-    if (get_mem_access_type() == MemAccessType::NONE ||
-        get_mem_access_type() == MemAccessType::CONTROL) {
+    auto type = get_mem_access_type();
+    if (type == MemAccessType::NONE || type == MemAccessType::CONTROL)
       return 0;
-    }
-    bool is_transposed = (comp_opcode >= T_ADD && comp_opcode <= T_MAC);
-    return is_transposed ? opsize * 2 : opsize;
+    return opsize;
   }
 
   /**
-   * Check if this is a transposed operation (double memory access).
+   * Check if this is a T_* (transposed) instruction.
+   * T_* ops operate entirely on VMA data (Y, Y2); no DRAM access.
    */
   bool is_transposed() const {
     return (comp_opcode >= T_ADD && comp_opcode <= T_MAC);
@@ -266,7 +309,8 @@ struct NMAInst_Slot {
   }
 
   /**
-   * Check if this is a compute-only instruction (no memory access).
+   * Check if this is a VMA-internal compute instruction (no DRAM access).
+   * Includes T_* ops (VMA-to-VMA) and scalar compute with no X from DRAM.
    */
   bool is_compute_only() const {
     return get_mem_access_type() == MemAccessType::NONE;

@@ -73,7 +73,17 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       "PREO",   // Offload PRE: no bank state change on host side
       "RDO",    // Offload RD: no DQ bus usage, relaxed timing
       "WRO",    // Offload WR: uses DQ bus, relaxed timing (omit tWL)
-      "RT",     // Return: variable burst length (batch_size x tBL)
+      "REFO",   // Offload REF: no bank state change, NMA MC handles actual REFab
+      // Return commands: RT_N returns N reads' data, DQ bus occupied N × tBL
+      "RT1", "RT2", "RT3", "RT4", "RT5", "RT6", "RT7", "RT8",
+      // NMA-Local commands: rank-local CA + rank-local data bus (no channel bus)
+      "ACT_L",    // NMA MC → DRAM: activate (rank-local CA)
+      "PRE_L",    // NMA MC → DRAM: precharge (rank-local CA)
+      "RD_L",     // NMA MC → DRAM: read (rank-local CA + rank-local data)
+      "WR_L",     // NMA MC → DRAM: write (rank-local CA + rank-local data)
+      "PREA_L",   // NMA MC → DRAM: precharge all (rank-local CA)
+      "REFab_L",  // NMA MC → DRAM: all-bank refresh (rank-local CA)
+      "REFab_L_end", // Refresh completion marker
     };
 
     inline static const ImplLUT m_command_scopes = LUT (
@@ -90,7 +100,12 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         {"PREO",  "bank"},    // Targets a specific bank (like PRE)
         {"RDO",   "column"},  // Targets a specific column (like RD)
         {"WRO",   "column"},  // Targets a specific column (like WR)
-        {"RT",    "column"},  // Return data transfer
+        {"REFO",  "rank"},    // Targets a rank (like REFab)
+        {"RT1",   "rank"}, {"RT2", "rank"}, {"RT3", "rank"}, {"RT4", "rank"},
+        {"RT5",   "rank"}, {"RT6", "rank"}, {"RT7", "rank"}, {"RT8", "rank"},
+        // NMA-Local commands (same scope as originals)
+        {"ACT_L", "row"}, {"PRE_L", "bank"}, {"RD_L", "column"}, {"WR_L", "column"},
+        {"PREA_L", "rank"}, {"REFab_L", "rank"}, {"REFab_L_end", "rank"},
       }
     );
 
@@ -124,7 +139,21 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         {"PREO",        {false,  false,   false,   false}},
         {"RDO",         {false,  false,   false,   false}},
         {"WRO",         {false,  false,   true,    false}},
-        {"RT",          {false,  false,   true,    false}},  // RT is an access (returns data to host)
+        {"REFO",        {false,  false,   false,   false}},  // No bank state change on host side
+        // RT_N: access=true (DQ bus used for data return)
+        {"RT1", {false,false,true,false}}, {"RT2", {false,false,true,false}},
+        {"RT3", {false,false,true,false}}, {"RT4", {false,false,true,false}},
+        {"RT5", {false,false,true,false}}, {"RT6", {false,false,true,false}},
+        {"RT7", {false,false,true,false}}, {"RT8", {false,false,true,false}},
+        // NMA-Local: same meta as originals (bank state changes on DRAM model)
+        //                  open?  close?  access? refresh?
+        {"ACT_L",       {true,   false,  false,  false}},
+        {"PRE_L",       {false,  true,   false,  false}},
+        {"RD_L",        {false,  false,  false,  false}},  // access=false (rank-local data, not channel DQ)
+        {"WR_L",        {false,  false,  false,  false}},  // access=false (rank-local data)
+        {"PREA_L",      {false,  true,   false,  false}},
+        {"REFab_L",     {false,  false,  false,  true }},
+        {"REFab_L_end", {false,  true,   false,  false}},
       }
     );
 
@@ -149,9 +178,7 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         {"directed-rfm", "DRFMab"}, {"same-bank-directed-rfm", "DRFMsb"},
         {"open-row", "ACT"}, {"close-row", "PRE"},
         // AsyncDIMM offload request -> command
-        {"offload-read", "RDO"}, {"offload-write", "WRO"},
-        // AsyncDIMM return
-        {"return", "RT"},
+        {"offload-read", "RDO"}, {"offload-write", "WRO"}, {"offload-refresh", "REFO"},
       }
     );
 
@@ -683,85 +710,93 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
           {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nBL")},
 
           // AsyncDIMM: Offload commands also occupy CA bus (2-cycle)
-          {.level = "channel", .preceding = {"ACTO", "PREO", "RDO", "WRO"}, .following = all_commands, .latency = 2},
-          // RT occupies DQ bus (variable burst, but minimum nBL for timing constraint purposes)
-          {.level = "channel", .preceding = {"RT"}, .following = {"RD", "RDA", "RT"}, .latency = V("nBL")},
-          {.level = "channel", .preceding = {"RD", "RDA"}, .following = {"RT"}, .latency = V("nBL")},
+          {.level = "channel", .preceding = {"ACTO", "PREO", "RDO", "WRO", "REFO", "RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .following = all_commands, .latency = 2},
+          // RT_N: DQ bus occupied for N × nBL (batch return)
+          // RT_N → any DQ command must wait N × nBL
+          {.level = "channel", .preceding = {"RT1"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 1 * V("nBL")},
+          {.level = "channel", .preceding = {"RT2"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 2 * V("nBL")},
+          {.level = "channel", .preceding = {"RT3"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 3 * V("nBL")},
+          {.level = "channel", .preceding = {"RT4"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 4 * V("nBL")},
+          {.level = "channel", .preceding = {"RT5"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 5 * V("nBL")},
+          {.level = "channel", .preceding = {"RT6"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 6 * V("nBL")},
+          {.level = "channel", .preceding = {"RT7"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 7 * V("nBL")},
+          {.level = "channel", .preceding = {"RT8"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 8 * V("nBL")},
+          // Any DQ command → RT_N must wait nBL (previous DQ transfer must finish)
+          {.level = "channel", .preceding = {"RD","RDA"}, .following = {"RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = V("nBL")},
           // WRO uses DQ bus (write data for offloaded write)
           {.level = "channel", .preceding = {"WRO"}, .following = {"WR", "WRA", "WRO"}, .latency = V("nBL")},
           {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WRO"}, .latency = V("nBL")},
           // RDO does NOT use DQ bus (no data transfer on host DQ)
 
           /*** Rank (or different BankGroup) ***/
-          // CAS <-> CAS (standard)
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDS")},
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nCCDS_WR")},
+          // CAS <-> CAS (cross-compatible: normal + NMA-local)
+          {.level = "rank", .preceding = {"RD","RDA","RD_L"}, .following = {"RD","RDA","RD_L"}, .latency = V("nCCDS")},
+          {.level = "rank", .preceding = {"WR","WRA","WR_L"}, .following = {"WR","WRA","WR_L"}, .latency = V("nCCDS_WR")},
           /// RD <-> WR
-          {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"WR", "WRA"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},
+          {.level = "rank", .preceding = {"RD","RDA","RD_L"}, .following = {"WR","WRA","WR_L"}, .latency = V("nCL") + V("nBL") + 2 - V("nCWL") + 2},
           /// WR <-> RD
-          {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCCDS_WTR")},
-          /// CAS <-> CAS between sibling ranks
+          {.level = "rank", .preceding = {"WR","WRA","WR_L"}, .following = {"RD","RDA","RD_L"}, .latency = V("nCCDS_WTR")},
+          /// CAS <-> CAS between sibling ranks (only host-visible commands; _L is rank-internal)
           {.level = "rank", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA", "WR", "WRA"}, .latency = V("nBL") + V("nCS"), .is_sibling = true},
           {.level = "rank", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCL")  + V("nBL") + V("nCS") - V("nCWL"), .is_sibling = true},
-          /// CAS <-> PREab
-          {.level = "rank", .preceding = {"RD"}, .following = {"PREA"}, .latency = V("nRTP")},
-          {.level = "rank", .preceding = {"WR"}, .following = {"PREA"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
-          /// RAS <-> RAS
-          {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDS")},
-          {.level = "rank", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nFAW"), .window = 4},
-          {.level = "rank", .preceding = {"ACT"}, .following = {"PREA"}, .latency = V("nRAS")},
-          {.level = "rank", .preceding = {"PREA"}, .following = {"ACT"}, .latency = V("nRP")},
-          /// RAS <-> REF
-          {.level = "rank", .preceding = {"ACT"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nRC")},
-          {.level = "rank", .preceding = {"PRE", "PREsb"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nRP")},
-          {.level = "rank", .preceding = {"PREA"}, .following = {"REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")},
-          {.level = "rank", .preceding = {"RDA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nRP") + V("nRTP")},
-          {.level = "rank", .preceding = {"WRA"}, .following = {"REFab", "RFMab", "DRFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
-          {.level = "rank", .preceding = {"REFab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFC1")},
-          {.level = "rank", .preceding = {"RFMab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFM1")},
-          {.level = "rank", .preceding = {"DRFMab"}, .following = {"ACT", "PREA", "REFab", "RFMab", "DRFMab", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nDRFMab")},
-          {.level = "rank", .preceding = {"REFsb"},  .following = {"PREA", "REFab", "RFMab", "DRFMab"}, .latency = V("nRFCsb")},
-          {.level = "rank", .preceding = {"RFMsb"},  .following = {"PREA", "REFab", "RFMab", "DRFMab"}, .latency = V("nRFMsb")},
-          {.level = "rank", .preceding = {"DRFMsb"}, .following = {"PREA", "REFab", "RFMab", "DRFMab"}, .latency = V("nDRFMsb")},
+          /// CAS <-> PREab (cross-compatible)
+          {.level = "rank", .preceding = {"RD"},   .following = {"PREA","PREA_L"}, .latency = V("nRTP")},
+          {.level = "rank", .preceding = {"RD_L"}, .following = {"PREA","PREA_L"}, .latency = V("nRTP")},
+          {.level = "rank", .preceding = {"WR"},   .following = {"PREA","PREA_L"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
+          {.level = "rank", .preceding = {"WR_L"}, .following = {"PREA","PREA_L"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
+          /// RAS <-> RAS (cross-compatible)
+          {.level = "rank", .preceding = {"ACT","ACT_L"}, .following = {"ACT","ACT_L"}, .latency = V("nRRDS")},
+          {.level = "rank", .preceding = {"ACT","ACT_L"}, .following = {"ACT","ACT_L"}, .latency = V("nFAW"), .window = 4},
+          {.level = "rank", .preceding = {"ACT","ACT_L"}, .following = {"PREA","PREA_L"}, .latency = V("nRAS")},
+          {.level = "rank", .preceding = {"PREA","PREA_L"}, .following = {"ACT","ACT_L"}, .latency = V("nRP")},
+          /// RAS <-> REF (cross-compatible with _L)
+          {.level = "rank", .preceding = {"ACT","ACT_L"}, .following = {"REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nRC")},
+          {.level = "rank", .preceding = {"PRE","PREsb","PRE_L"}, .following = {"REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nRP")},
+          {.level = "rank", .preceding = {"PREA","PREA_L"}, .following = {"REFab","REFab_L","RFMab","DRFMab","REFsb","RFMsb","DRFMsb"}, .latency = V("nRP")},
+          {.level = "rank", .preceding = {"RDA"}, .following = {"REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nRP") + V("nRTP")},
+          {.level = "rank", .preceding = {"WRA"}, .following = {"REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
+          {.level = "rank", .preceding = {"REFab","REFab_L"}, .following = {"ACT","ACT_L","PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab","REFsb","RFMsb","DRFMsb"}, .latency = V("nRFC1")},
+          {.level = "rank", .preceding = {"RFMab"}, .following = {"ACT","ACT_L","PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab","REFsb","RFMsb","DRFMsb"}, .latency = V("nRFM1")},
+          {.level = "rank", .preceding = {"DRFMab"}, .following = {"ACT","ACT_L","PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab","REFsb","RFMsb","DRFMsb"}, .latency = V("nDRFMab")},
+          {.level = "rank", .preceding = {"REFsb"},  .following = {"PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nRFCsb")},
+          {.level = "rank", .preceding = {"RFMsb"},  .following = {"PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nRFMsb")},
+          {.level = "rank", .preceding = {"DRFMsb"}, .following = {"PREA","PREA_L","REFab","REFab_L","RFMab","DRFMab"}, .latency = V("nDRFMsb")},
 
           // AsyncDIMM: Offload commands have relaxed timing at rank level
-          // ACTO/PREO: only CA bus constraint (2-cycle at channel level, handled above)
-          // No nRRDS/nFAW constraints for ACTO (offload commands don't activate DRAM banks on host side)
-          // RDO: no nCCDS constraint (no DQ bus usage)
-          // WRO: needs DQ bus occupancy (handled at channel level)
+          // ACTO/PREO/RDO/WRO: only CA bus constraint (2-cycle at channel level)
+          // _L commands: rank-level timing but NO channel-level timing
 
-          /*** Same Bank Group ***/
-          /// CAS <-> CAS (standard)
-          {.level = "bankgroup", .preceding = {"RD", "RDA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL")},
-          {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nCCDL_WR")},
-          {.level = "bankgroup", .preceding = {"WR", "WRA"}, .following = {"RD", "RDA"}, .latency = V("nCCDL_WTR")},
+          /*** Same Bank Group (cross-compatible) ***/
+          /// CAS <-> CAS
+          {.level = "bankgroup", .preceding = {"RD","RDA","RD_L"}, .following = {"RD","RDA","RD_L"}, .latency = V("nCCDL")},
+          {.level = "bankgroup", .preceding = {"WR","WRA","WR_L"}, .following = {"WR","WRA","WR_L"}, .latency = V("nCCDL_WR")},
+          {.level = "bankgroup", .preceding = {"WR","WRA","WR_L"}, .following = {"RD","RDA","RD_L"}, .latency = V("nCCDL_WTR")},
           /// RAS <-> RAS
-          {.level = "bankgroup", .preceding = {"ACT"}, .following = {"ACT"}, .latency = V("nRRDL")},
-          // AsyncDIMM: No bankgroup-level constraints for offload commands
-          // (ACTO/PREO/RDO/WRO don't trigger DRAM-side bankgroup timing)
+          {.level = "bankgroup", .preceding = {"ACT","ACT_L"}, .following = {"ACT","ACT_L"}, .latency = V("nRRDL")},
 
-          /*** Bank ***/
-          // Standard DDR5 bank-level timing
-          {.level = "bank", .preceding = {"ACT"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRC")},
-          {.level = "bank", .preceding = {"ACT"}, .following = {"RD", "RDA", "WR", "WRA"}, .latency = V("nRCD")},
-          {.level = "bank", .preceding = {"ACT"}, .following = {"PRE", "PREsb"}, .latency = V("nRAS")},
-          {.level = "bank", .preceding = {"PRE", "PREsb"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRP")},
-          {.level = "bank", .preceding = {"RD"},  .following = {"PRE", "PREsb"}, .latency = V("nRTP")},
-          {.level = "bank", .preceding = {"WR"},  .following = {"PRE", "PREsb"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
-          {.level = "bank", .preceding = {"RDA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRTP") + V("nRP")},
-          {.level = "bank", .preceding = {"WRA"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
-          {.level = "bank", .preceding = {"WR"},  .following = {"RDA"}, .latency = V("nCWL") + V("nBL") + V("nWR") - V("nRTP")},
+          /*** Bank (cross-compatible) ***/
+          // ACT → CAS/PRE
+          {.level = "bank", .preceding = {"ACT","ACT_L"}, .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nRC")},
+          {.level = "bank", .preceding = {"ACT","ACT_L"}, .following = {"RD","RDA","WR","WRA","RD_L","WR_L"}, .latency = V("nRCD")},
+          {.level = "bank", .preceding = {"ACT","ACT_L"}, .following = {"PRE","PREsb","PRE_L"}, .latency = V("nRAS")},
+          // PRE → ACT
+          {.level = "bank", .preceding = {"PRE","PREsb","PRE_L"}, .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nRP")},
+          // RD → PRE
+          {.level = "bank", .preceding = {"RD","RD_L"},  .following = {"PRE","PREsb","PRE_L"}, .latency = V("nRTP")},
+          // WR → PRE
+          {.level = "bank", .preceding = {"WR","WR_L"},  .following = {"PRE","PREsb","PRE_L"}, .latency = V("nCWL") + V("nBL") + V("nWR")},
+          // RDA/WRA (host-only auto-precharge)
+          {.level = "bank", .preceding = {"RDA"}, .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nRTP") + V("nRP")},
+          {.level = "bank", .preceding = {"WRA"}, .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nCWL") + V("nBL") + V("nWR") + V("nRP")},
+          {.level = "bank", .preceding = {"WR","WR_L"},  .following = {"RDA"}, .latency = V("nCWL") + V("nBL") + V("nWR") - V("nRTP")},
 
-          /// Same-bank refresh/RFM timings
-          {.level = "bank", .preceding = {"REFsb"},  .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFCsb")},
-          {.level = "bank", .preceding = {"RFMsb"},  .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nRFMsb")},
-          {.level = "bank", .preceding = {"DRFMsb"}, .following = {"ACT", "REFsb", "RFMsb", "DRFMsb"}, .latency = V("nDRFMsb")},
+          /// Same-bank refresh/RFM (cross-compatible)
+          {.level = "bank", .preceding = {"REFsb"},  .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nRFCsb")},
+          {.level = "bank", .preceding = {"RFMsb"},  .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nRFMsb")},
+          {.level = "bank", .preceding = {"DRFMsb"}, .following = {"ACT","ACT_L","REFsb","RFMsb","DRFMsb"}, .latency = V("nDRFMsb")},
 
           // AsyncDIMM: Offload commands have NO bank-level timing constraints
-          // ACTO does not need nRCD (the actual ACT happens at NMA MC side)
-          // RDO does not need nRCD/nBL/nRTRs/nCCD (relaxed timing)
-          // WRO does not need tWL (relaxed timing)
-          // These offload commands are decoded and re-issued by NMA MC with proper timing
+          // _L commands have FULL bank/BG/rank timing but NO channel-level timing
         }
       );
       #undef V
@@ -795,6 +830,13 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       m_actions[m_levels["bank"]][m_commands["RDA"]] = Lambdas::Action::Bank::PRE<DDR5AsyncDIMM>;
       m_actions[m_levels["bank"]][m_commands["WRA"]] = Lambdas::Action::Bank::PRE<DDR5AsyncDIMM>;
 
+      // NMA-Local: same bank/rank actions (DRAM array state changes)
+      m_actions[m_levels["bank"]][m_commands["ACT_L"]] = Lambdas::Action::Bank::ACT<DDR5AsyncDIMM>;
+      m_actions[m_levels["bank"]][m_commands["PRE_L"]] = Lambdas::Action::Bank::PRE<DDR5AsyncDIMM>;
+      m_actions[m_levels["rank"]][m_commands["PREA_L"]] = Lambdas::Action::Rank::PREab<DDR5AsyncDIMM>;
+      m_actions[m_levels["rank"]][m_commands["REFab_L"]] = Lambdas::Action::Rank::REFab<DDR5AsyncDIMM>;
+      m_actions[m_levels["rank"]][m_commands["REFab_L_end"]] = Lambdas::Action::Rank::REFab_end<DDR5AsyncDIMM>;
+
       // AsyncDIMM: Offload commands do NOT change bank state on the host DRAM model
       // ACTO/PREO/RDO/WRO are no-op actions (state changes happen in NMA MC's bank FSM)
       // No action lambdas needed — nullptr (default) means no state change
@@ -820,6 +862,13 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       m_preqs[m_levels["bank"]][m_commands["ACT"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5AsyncDIMM>;
       m_preqs[m_levels["bank"]][m_commands["PRE"]] = Lambdas::Preq::Bank::RequireBankClosed<DDR5AsyncDIMM>;
 
+      // NMA-Local: same bank prerequisites (DRAM array state must match)
+      m_preqs[m_levels["bank"]][m_commands["RD_L"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5AsyncDIMM>;
+      m_preqs[m_levels["bank"]][m_commands["WR_L"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5AsyncDIMM>;
+      m_preqs[m_levels["bank"]][m_commands["ACT_L"]] = Lambdas::Preq::Bank::RequireRowOpen<DDR5AsyncDIMM>;
+      m_preqs[m_levels["bank"]][m_commands["PRE_L"]] = Lambdas::Preq::Bank::RequireBankClosed<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["REFab_L"]] = Lambdas::Preq::Rank::RequireAllBanksClosed<DDR5AsyncDIMM>;
+
       // AsyncDIMM: Offload commands have no bank state prerequisites on host DRAM
       // ACTO/PREO/RDO/WRO can be issued regardless of host-side bank state
       // (They are forwarded to NMA MC which has its own bank FSM)
@@ -828,7 +877,15 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       m_preqs[m_levels["rank"]][m_commands["PREO"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
       m_preqs[m_levels["rank"]][m_commands["RDO"]]  = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
       m_preqs[m_levels["rank"]][m_commands["WRO"]]  = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
-      m_preqs[m_levels["rank"]][m_commands["RT"]]   = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["REFO"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT1"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT2"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT3"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT4"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT5"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT6"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT7"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
+      m_preqs[m_levels["rank"]][m_commands["RT8"]] = Lambdas::Preq::Rank::NoRequire<DDR5AsyncDIMM>;
     };
 
     void set_rowhits() {

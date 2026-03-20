@@ -114,6 +114,55 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Read latency recording
     std::vector<uint64_t> m_lat_vec;
 
+    // ===== NMA Write Tracking & Start Flag (DBX-DIMM style lifecycle) =====
+    // Host MC manages NMA instruction delivery ordering:
+    //   1. send() detects NMAInst writes (inst-buf address) → nma_wr_send_cnt++
+    //   2. tick() detects WR issue to inst-buf address → nma_wr_issue_cnt++
+    //   3. send() detects ctrl-reg write → nma_start_requested = true
+    //   4. tick() waits for nma_wr_send_cnt == nma_wr_issue_cnt, then issues ctrl-reg WR
+    //   5. When ctrl-reg WR is ISSUED → mode transition + bypass start to NMA MC
+    int m_nma_ctrl_row = -1;  // Magic-path addresses (set by system via set_nma_addresses())
+    int m_nma_ctrl_bg  = -1;
+    int m_nma_ctrl_bk  = -1;
+    int m_nma_buf_bg   = -1;
+    int m_nma_buf_bk   = -1;
+    int m_nma_row_idx  = -1;  // Address level indices
+    int m_nma_bg_idx   = -1;
+    int m_nma_bk_idx   = -1;
+
+    std::vector<int> m_nma_wr_send_cnt;   // [rank] NMAInst writes enqueued via send()
+    std::vector<int> m_nma_wr_issue_cnt;  // [rank] NMAInst writes issued to DRAM
+    std::vector<bool> m_nma_start_requested; // [rank] ctrl-reg write received, awaiting drain
+
+    // ===== Phase 3: Concurrent Mode =====
+    // Per-bank Offload Table (OT): counts outstanding offloaded commands.
+    // Prevents CMD FIFO overflow; threshold = NMA_CMD_FIFO_SIZE (8).
+    static constexpr int HOST_OT_THRESHOLD = 8;
+    std::vector<int> m_ot_counter;  // [total_banks flat index]
+    int m_total_banks_flat = -1;
+
+    // ===== Return Unit (RU) — Host MC side =====
+    // Records offloaded memory accesses in order per rank (paper §V.A.2).
+    // Read: waits for interrupt + RT data → callback to frontend
+    // Write: waits for interrupt → complete (OT decrement)
+    struct ReturnUnitEntry {
+      Request req;           // Original request (read: has callback)
+      int cmd_count;         // Total offloaded commands (1/2/3) for OT decrement
+      int bank_flat_id;      // Target bank for OT decrement
+      bool is_read;
+    };
+    std::deque<ReturnUnitEntry> m_return_unit;    // Global RU (all ranks, in offload order)
+    static constexpr int RU_MAX_ENTRIES = 64;     // Paper: 64 total for 16 ranks
+    std::vector<int> m_rt_pending_count;          // [rank] Accumulated read interrupts → RT batch size
+    std::vector<std::deque<Request>> m_rt_read_pending; // [rank] Reads awaiting RT data return
+
+    // Phase 3 concurrent mode flag (set by system via set_concurrent_mode_enable())
+    bool m_concurrent_mode_enable = false;
+
+    // RT command IDs: RT_N occupies N × nBL on DQ bus (DRAM model enforced)
+    int m_rt_cmds[9] = {};  // m_rt_cmds[1]=RT1, ..., m_rt_cmds[8]=RT8
+
+
   public:
     void init() override {
       m_wr_low_watermark =  param<float>("wr_low_watermark").desc("Threshold for switching back to read mode.").default_val(0.2f);
@@ -215,6 +264,23 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       // Initialize per-rank mode register (Host Mode only in Phase 1)
       m_mode_per_rank.resize(m_num_rank, AsyncDIMMMode::HOST);
 
+      // NMA write tracking
+      m_nma_wr_send_cnt.resize(num_ranks, 0);
+      m_nma_wr_issue_cnt.resize(num_ranks, 0);
+      m_nma_start_requested.resize(num_ranks, false);
+      m_nma_row_idx = m_dram->m_levels("row");
+      m_nma_bg_idx  = m_dram->m_levels("bankgroup");
+      m_nma_bk_idx  = m_dram->m_levels("bank");
+
+      // Phase 3: OT counter and Return Unit
+      m_total_banks_flat = num_ranks * num_bankgroups * num_banks;
+      m_ot_counter.resize(m_total_banks_flat, 0);
+      m_rt_pending_count.resize(num_ranks, 0);
+      m_rt_read_pending.resize(num_ranks);
+      // Cache RT1~RT8 command IDs for batch return
+      for (int i = 1; i <= 8; i++)
+        m_rt_cmds[i] = m_dram->m_commands("RT" + std::to_string(i));
+
       // Row tracking
       m_open_row.resize(num_ranks * num_bankgroups * num_banks, -1);
       m_pre_open_row.resize(num_ranks * num_bankgroups * num_banks, -1);
@@ -226,6 +292,69 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Set bypass callback (called by asyncdimm_system to wire NMA MC)
     void set_bypass_callback(BypassCallback cb) {
       m_bypass_to_nma = cb;
+    }
+
+    void set_concurrent_mode_enable(bool enable) { m_concurrent_mode_enable = enable; }
+
+    /**
+     * Check if any RU entries or RT-pending reads exist for a rank.
+     * Used by System for C2H transition: must drain all offloaded accesses first.
+     */
+    bool has_pending_offloads_for_rank(int rank_id) const {
+      // Check RU for entries targeting this rank
+      for (const auto& entry : m_return_unit) {
+        if (entry.req.addr_vec[m_rank_addr_idx] == rank_id) return true;
+      }
+      // Check RT-pending reads for this rank
+      if (rank_id >= 0 && rank_id < m_num_rank) {
+        if (!m_rt_read_pending[rank_id].empty()) return true;
+        if (m_rt_pending_count[rank_id] > 0) return true;
+      }
+      return false;
+    }
+
+    // Set magic-path addresses (called by AsyncDIMMSystem during init)
+    void set_nma_addresses(int ctrl_row, int ctrl_bg, int ctrl_bk, int buf_bg, int buf_bk) {
+      m_nma_ctrl_row = ctrl_row;
+      m_nma_ctrl_bg  = ctrl_bg;
+      m_nma_ctrl_bk  = ctrl_bk;
+      m_nma_buf_bg   = buf_bg;
+      m_nma_buf_bk   = buf_bk;
+    }
+
+    // ===== Phase 3: Concurrent Mode API =====
+
+    /**
+     * Called by AsyncDIMMSystem when NMA MC fires TDM interrupt.
+     * batch_size = number of offloaded reads that completed.
+     * Accumulates interrupt batch; RT issuance handled in tick().
+     */
+    /**
+     * Called by AsyncDIMMSystem when NMA MC fires TDM interrupt.
+     * Always batch_size=1 (TDM: 1 interrupt per slot = 1 access completion).
+     * Paper §V.A.2:
+     *   Write: deleted from RU on interrupt → complete
+     *   Read: deleted from RU on interrupt → awaits RT for data return
+     */
+    void on_nma_interrupt(int rank_id, int batch_size) {
+      if (rank_id < 0 || rank_id >= m_num_rank) return;
+      if (m_return_unit.empty()) return;
+
+      auto& entry = m_return_unit.front();
+
+      // OT decrement: cmd_count commands completed for this bank
+      if (entry.bank_flat_id >= 0 && entry.bank_flat_id < m_total_banks_flat)
+        m_ot_counter[entry.bank_flat_id] -= entry.cmd_count;
+
+      if (entry.is_read) {
+        // Read: interrupt received. Data not yet returned.
+        // Store req in rt_read_pending → Host MC issues RT → data arrives → callback
+        m_rt_read_pending[rank_id].push_back(entry.req);
+        m_rt_pending_count[rank_id]++;
+      }
+      // Write: complete on interrupt (no data return, no frontend callback)
+
+      m_return_unit.pop_front();
     }
 
     // Get open row for a specific bank (for FSM sync verification)
@@ -255,6 +384,28 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       if (req_rank_id >= 0 && req_rank_id < m_num_rank &&
           m_mode_per_rank[req_rank_id] == AsyncDIMMMode::NMA) {
         return false;  // Host access blocked during NMA Mode
+      }
+
+      // ===== NMA Write Tracking (DBX-DIMM style) =====
+      // Detect NMAInst writes and ctrl-reg writes at enqueue time.
+      if (req.type_id == Request::Type::Write && m_nma_ctrl_row >= 0 &&
+          req_rank_id >= 0 && req_rank_id < m_num_rank) {
+        int req_row = req.addr_vec[m_nma_row_idx];
+        int req_bg  = req.addr_vec[m_nma_bg_idx];
+        int req_bk  = req.addr_vec[m_nma_bk_idx];
+        if (req_row == m_nma_ctrl_row) {
+          if (req_bg == m_nma_buf_bg && req_bk == m_nma_buf_bk) {
+            // NMAInst write → track send count
+            m_nma_wr_send_cnt[req_rank_id]++;
+            req.is_ndp_req = true;  // Flag for issue-time tracking
+          }
+          else if (req_bg == m_nma_ctrl_bg && req_bk == m_nma_ctrl_bk) {
+            // Ctrl-reg (start) write → register start request
+            // Host MC will issue this AFTER all NMAInst writes are drained
+            m_nma_start_requested[req_rank_id] = true;
+            req.is_ndp_req = true;  // Flag for issue-time tracking
+          }
+        }
       }
 
       // Forward existing write requests to incoming read requests
@@ -308,12 +459,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     bool priority_send(Request& req) override {
       req.final_command = m_dram->m_request_translations(req.type_id);
 
-      // During NMA Mode, skip refresh for that rank (NMA MC handles refresh)
+      // All modes: enqueue refresh normally. For CONCURRENT/NMA ranks,
+      // schedule_request() converts REFab → REFO (offloaded to NMA MC).
       int rank_id = req.addr_vec[m_rank_addr_idx];
-      if (m_mode_per_rank[rank_id] == AsyncDIMMMode::NMA) {
-        return true;  // Pretend success to avoid AllBankRefresh throwing error
-      }
-
       bool is_success = m_priority_buffers[rank_id].enqueue(req);
       return is_success;
     }
@@ -349,13 +497,41 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         }
       }
 
-      // 1. Serve completed reads
+      // 1. Serve completed reads (including RT-returned offloaded reads)
       serve_completed_reads();
+
+      // 1.5. RT issuance — highest priority (paper §V.A.1)
+      //   RT_N = 1 command, batch=N. DQ bus occupied N × nBL (DRAM model enforced).
+      //   If RT issued this tick, skip all subsequent scheduling (CA bus occupied).
+      bool rt_issued = false;
+      for (int rk = 0; rk < m_num_rank; rk++) {
+        if (m_rt_pending_count[rk] <= 0) continue;
+        int batch = std::min(m_rt_pending_count[rk], 8);  // Max batch = 8
+        int rt_cmd = m_rt_cmds[batch];
+        AddrVec_t rt_addr(m_dram->m_levels.size(), -1);
+        rt_addr[m_dram->m_levels("channel")] = m_channel_id;
+        rt_addr[m_dram->m_levels("rank")]    = rk;
+        if (m_dram->check_ready(rt_cmd, rt_addr)) {
+          m_dram->issue_command(rt_cmd, rt_addr);  // 1 command, DQ = batch × nBL
+          int nBL = m_dram->m_timing_vals("nBL");
+          int nCL = m_dram->m_timing_vals("nCL");
+          for (int i = 0; i < batch && !m_rt_read_pending[rk].empty(); i++) {
+            auto& req = m_rt_read_pending[rk].front();
+            req.depart = m_clk + nCL + i * nBL;
+            pending.push_back(req);
+            m_rt_read_pending[rk].pop_front();
+          }
+          m_rt_pending_count[rk] -= batch;
+          rt_issued = true;
+          break;  // 1 RT per tick
+        }
+      }
 
       // 2. Tick refresh manager (sends REF via priority_send)
       m_refresh->tick();
 
-      // 3. Try to find a request to serve
+      // 3. Skip scheduling if RT was issued (CA bus occupied by RT this tick)
+      if (rt_issued) return;
       ReqBuffer::iterator req_it;
       ReqBuffer* buffer = nullptr;
       bool request_found = schedule_request(req_it, buffer);
@@ -368,127 +544,245 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         plugin->update(request_found, req_it);
       }
 
-      // 6. Issue the command to DRAM and bypass to NMA MC
+      // 6. Pre-issue checks
       if (request_found) {
-        if (req_it->is_stat_updated == false) {
-          update_request_stats(req_it);
+        int req_rank = req_it->addr_vec[m_rank_addr_idx];
+
+        // NMA start gate: hold ctrl-reg WR until all NMAInst writes are issued
+        if (req_it->is_ndp_req && req_rank >= 0 && req_rank < m_num_rank) {
+          int rr = req_it->addr_vec[m_nma_row_idx];
+          int rb = req_it->addr_vec[m_nma_bg_idx];
+          int rk = req_it->addr_vec[m_nma_bk_idx];
+          if (rr == m_nma_ctrl_row && rb == m_nma_ctrl_bg && rk == m_nma_ctrl_bk) {
+            if (m_nma_wr_send_cnt[req_rank] != m_nma_wr_issue_cnt[req_rank])
+              request_found = false;
+          }
         }
 
-        // Issue command to DRAM
-        m_dram->issue_command(req_it->command, req_it->addr_vec);
+        // NMA mode: only allow offload commands (REFO), block real commands
+        if (request_found && req_rank >= 0 && req_rank < m_num_rank &&
+            m_mode_per_rank[req_rank] == AsyncDIMMMode::NMA) {
+          int cmd = req_it->command;
+          if (cmd != m_dram->m_commands("REFO"))
+            request_found = false;
+        }
+      }
 
-        // ===== Explicit Sync (H2N): Bypass command to NMA MC =====
-        // Every command issued to DRAM is forwarded to NMA MC:
-        //   - Shadow FSM update (bank state tracking)
-        //   - WR/WRA to magic-path addresses: NMA MC intercepts payload via DQ bus
-        // Bypass is disabled during NMA Mode (NMA MC manages its own FSM).
+      // 7. Unified issue: handles both real commands and offload commands
+      if (request_found) {
+        if (!req_it->is_stat_updated) update_request_stats(req_it);
+
+        int cmd = req_it->command;
         int cmd_rank_id = req_it->addr_vec[m_rank_addr_idx];
-        if (m_mode_per_rank[cmd_rank_id] != AsyncDIMMMode::NMA && m_bypass_to_nma) {
-          // Pass payload for WR/WRA so NMA MC can detect magic-path writes
+        int flat_bank_id = req_it->addr_vec[bank_idx]
+                         + req_it->addr_vec[bankgroup_idx] * num_banks
+                         + req_it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+        bool is_offload = (cmd == m_dram->m_commands("ACTO") || cmd == m_dram->m_commands("PREO") ||
+                           cmd == m_dram->m_commands("RDO")  || cmd == m_dram->m_commands("WRO")  ||
+                           cmd == m_dram->m_commands("REFO"));
+
+        // Issue command to DRAM model
+        m_dram->issue_command(cmd, req_it->addr_vec);
+
+        // NMA write tracking: inst-buf WR → issue count; ctrl-reg WR → mode transition
+        if (req_it->is_ndp_req && (cmd == req_it->final_command) &&
+            cmd_rank_id >= 0 && cmd_rank_id < m_num_rank) {
+          int rr = req_it->addr_vec[m_nma_row_idx];
+          int rb = req_it->addr_vec[m_nma_bg_idx];
+          int rk = req_it->addr_vec[m_nma_bk_idx];
+          if (rr == m_nma_ctrl_row && rb == m_nma_buf_bg && rk == m_nma_buf_bk)
+            m_nma_wr_issue_cnt[cmd_rank_id]++;
+          else if (rr == m_nma_ctrl_row && rb == m_nma_ctrl_bg && rk == m_nma_ctrl_bk) {
+            m_mode_per_rank[cmd_rank_id] = m_concurrent_mode_enable
+              ? AsyncDIMMMode::CONCURRENT : AsyncDIMMMode::NMA;
+            m_nma_start_requested[cmd_rank_id] = false;
+          }
+        }
+
+        // Bypass to NMA MC (unified: real cmds for FSM sync, offload for CMD FIFO/REFO)
+        if (m_bypass_to_nma && (is_offload || m_mode_per_rank[cmd_rank_id] != AsyncDIMMMode::NMA)) {
           static const std::vector<uint64_t> s_empty_payload{};
-          const std::vector<uint64_t>& payload =
-            (req_it->command == m_dram->m_commands("WR") ||
-             req_it->command == m_dram->m_commands("WRA"))
-            ? req_it->m_payload
-            : s_empty_payload;
-          m_bypass_to_nma(cmd_rank_id, req_it->command, req_it->addr_vec, payload);
+          const auto& payload =
+            (cmd == m_dram->m_commands("WR") || cmd == m_dram->m_commands("WRA") ||
+             cmd == m_dram->m_commands("WRO"))
+            ? req_it->m_payload : s_empty_payload;
+          m_bypass_to_nma(cmd_rank_id, cmd, req_it->addr_vec, payload);
           s_num_bypass_cmds++;
         }
 
-        // Track issued command types
-        if (req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA"))
-          s_num_issue_reads++;
-        if (req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA"))
-          s_num_issue_writes++;
-
-        if (req_it->command == m_dram->m_commands("REFab")) {
-          int nRFC_latency = m_dram->m_timing_vals("nRFC1");
-          int rank_addr = req_it->addr_vec[m_rank_addr_idx];
-          s_num_refresh_cc_per_rank[rank_addr] += nRFC_latency;
-        }
-
-        // Update row tracking
-        if (req_it->command == m_dram->m_commands("ACT")) {
-          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+        // Row tracking (unified: ACT/ACTO open, PRE/PREO close)
+        if (cmd == m_dram->m_commands("ACT") || cmd == m_dram->m_commands("ACTO")) {
           m_open_row_miss[flat_bank_id] = false;
           m_open_row[flat_bank_id] = req_it->addr_vec[row_idx];
           m_pre_open_row[flat_bank_id] = -1;
-          m_scheduler->update_open_row_miss(flat_bank_id, false);
-          m_scheduler->update_open_row(flat_bank_id, req_it->addr_vec[row_idx]);
-          m_scheduler->update_pre_open_row(flat_bank_id, -1);
-          m_scheduler->update_bk_status(flat_bank_id, false);
-          m_rowpolicy->update_cap(0, req_it->addr_vec[rank_idx], req_it->addr_vec[bankgroup_idx], req_it->addr_vec[bank_idx], 128);
-        } else if (req_it->command == m_dram->m_commands("PRE")) {
-          int flat_bank_id = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+          if (!is_offload) {
+            m_scheduler->update_open_row_miss(flat_bank_id, false);
+            m_scheduler->update_open_row(flat_bank_id, req_it->addr_vec[row_idx]);
+            m_scheduler->update_pre_open_row(flat_bank_id, -1);
+            m_scheduler->update_bk_status(flat_bank_id, false);
+            m_rowpolicy->update_cap(0, req_it->addr_vec[rank_idx], req_it->addr_vec[bankgroup_idx], req_it->addr_vec[bank_idx], 128);
+          }
+        } else if (cmd == m_dram->m_commands("PRE") || cmd == m_dram->m_commands("PREO")) {
           m_pre_open_row[flat_bank_id] = m_open_row[flat_bank_id];
           m_open_row[flat_bank_id] = -1;
-          m_scheduler->update_open_row(flat_bank_id, -1);
-          m_scheduler->update_pre_open_row(flat_bank_id, m_pre_open_row[flat_bank_id]);
-          m_scheduler->update_bk_status(flat_bank_id, true);
-        } else if (req_it->command == m_dram->m_commands("PREsb")) {
-          // Same-bank precharge: close same bank_id across all bankgroups in the rank
-          // NOTE: Missing from GenericDRAMController — added here for correctness
-          int rank_id = req_it->addr_vec[rank_idx];
-          int target_bank = req_it->addr_vec[bank_idx];
-          for (int bg_idx = 0; bg_idx < num_bankgroups; bg_idx++) {
-            int flat_bank_id = target_bank + bg_idx * num_banks + rank_id * num_bankgroups * num_banks;
-            m_pre_open_row[flat_bank_id] = m_open_row[flat_bank_id];
-            m_open_row[flat_bank_id] = -1;
+          if (!is_offload) {
             m_scheduler->update_open_row(flat_bank_id, -1);
             m_scheduler->update_pre_open_row(flat_bank_id, m_pre_open_row[flat_bank_id]);
             m_scheduler->update_bk_status(flat_bank_id, true);
           }
-        } else if (req_it->command == m_dram->m_commands("PREA")) {
-          int rank_id = req_it->addr_vec[rank_idx];
-          for (int bg_idx = 0; bg_idx < num_bankgroups; bg_idx++) {
-            for (int bk_idx = 0; bk_idx < num_banks; bk_idx++) {
-              int flat_bank_id = bk_idx + bg_idx * num_banks + rank_id * num_bankgroups * num_banks;
-              m_pre_open_row[flat_bank_id] = m_open_row[flat_bank_id];
-              m_open_row[flat_bank_id] = -1;
-              m_scheduler->update_open_row(flat_bank_id, -1);
-              m_scheduler->update_pre_open_row(flat_bank_id, m_pre_open_row[flat_bank_id]);
-              m_scheduler->update_bk_status(flat_bank_id, true);
-            }
+        } else if (cmd == m_dram->m_commands("PREsb")) {
+          int rk_id = req_it->addr_vec[rank_idx]; int t_bk = req_it->addr_vec[bank_idx];
+          for (int bg = 0; bg < num_bankgroups; bg++) {
+            int fid = t_bk + bg * num_banks + rk_id * num_bankgroups * num_banks;
+            m_pre_open_row[fid] = m_open_row[fid]; m_open_row[fid] = -1;
+            m_scheduler->update_open_row(fid, -1);
+            m_scheduler->update_pre_open_row(fid, m_pre_open_row[fid]);
+            m_scheduler->update_bk_status(fid, true);
           }
+        } else if (cmd == m_dram->m_commands("PREA")) {
+          int rk_id = req_it->addr_vec[rank_idx];
+          for (int bg = 0; bg < num_bankgroups; bg++)
+            for (int bk = 0; bk < num_banks; bk++) {
+              int fid = bk + bg * num_banks + rk_id * num_bankgroups * num_banks;
+              m_pre_open_row[fid] = m_open_row[fid]; m_open_row[fid] = -1;
+              m_scheduler->update_open_row(fid, -1);
+              m_scheduler->update_pre_open_row(fid, m_pre_open_row[fid]);
+              m_scheduler->update_bk_status(fid, true);
+            }
         }
 
-        // Handle request completion
-        if (req_it->command == req_it->final_command) {
+        // OT tracking: every offload command increments OT (except REFO)
+        if (is_offload && cmd != m_dram->m_commands("REFO")) {
+          if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat)
+            m_ot_counter[flat_bank_id]++;
+          // Per-request cmd_count tracking via scratchpad[0]
+          req_it->scratchpad[0]++;
+        }
+
+        // Stats
+        if (cmd == m_dram->m_commands("RD") || cmd == m_dram->m_commands("RDA") ||
+            cmd == m_dram->m_commands("RDO")) s_num_issue_reads++;
+        if (cmd == m_dram->m_commands("WR") || cmd == m_dram->m_commands("WRA") ||
+            cmd == m_dram->m_commands("WRO")) s_num_issue_writes++;
+        if (cmd == m_dram->m_commands("REFab"))
+          s_num_refresh_cc_per_rank[req_it->addr_vec[m_rank_addr_idx]] += m_dram->m_timing_vals("nRFC1");
+
+        // Request lifecycle
+        bool is_final_real    = (cmd == req_it->final_command);
+        bool is_final_offload = (cmd == m_dram->m_commands("RDO") || cmd == m_dram->m_commands("WRO") ||
+                                 cmd == m_dram->m_commands("REFO"));
+
+        if (is_final_offload) {
+          // Offload final (RDO/WRO/REFO): register in Return Unit, NOT in pending.
+          // Completion happens when NMA MC fires interrupt (+ RT for reads).
+          if (cmd != m_dram->m_commands("REFO")) {
+            bool is_read = (req_it->type_id == Request::Type::Read);
+            m_return_unit.push_back({*req_it, req_it->scratchpad[0], flat_bank_id, is_read});
+          }
+          // REFO: no RU entry needed (refresh has no frontend callback)
+          m_host_access_cnt++;
+          if (req_it->is_trace_core_req) m_tcore_host_access_cnt++;
+          if (req_it->is_host_req) {
+            m_host_acceess_iss_counter++;
+            if (req_it->type_id == Request::Type::Read) m_host_rd_acceess_iss_counter++;
+          }
+          buffer->remove(req_it);
+        } else if (is_final_real) {
+          // Real final (RD/WR for HOST mode): complete immediately with fixed latency
           if (req_it->type_id == Request::Type::Read) {
             req_it->depart = m_clk + m_dram->m_read_latency;
             pending.push_back(*req_it);
           }
-
-          if (req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA") ||
-              req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) {
-            m_host_access_cnt++;
-            if (req_it->is_trace_core_req) {
-              m_tcore_host_access_cnt++;
-            }
-            if (req_it->is_host_req) {
-              m_host_acceess_iss_counter++;
-              if (req_it->type_id == Request::Type::Read) {
-                m_host_rd_acceess_iss_counter++;
-              }
-            }
+          m_host_access_cnt++;
+          if (req_it->is_trace_core_req) m_tcore_host_access_cnt++;
+          if (req_it->is_host_req) {
+            m_host_acceess_iss_counter++;
+            if (req_it->type_id == Request::Type::Read) m_host_rd_acceess_iss_counter++;
           }
           buffer->remove(req_it);
-        } else {
-          if (m_dram->m_command_meta(req_it->command).is_opening) {
-            bool is_success = false;
-            req_it->is_actived = true;
-            is_success = m_active_buffer.enqueue(*req_it);
-            if (!is_success) {
-              throw std::runtime_error("Fail to enque to m_active_buffer");
-            }
-            buffer->remove(req_it);
-          }
+        } else if (!is_offload && m_dram->m_command_meta(cmd).is_opening) {
+          // Real ACT → active_buffer (ACTO has is_opening=false → stays in buffer)
+          req_it->is_actived = true;
+          if (!m_active_buffer.enqueue(*req_it))
+            throw std::runtime_error("Fail to enque to m_active_buffer");
+          buffer->remove(req_it);
         }
+        // ACTO/PREO: request stays in buffer → next tick m_open_row hit → RDO/WRO
       }
     };
 
 
   private:
+    // ===== Phase 3: Concurrent Mode Offload Scheduling =====
+
+    /**
+     * Select best offload request for a CONCURRENT-mode rank.
+     * Uses m_open_row[] for prerequisite, OT for backpressure, RU capacity check.
+     * Sets req_it->command to ACTO/PREO/RDO/WRO. Does NOT issue.
+     * Two-pass: row hits first (FRFCFS-like).
+     */
+    bool schedule_offload_for_rank(int rk_idx, ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
+      // RU capacity check: if global RU is full, block ALL offload commands
+      // (ACTO/PREO would waste OT slots since RDO/WRO can't follow until RU drains)
+      if ((int)m_return_unit.size() >= RU_MAX_ENTRIES) return false;
+      bool ru_full = false;  // Already checked above
+      set_write_mode_per_rank(rk_idx);
+
+      ReqBuffer* buffers[2];
+      if (m_is_write_mode_per_rank[rk_idx]) {
+        buffers[0] = &m_write_buffers[rk_idx];
+        buffers[1] = &m_read_buffers[rk_idx];
+      } else {
+        buffers[0] = &m_read_buffers[rk_idx];
+        buffers[1] = &m_write_buffers[rk_idx];
+      }
+
+      for (int bi = 0; bi < 2; bi++) {
+        auto& buffer = *buffers[bi];
+        if (buffer.size() == 0) continue;
+
+        // Two-pass: row hits (RDO/WRO) first, then misses (ACTO/PREO)
+        for (int pass = 0; pass < 2; pass++) {
+          for (auto it = buffer.begin(); it != buffer.end(); it++) {
+            int flat_bank_id = it->addr_vec[bank_idx]
+                             + it->addr_vec[bankgroup_idx] * num_banks
+                             + it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+
+            // OT backpressure
+            if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat &&
+                m_ot_counter[flat_bank_id] >= HOST_OT_THRESHOLD) continue;
+
+            int target_row = it->addr_vec[row_idx];
+            bool is_read   = (it->type_id == Request::Type::Read);
+            int offload_cmd = -1;
+
+            if (m_open_row[flat_bank_id] == -1) {
+              if (pass == 1) offload_cmd = m_dram->m_commands("ACTO");
+            } else if (m_open_row[flat_bank_id] != target_row) {
+              if (pass == 1) offload_cmd = m_dram->m_commands("PREO");
+            } else {
+              // Row hit → RDO/WRO (final command → needs RU entry)
+              if (pass == 0) {
+                if (ru_full) continue;  // RU full: can't issue final command
+                offload_cmd = is_read ? m_dram->m_commands("RDO")
+                                      : m_dram->m_commands("WRO");
+              }
+            }
+
+            if (offload_cmd < 0) continue;
+            if (!m_dram->check_ready(offload_cmd, it->addr_vec)) continue;
+
+            // Found: set command and return (tick() will issue)
+            it->command = offload_cmd;
+            req_it = it;
+            req_buffer = &buffer;
+            return true;
+          }
+        }
+      }
+      return false;
+    }
+
     bool is_row_hit(ReqBuffer::iterator& req) {
       return m_dram->check_rowbuffer_hit(req->final_command, req->addr_vec);
     }
@@ -570,6 +864,16 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       rr_rk_idx.erase(rr_rk_idx.begin());
     }
 
+    /**
+     * schedule_request(): Select the best request to serve.
+     * Sets req_it->command to the appropriate command (real or offload).
+     * Does NOT issue or bypass — tick() handles that uniformly.
+     *
+     * For CONCURRENT/NMA ranks:
+     *   active_buffer: RD→RDO, WR→WRO (bank already open from pre-transition ACT)
+     *   priority_buffer: REFab→REFO
+     *   read/write_buffer: m_open_row[] based → ACTO/PREO/RDO/WRO (OT checked)
+     */
     bool schedule_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
       bool request_found = false;
 
@@ -578,29 +882,71 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         is_empty_priority_per_rank[rk_idx] = (m_priority_buffers[rk_idx].size() == 0);
       }
 
-      // 1. First, check the active buffer (avoid useless ACTs)
+      // 1. Active buffer (highest priority — avoid useless ACTs)
       if (req_it = m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
-        if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
-          request_found = true;
-          req_buffer = &m_active_buffer;
+        int ab_rk = req_it->addr_vec[m_rank_addr_idx];
+        if (ab_rk >= 0 && ab_rk < m_num_rank &&
+            m_mode_per_rank[ab_rk] != AsyncDIMMMode::HOST) {
+          // CONCURRENT/NMA: convert RD/WR → RDO/WRO (needs RU entry)
+          if ((int)m_return_unit.size() >= RU_MAX_ENTRIES) {
+            // RU full: can't create RU entry, skip
+          } else {  // RU has space
+          bool is_read = (req_it->type_id == Request::Type::Read);
+          int offload_cmd = is_read ? m_dram->m_commands("RDO") : m_dram->m_commands("WRO");
+          if (m_dram->check_ready(offload_cmd, req_it->addr_vec)) {
+            req_it->command = offload_cmd;
+            request_found = true;
+            req_buffer = &m_active_buffer;
+          }
+          } // end RU capacity check
+        } else {
+          // HOST: normal scheduling
+          if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
+            request_found = true;
+            req_buffer = &m_active_buffer;
+          }
         }
       }
 
-      // 2. Check priority buffer (refresh), then read/write buffers
+      // 2. Priority buffer (refresh) — round-robin across ranks
       if (!request_found) {
         for (auto rk_idx : rr_rk_idx) {
-          if (m_priority_buffers[rk_idx].size() != 0) {
+          if (m_priority_buffers[rk_idx].size() == 0) continue;
+
+          if (m_mode_per_rank[rk_idx] != AsyncDIMMMode::HOST) {
+            // CONCURRENT/NMA: convert REFab → REFO
+            req_it = m_priority_buffers[rk_idx].begin();
+            int refo_cmd = m_dram->m_commands("REFO");
+            if (m_dram->check_ready(refo_cmd, req_it->addr_vec)) {
+              req_it->command = refo_cmd;
+              request_found = true;
+              req_buffer = &m_priority_buffers[rk_idx];
+              break;
+            }
+          } else {
+            // HOST: normal priority scheduling
             req_buffer = &m_priority_buffers[rk_idx];
             req_it = m_priority_buffers[rk_idx].begin();
             req_it->command = m_dram->get_preq_command(req_it->final_command, req_it->addr_vec);
-
             request_found = m_dram->check_ready(req_it->command, req_it->addr_vec);
             if (request_found) break;
           }
         }
+      }
 
-        if (!request_found) {
-          for (auto rk_idx : rr_rk_idx) {
+      // 3. Read/write buffers — round-robin across ranks (HOST + CONCURRENT interleaved)
+      if (!request_found) {
+        for (auto rk_idx : rr_rk_idx) {
+          if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::NMA) continue;
+
+          if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::CONCURRENT) {
+            // Offload: use m_open_row[] for prerequisite, check OT
+            if (schedule_offload_for_rank(rk_idx, req_it, req_buffer)) {
+              request_found = true;
+              break;
+            }
+          } else {
+            // HOST: normal FRFCFS scheduling
             set_write_mode_per_rank(rk_idx);
             if (is_empty_priority_per_rank[rk_idx]) {
               auto& buffer = m_is_write_mode_per_rank[rk_idx] ? m_write_buffers[rk_idx] : m_read_buffers[rk_idx];

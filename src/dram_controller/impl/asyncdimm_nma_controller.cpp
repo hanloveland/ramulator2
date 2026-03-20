@@ -27,14 +27,14 @@ namespace Ramulator {
  *   - NMAInst arrives via DQ magic path (bypass_command intercepts WR to
  *     special addresses; no separate Host→NMA software write path)
  *   - ctrl-reg WR → m_nma_start_pending; system polls and triggers H2N
- *   - inst-buf WR → decode_nma_inst() → m_nma_inst_queue
+ *   - inst-buf WR → decode_nma_inst() → m_nma_program
  *   - NMA state machine (IDLE → ISSUE_START → RUN → BAR → WAIT → DONE)
  *   - Per-bank REQ FIFOs: m_nma_req_buffer[flat_bank_id] (max 8 per bank)
  *   - Scheduler issues front of each bank's FIFO (round-robin, first ready)
  *   - comp_opcode → memory access type mapping (RD/WR/none/control)
  *   - Uses shadow FSM to determine ACT/PRE prerequisites
  *   - Handles refresh internally during NMA Mode
- *   - Compute-only instructions (ADD/MUL) modeled with fixed latency
+ *   - VMA-internal instructions (T_* ops: Y/Y2 from VMA) modeled with fixed latency
  *   - LOOP instruction for iteration support
  *
  * Phase 3 (Concurrent Mode): [Placeholder]
@@ -115,14 +115,11 @@ class AsyncDIMMNMAController {
     // ===== Phase 2: NMA Mode State Machine =====
     NMAState m_nma_state = NMAState::NMA_IDLE;
 
-    // NMAInst_Slot-based workload queue
-    // Loaded from DQ magic-path WR intercept
-    std::deque<NMAInst_Slot> m_nma_inst_queue;       // Instruction queue
-    static constexpr int NMA_INST_QUEUE_MAX = 256;   // Large enough to hold full program
-
-    // Program Counter for LOOP support
-    int m_nma_pc = 0;
-    std::vector<NMAInst_Slot> m_nma_program;  // Full program (for LOOP jump-back)
+    // NMA program: loaded from DQ magic-path WR intercept.
+    // PC-based execution (DBX-DIMM style): m_nma_pc indexes into m_nma_program.
+    std::vector<NMAInst_Slot> m_nma_program;          // Program buffer (vector, max 1024)
+    static constexpr int NMA_INST_MAX = 1024;         // 8KB SRAM / 8B per NMAInst = 1024
+    int m_nma_pc = 0;                                 // Program counter
 
     // Address generation slots
     // Active instructions being expanded into memory requests
@@ -155,9 +152,13 @@ class AsyncDIMMNMAController {
     int m_nma_wait_cnt = 0;
     int m_nma_wait_target = 0;
 
-    // Compute latency constants (in NMA clock ticks)
-    static constexpr int COMPUTE_LATENCY_ADD = 1;
-    static constexpr int COMPUTE_LATENCY_MUL = 2;
+    // Compute latency constants (in NMA clock ticks) for VMA-internal (NONE type) ops.
+    // All T_* ops modeled as 1 NMA tick latency.
+    static constexpr int COMPUTE_LATENCY_T_ADD  = 4;  // Z = Y + Y2
+    static constexpr int COMPUTE_LATENCY_T_MUL  = 4;  // Z = Y * Y2
+    static constexpr int COMPUTE_LATENCY_T_VRED = 4;  // Z += Y
+    static constexpr int COMPUTE_LATENCY_T_SRED = 4;  // z = SUM(Y)
+    static constexpr int COMPUTE_LATENCY_T_MAC  = 4;  // Z += Y * Y2
 
     // NMA Mode refresh management
     Clk_t m_last_refresh_clk = 0;
@@ -197,7 +198,96 @@ class AsyncDIMMNMAController {
 
     // NMA clock ratio: NMA logic runs at 1/4 of DRAM clock
     // (on-DIMM digital logic cannot run at full DRAM clock speed)
-    static constexpr int NMA_CLOCK_RATIO = 4;
+    static constexpr int NMA_CLOCK_RATIO = 1;
+
+    // ===== Phase 3: Concurrent Mode =====
+
+    bool m_concurrent_mode = false;
+
+    // CMD FIFO (per-bank): receives decoded host offload commands (ACTO→ACT, RDO→RD, etc.)
+    struct CmdFifoEntry {
+      int command;         // Decoded DRAM command (ACT/PRE/RD/WR)
+      AddrVec_t addr_vec;
+      Clk_t arrive;
+      bool is_read;
+      uint64_t seq_num;    // Global seq number (valid only for reads)
+    };
+    std::vector<std::deque<CmdFifoEntry>> m_cmd_fifo;  // [total_banks]
+    static constexpr int NMA_CMD_FIFO_SIZE = 8;        // Per-bank CMD FIFO depth
+
+    // H/N Arbiter: per-bank FIFO selection (true = CMD FIFO, false = REQ FIFO)
+    std::vector<bool> m_arbiter_use_cmd;  // [total_banks]
+
+    // SR Unit: per-bank Bank State Change (BSC) tracking
+    // Records last ACT/PRE issued from CMD FIFO and REQ FIFO respectively.
+    // On FIFO switch, compares expected bank state vs actual to determine recovery.
+    struct SRState {
+      // CMD FIFO's view of the bank
+      int last_cmd_bsc   = -1;   // Last BSC cmd id from CMD FIFO (-1=none)
+      int cmd_open_row   = -1;   // Expected open row per CMD FIFO perspective
+      // REQ FIFO's view of the bank
+      int last_req_bsc   = -1;   // Last BSC cmd id from REQ FIFO (-1=none)
+      int req_open_row   = -1;   // Expected open row per REQ FIFO perspective
+    };
+    std::vector<SRState> m_sr_unit;  // [total_banks]
+
+    // Return Unit (NMA MC side): tracks offloaded reads for interrupt generation
+    struct ReturnEntry {
+      uint64_t seq_num;
+      bool is_done = false;
+    };
+    std::deque<ReturnEntry> m_return_buffer;  // Ordered by offload arrival
+    uint64_t m_next_seq_num = 0;
+
+    // Interrupt signal to Host MC
+    using InterruptCallback = std::function<void(int rank_id, int batch_size)>;
+    InterruptCallback m_interrupt_cb = nullptr;
+
+    // TDM interrupt: 1-bit alert_n shared across ranks, time-division multiplexed
+    // Period = N_rank cycles (each rank gets 1 slot per period)
+    // Latency = N_rank/2 cycles (average delivery delay)
+    static constexpr int TDM_INTERRUPT_PERIOD  = 4;  // N_rank = 4
+    static constexpr int TDM_INTERRUPT_LATENCY = 2;  // N_rank/2 = 2
+    Clk_t m_last_interrupt_clk = -100;  // Initialize far past to allow first interrupt
+
+    // NMA indexing time for RT reads (approximation; paper says not tRL)
+    static constexpr int NMA_RT_LATENCY = 20;  // DRAM cycles
+
+    // Pending TDM interrupt: deferred by TDM_INTERRUPT_LATENCY cycles
+    struct PendingInterrupt {
+      int batch_size;
+      Clk_t deliver_clk;
+    };
+    std::deque<PendingInterrupt> m_pending_interrupts;
+
+    // SR Unit per-bank recovery: when H/N Arbiter switches TO CMD FIFO,
+    // a recovery PRE may be needed before CMD FIFO commands can proceed.
+    struct SRRecovery {
+      bool pending = false;
+      int  cmd     = -1;
+      AddrVec_t addr_vec;
+    };
+    std::vector<SRRecovery> m_sr_recovery;  // [total_banks]
+
+    // Pending read completions (Return Unit NMA-side).
+    // Populated on RD issue from CMD FIFO; fires return_buffer done-mark.
+    struct PendingRead {
+      uint64_t seq_num;
+      Clk_t    complete_clk;
+    };
+    std::deque<PendingRead> m_pending_reads;
+
+    // Cached DRAM read timing (nCL = column latency, nBL = burst length)
+    int m_nCL = -1;
+    int m_nBL = -1;
+
+    // Phase 3 Statistics
+    size_t s_num_cmd_received    = 0;  // Offload commands received into CMD FIFO
+    size_t s_num_cmd_issued      = 0;  // DRAM commands issued from CMD FIFO
+    size_t s_num_hn_switches     = 0;  // H/N Arbiter FIFO switches
+    size_t s_num_sr_recoveries   = 0;  // SR Unit recovery commands issued
+    size_t s_num_interrupts_sent = 0;  // Interrupts sent to Host MC
+    size_t s_num_rt_received     = 0;  // RT commands received from Host MC
 
   public:
     AsyncDIMMNMAController() = default;
@@ -233,6 +323,16 @@ class AsyncDIMMNMAController {
 
       // Initialize per-bank REQ FIFOs
       m_nma_req_buffer.resize(m_total_banks);
+
+      // Initialize Phase 3: per-bank CMD FIFOs, H/N Arbiter, SR Unit, recovery
+      m_cmd_fifo.resize(m_total_banks);
+      m_arbiter_use_cmd.resize(m_total_banks, false);  // Default: REQ FIFO
+      m_sr_unit.resize(m_total_banks);
+      m_sr_recovery.resize(m_total_banks);
+
+      // Cache DRAM read timing for read completion modeling
+      m_nCL = m_dram->m_timing_vals("nCL");
+      m_nBL = m_dram->m_timing_vals("nBL");
 
       // Store magic path addresses
       m_nma_ctrl_row = nma_ctrl_row;
@@ -289,7 +389,7 @@ class AsyncDIMMNMAController {
      */
     bool is_nma_complete() const {
       return m_nma_state == NMAState::NMA_IDLE &&
-             m_nma_inst_queue.empty() &&
+             m_nma_pc >= (int)m_nma_program.size() &&
              m_addr_gen_slots.empty() &&
              all_req_buffers_empty();
     }
@@ -310,6 +410,13 @@ class AsyncDIMMNMAController {
           handle_future_action(m_future_actions[i]);
           m_future_actions.erase(m_future_actions.begin() + i);
         }
+      }
+
+      // Phase 3: check pending read completions, queue/deliver interrupts every DRAM cycle
+      if (m_concurrent_mode) {
+        process_pending_reads();
+        check_and_send_interrupt();
+        deliver_pending_interrupts();
       }
 
       // NMA state machine runs at 1/4 DRAM clock
@@ -333,6 +440,57 @@ class AsyncDIMMNMAController {
      */
     void bypass_command(int command, const AddrVec_t& addr_vec,
                         const std::vector<uint64_t>& payload) {
+
+      // ===== Phase 3: CMD FIFO population (Concurrent Mode) =====
+      // Intercept offload commands (ACTO/RDO/WRO/PREO/REFO) from Host MC.
+      // Decode → real DRAM command and push into per-bank CMD FIFO.
+      // Do NOT update shadow FSM for offload commands (NMA MC manages own state).
+      if (m_concurrent_mode) {
+        // REFO: Host MC's RefreshManager says refresh is due.
+        // Set pending flag — NMA MC will issue real REFab when all banks are ready.
+        if (command == m_dram->m_commands("REFO")) {
+          m_nma_refresh_pending = true;
+          s_num_ref_bypass++;
+          return;
+        }
+
+        int decoded_cmd = -1;
+        // Decode offload → NMA-local commands (rank-local CA + data bus)
+        if      (command == m_dram->m_commands("ACTO")) decoded_cmd = m_dram->m_commands("ACT_L");
+        else if (command == m_dram->m_commands("PREO")) decoded_cmd = m_dram->m_commands("PRE_L");
+        else if (command == m_dram->m_commands("RDO"))  decoded_cmd = m_dram->m_commands("RD_L");
+        else if (command == m_dram->m_commands("WRO"))  decoded_cmd = m_dram->m_commands("WR_L");
+
+        if (decoded_cmd >= 0) {
+          int flat_id = get_flat_bank_id(addr_vec);
+          if ((int)m_cmd_fifo[flat_id].size() < NMA_CMD_FIFO_SIZE) {
+            CmdFifoEntry entry;
+            entry.command  = decoded_cmd;
+            entry.addr_vec = addr_vec;
+            entry.arrive   = m_clk;
+            entry.is_read  = (decoded_cmd == m_dram->m_commands("RD_L"));
+            if (entry.is_read) {
+              entry.seq_num = m_next_seq_num;
+              m_return_buffer.push_back({m_next_seq_num, false});
+              m_next_seq_num++;
+            } else {
+              entry.seq_num = 0;
+            }
+            m_cmd_fifo[flat_id].push_back(entry);
+            s_num_cmd_received++;
+          }
+          // Offload commands: no shadow FSM update, return immediately
+          return;
+        }
+      }
+
+      // REFO in NMA mode: Host MC's RefreshManager requests refresh
+      if (command == m_dram->m_commands("REFO")) {
+        m_nma_refresh_pending = true;
+        s_num_ref_bypass++;
+        return;
+      }
+
       s_num_bypass_received++;
 
       if (command == m_dram->m_commands("ACT")) {
@@ -382,23 +540,20 @@ class AsyncDIMMNMAController {
           int bk = addr_vec[m_bank_level];
 
           if (bg == m_nma_buf_bg && bk == m_nma_buf_bk) {
-            // NMAInst buffer write → decode each payload word as an NMAInst_Slot
+            // NMAInst buffer write → decode each payload word into program buffer
             for (const auto& pval : payload) {
               if (pval == 0) continue;
               NMAInst_Slot inst = decode_nma_inst(pval);
-              if (m_nma_inst_queue.size() < NMA_INST_QUEUE_MAX) {
-                m_nma_inst_queue.push_back(inst);
+              if ((int)m_nma_program.size() < NMA_INST_MAX) {
                 m_nma_program.push_back(inst);
               }
             }
             s_num_magic_inst_wr++;
           }
           else if (bg == m_nma_ctrl_bg && bk == m_nma_ctrl_bk) {
-            // Ctrl-reg write → check if this rank should start
-            // payload[rank_id] != 0 means start NMA for that rank
-            if (m_rank_id < (int)payload.size() && payload[m_rank_id] != 0) {
-              m_nma_start_pending = true;
-            }
+            // Ctrl-reg write: NMA start is now managed by Host MC (DBX-DIMM style).
+            // Host MC tracks NMAInst write count and triggers start_nma_execution()
+            // only after all instructions are delivered. No action needed here.
             s_num_magic_ctrl_wr++;
           }
         }
@@ -500,6 +655,16 @@ class AsyncDIMMNMAController {
       std::cout << "  WAIT:        " << s_nma_wait_cycles << std::endl;
       std::cout << "  DONE:        " << s_nma_done_cycles << std::endl;
       std::cout << "  Per-bank REQ FIFO outstanding: " << get_nma_outstanding() << std::endl;
+      if (m_concurrent_mode || s_num_cmd_received > 0) {
+        std::cout << "  === Phase 3 Concurrent Mode ===" << std::endl;
+        std::cout << "  CMD received:      " << s_num_cmd_received    << std::endl;
+        std::cout << "  CMD issued:        " << s_num_cmd_issued      << std::endl;
+        std::cout << "  H/N switches:      " << s_num_hn_switches     << std::endl;
+        std::cout << "  SR recoveries:     " << s_num_sr_recoveries   << std::endl;
+        std::cout << "  Interrupts sent:   " << s_num_interrupts_sent << std::endl;
+        std::cout << "  RT received:       " << s_num_rt_received     << std::endl;
+        std::cout << "  CMD FIFO pending:  " << get_cmd_fifo_outstanding() << std::endl;
+      }
     }
 
     void print_bank_states() const {
@@ -516,14 +681,362 @@ class AsyncDIMMNMAController {
           std::cout << "  BG" << bg << " BK" << bk << ": " << state_str;
           if (m_bank_fsm[flat_id].state == BankState::OPENED)
             std::cout << " (row=" << m_bank_fsm[flat_id].open_row << ")";
-          std::cout << "  REQ_FIFO=" << m_nma_req_buffer[flat_id].size() << std::endl;
+          std::cout << "  REQ_FIFO=" << m_nma_req_buffer[flat_id].size()
+                    << "  CMD_FIFO=" << m_cmd_fifo[flat_id].size() << std::endl;
         }
       }
+    }
+
+    // ===== Phase 3: Concurrent Mode Public API =====
+
+    /**
+     * Enter concurrent mode: Host MC offloads commands via CMD FIFO.
+     * Called by AsyncDIMMSystem during H2C transition.
+     */
+    void enter_concurrent_mode() {
+      m_concurrent_mode = true;
+      // Arbiter starts at REQ FIFO (NMA workload may already be running)
+      for (size_t i = 0; i < m_arbiter_use_cmd.size(); i++) m_arbiter_use_cmd[i] = false;
+      // Clear stale CMD FIFO state and SR recovery
+      for (auto& fifo : m_cmd_fifo) fifo.clear();
+      for (auto& sr   : m_sr_recovery) sr = SRRecovery{};
+      m_return_buffer.clear();
+      m_pending_reads.clear();
+      m_pending_interrupts.clear();
+      m_next_seq_num = 0;
+    }
+
+    /**
+     * Exit concurrent mode: restore pure NMA scheduling.
+     * Called by AsyncDIMMSystem during C2H transition.
+     */
+    void exit_concurrent_mode() {
+      m_concurrent_mode = false;
+    }
+
+    /**
+     * Register interrupt callback (wired by AsyncDIMMSystem to Host MC).
+     * Fired when head-of-line offloaded read is complete.
+     */
+    void set_interrupt_callback(InterruptCallback cb) {
+      m_interrupt_cb = cb;
+    }
+
+    /**
+     * Host MC issued RT command: NMA MC "sends" data batch via DQ.
+     * In simulation, we just track the stat; real DQ timing handled by DRAM model.
+     */
+    void receive_rt(int batch_size) {
+      s_num_rt_received++;
+      (void)batch_size;
+    }
+
+    /**
+     * True when NMA state is IDLE and all CMD FIFOs are drained.
+     * Used by System to detect end of concurrent execution.
+     */
+    bool is_concurrent_complete() const {
+      if (!m_concurrent_mode) return false;
+      if (!is_nma_idle()) return false;
+      for (const auto& fifo : m_cmd_fifo)
+        if (!fifo.empty()) return false;
+      return m_return_buffer.empty() && m_pending_reads.empty() &&
+             m_pending_interrupts.empty();
+    }
+
+    /**
+     * Number of entries pending in all CMD FIFOs.
+     */
+    int get_cmd_fifo_outstanding() const {
+      int total = 0;
+      for (const auto& fifo : m_cmd_fifo)
+        total += (int)fifo.size();
+      return total;
     }
 
   private:
     int get_flat_bank_id(const AddrVec_t& addr_vec) const {
       return addr_vec[m_bankgroup_level] * m_num_banks + addr_vec[m_bank_level];
+    }
+
+    // ===== Phase 3: Concurrent Mode Private Functions =====
+
+    /**
+     * Try to issue one DRAM command using H/N Arbiter (CMD FIFO or REQ FIFO).
+     * Called once per NMA tick in Concurrent Mode, replacing try_issue_nma_command().
+     *
+     * H/N Arbiter switch conditions (per bank):
+     *   CMD → REQ: CMD FIFO empty OR PRE was just issued from CMD FIFO
+     *   REQ → CMD: REQ FIFO empty OR PRE was just issued from REQ FIFO
+     */
+    void try_issue_concurrent_command() {
+      // Refresh has highest priority
+      if (m_nma_refresh_pending) {
+        if (try_issue_nma_refresh()) return;
+      }
+
+      for (int i = 0; i < m_total_banks; i++) {
+        int bank_id = (m_req_rr_bank_idx + i) % m_total_banks;
+        bool use_cmd = m_arbiter_use_cmd[bank_id];
+
+        auto& cmd_fifo = m_cmd_fifo[bank_id];
+        auto& req_fifo = m_nma_req_buffer[bank_id];
+        bool cmd_empty = cmd_fifo.empty() && !m_sr_recovery[bank_id].pending;
+        bool req_empty = req_fifo.empty();
+
+        // Arbiter switch: active FIFO empty → switch to other if non-empty
+        if (use_cmd && cmd_empty) {
+          if (!req_empty) {
+            m_arbiter_use_cmd[bank_id] = false;
+            use_cmd = false;
+            s_num_hn_switches++;
+          } else {
+            continue;  // Both sides empty
+          }
+        } else if (!use_cmd && req_empty) {
+          if (!cmd_empty) {
+            switch_to_cmd_fifo(bank_id);
+            use_cmd = true;
+          } else {
+            continue;  // Both sides empty
+          }
+        }
+
+        // Issue from selected FIFO
+        bool issued = use_cmd ? try_issue_from_cmd_fifo(bank_id)
+                              : try_issue_from_req_fifo(bank_id);
+        if (issued) return;  // One command per NMA tick
+      }
+    }
+
+    /**
+     * Switch H/N Arbiter to CMD FIFO with SR Unit recovery check.
+     *
+     * Paper Fig 5 recovery table (actual bank state × CMD FIFO's expected state):
+     *   Actual=OPEN,   Expected=OPEN  (different row) → PRE + ACT  (close, reopen correct row)
+     *   Actual=OPEN,   Expected=CLOSED                → PRE        (close bank)
+     *   Actual=CLOSED, Expected=OPEN                  → (none)     (CMD FIFO starts with ACT)
+     *   Actual=CLOSED, Expected=CLOSED                → (none)     (already matches)
+     *
+     * CMD FIFO's "expected state" is inferred from its front command:
+     *   front=ACT → expects bank CLOSED (needs to activate)
+     *   front=RD/WR → expects bank OPEN with the correct row
+     *   front=PRE → expects bank OPEN (needs to close)
+     */
+    void switch_to_cmd_fifo(int bank_id) {
+      m_arbiter_use_cmd[bank_id] = true;
+      s_num_hn_switches++;
+
+      auto& fifo = m_cmd_fifo[bank_id];
+      if (fifo.empty()) return;
+
+      const auto& bank = m_bank_fsm[bank_id];
+      int front_cmd = fifo.front().command;
+      int act_cmd   = m_dram->m_commands("ACT_L");
+      int pre_cmd   = m_dram->m_commands("PRE_L");
+      int rd_cmd    = m_dram->m_commands("RD_L");
+      int wr_cmd    = m_dram->m_commands("WR_L");
+
+      // Build recovery address vector for this bank
+      auto make_bank_addr = [&]() -> AddrVec_t {
+        AddrVec_t a(m_dram->m_levels.size(), -1);
+        a[m_channel_level]   = m_channel_id;
+        a[m_rank_level]      = m_rank_id;
+        a[m_bankgroup_level] = bank_id / m_num_banks;
+        a[m_bank_level]      = bank_id % m_num_banks;
+        return a;
+      };
+
+      if (bank.state == BankState::OPENED) {
+        if (front_cmd == act_cmd) {
+          // Actual=OPEN, Expected=CLOSED → PRE recovery
+          // CMD FIFO will issue its own ACT next tick after PRE completes
+          m_sr_recovery[bank_id] = {true, pre_cmd, make_bank_addr()};
+          s_num_sr_recoveries++;
+        }
+        else if (front_cmd == rd_cmd || front_cmd == wr_cmd) {
+          // Actual=OPEN, CMD expects row-hit RD/WR.
+          // If the open row differs from CMD FIFO's target row → row conflict → PRE+ACT
+          int cmd_target_row = fifo.front().addr_vec[m_row_level];
+          if (bank.open_row != cmd_target_row) {
+            // PRE first; after PRE completes, we'll need ACT before the RD/WR.
+            // Insert ACT to the CMD FIFO front so it executes after PRE recovery.
+            CmdFifoEntry act_entry;
+            act_entry.command  = act_cmd;
+            act_entry.addr_vec = fifo.front().addr_vec;  // same target address
+            act_entry.arrive   = m_clk;
+            act_entry.is_read  = false;
+            act_entry.seq_num  = 0;
+            fifo.push_front(act_entry);
+            // Issue PRE as recovery
+            m_sr_recovery[bank_id] = {true, pre_cmd, make_bank_addr()};
+            s_num_sr_recoveries++;
+          }
+          // else: row matches → no recovery needed
+        }
+        // front=PRE while bank is OPEN: no recovery (PRE can proceed normally)
+      }
+      // bank CLOSED: CMD FIFO starts with ACT or PRE → no recovery needed
+      // (ACT issues normally on closed bank; PRE on closed bank is a no-op)
+    }
+
+    /**
+     * Try to issue one command from CMD FIFO for bank_id.
+     * Issues SR recovery command first if pending.
+     * Returns true if a command was issued.
+     */
+    bool try_issue_from_cmd_fifo(int bank_id) {
+      // SR recovery has priority within CMD FIFO issuing
+      if (m_sr_recovery[bank_id].pending) {
+        int rec_cmd      = m_sr_recovery[bank_id].cmd;
+        auto& rec_addr   = m_sr_recovery[bank_id].addr_vec;
+        if (m_dram->check_ready(rec_cmd, rec_addr)) {
+          m_dram->issue_command(rec_cmd, rec_addr);
+          update_fsm_on_nma_command(rec_cmd, rec_addr);
+          m_sr_recovery[bank_id].pending = false;
+          m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
+          return true;
+        }
+        return false;  // Stall until recovery is ready
+      }
+
+      auto& fifo = m_cmd_fifo[bank_id];
+      if (fifo.empty()) return false;
+
+      auto& entry = fifo.front();
+
+      // Bank-state recovery: post-refresh, bank may be CLOSED but CMD FIFO
+      // front is RD/WR (ACT was already issued and popped before refresh).
+      // Insert ACT recovery using the RD/WR's row address.
+      const auto& bank = m_bank_fsm[bank_id];
+      if (bank.state == BankState::CLOSED &&
+          (entry.command == m_dram->m_commands("RD_L") ||
+           entry.command == m_dram->m_commands("WR_L"))) {
+        int act_cmd = m_dram->m_commands("ACT_L");
+        if (m_dram->check_ready(act_cmd, entry.addr_vec)) {
+          m_dram->issue_command(act_cmd, entry.addr_vec);
+          update_fsm_on_nma_command(act_cmd, entry.addr_vec);
+          s_num_nma_act++;
+          m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
+          return true;  // ACT issued; next tick RD/WR proceeds
+        }
+        return false;  // ACT not ready yet
+      }
+
+      if (!m_dram->check_ready(entry.command, entry.addr_vec)) return false;
+
+      // Issue command
+      m_dram->issue_command(entry.command, entry.addr_vec);
+      update_fsm_on_nma_command(entry.command, entry.addr_vec);
+      s_num_cmd_issued++;
+
+      bool is_pre = (entry.command == m_dram->m_commands("PRE_L"));
+      bool is_rd  = (entry.command == m_dram->m_commands("RD_L"));
+
+      // Schedule read completion for Return Unit interrupt generation
+      if (is_rd) {
+        m_pending_reads.push_back({entry.seq_num, m_clk + m_nCL + m_nBL});
+      }
+
+      fifo.pop_front();  // Each CMD FIFO entry is one discrete DRAM command
+
+      // H/N Arbiter: PRE issued → switch to REQ FIFO if it has work
+      if (is_pre && !m_nma_req_buffer[bank_id].empty()) {
+        m_arbiter_use_cmd[bank_id] = false;
+        s_num_hn_switches++;
+      }
+
+      m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
+      return true;
+    }
+
+    /**
+     * Try to issue one command from REQ FIFO for bank_id.
+     * Identical prerequisite resolution as try_issue_nma_command(), but per-bank.
+     * Returns true if a command was issued.
+     */
+    bool try_issue_from_req_fifo(int bank_id) {
+      auto& fifo = m_nma_req_buffer[bank_id];
+      if (fifo.empty()) return false;
+
+      auto& req = fifo.front();
+      int cmd = get_nma_preq_command(req);
+      if (cmd < 0) return false;  // Bank refreshing
+
+      req.command = cmd;
+      if (!m_dram->check_ready(cmd, req.addr_vec)) return false;
+
+      m_dram->issue_command(cmd, req.addr_vec);
+      update_fsm_on_nma_command(cmd, req.addr_vec);
+
+      bool is_pre = (cmd == m_dram->m_commands("PRE_L"));
+
+      if      (cmd == m_dram->m_commands("ACT_L")) { s_num_nma_act++; }
+      else if (cmd == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; }
+      else if (cmd == m_dram->m_commands("RD_L"))  { s_num_nma_rd++; fifo.pop_front(); }
+      else if (cmd == m_dram->m_commands("WR_L"))  { s_num_nma_wr++; fifo.pop_front(); }
+
+      // H/N Arbiter: PRE issued → switch to CMD FIFO if it has work
+      if (is_pre && !m_cmd_fifo[bank_id].empty()) {
+        switch_to_cmd_fifo(bank_id);
+      }
+
+      m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
+      return true;
+    }
+
+    /**
+     * Mark pending reads as done when their completion time arrives.
+     * Called every DRAM cycle in concurrent mode.
+     */
+    void process_pending_reads() {
+      for (auto it = m_pending_reads.begin(); it != m_pending_reads.end(); ) {
+        if (it->complete_clk <= m_clk) {
+          // Mark the corresponding return_buffer entry as done
+          for (auto& entry : m_return_buffer) {
+            if (entry.seq_num == it->seq_num) {
+              entry.is_done = true;
+              break;
+            }
+          }
+          it = m_pending_reads.erase(it);
+        } else {
+          ++it;
+        }
+      }
+    }
+
+    /**
+     * TDM interrupt: fire at most 1 interrupt per TDM period (N_rank cycles).
+     * Each interrupt signals completion of the OLDEST offloaded access (head-of-line).
+     * Paper §IV.C: "one-bit alert_n signal", "restrict interrupts at offload order".
+     */
+    void check_and_send_interrupt() {
+      if (m_interrupt_cb == nullptr) return;
+      if (m_return_buffer.empty()) return;
+      if (!m_return_buffer.front().is_done) return;
+
+      // TDM rate limit: 1 interrupt per N_rank cycles
+      if ((m_clk - m_last_interrupt_clk) < (Clk_t)TDM_INTERRUPT_PERIOD) return;
+
+      // Fire ONE interrupt (1 access completion, always batch_size=1)
+      m_return_buffer.pop_front();
+      m_pending_interrupts.push_back({1, m_clk + TDM_INTERRUPT_LATENCY});
+      m_last_interrupt_clk = m_clk;
+      s_num_interrupts_sent++;
+    }
+
+    /**
+     * Deliver pending TDM interrupts that have reached their delivery clock.
+     * Called every DRAM cycle in concurrent mode (from tick()).
+     */
+    void deliver_pending_interrupts() {
+      while (!m_pending_interrupts.empty() &&
+             m_pending_interrupts.front().deliver_clk <= m_clk) {
+        auto& pi = m_pending_interrupts.front();
+        m_interrupt_cb(m_rank_id, pi.batch_size);
+        m_pending_interrupts.pop_front();
+      }
     }
 
     void handle_future_action(const FutureAction& action) {
@@ -624,7 +1137,8 @@ class AsyncDIMMNMAController {
      */
     void tick_nma_run() {
       check_nma_refresh();
-      try_issue_nma_command();
+      if (m_concurrent_mode) try_issue_concurrent_command();
+      else                   try_issue_nma_command();
       generate_nma_requests();
       fetch_nma_instructions();
     }
@@ -633,7 +1147,8 @@ class AsyncDIMMNMAController {
      * NMA_BAR: Barrier — wait for all per-bank FIFOs and addr_gen_slots to drain.
      */
     void tick_nma_bar() {
-      try_issue_nma_command();
+      if (m_concurrent_mode) try_issue_concurrent_command();
+      else                   try_issue_nma_command();
       generate_nma_requests();
 
       if (m_addr_gen_slots.empty() && all_req_buffers_empty()) {
@@ -645,7 +1160,8 @@ class AsyncDIMMNMAController {
      * NMA_WAIT: Fixed-latency wait (used for compute-only instructions).
      */
     void tick_nma_wait() {
-      try_issue_nma_command();
+      if (m_concurrent_mode) try_issue_concurrent_command();
+      else                   try_issue_nma_command();
       generate_nma_requests();
 
       m_nma_wait_cnt++;
@@ -660,7 +1176,8 @@ class AsyncDIMMNMAController {
      * NMA_DONE: Drain all outstanding requests, then close all banks (N2H implicit sync).
      */
     void tick_nma_done() {
-      try_issue_nma_command();
+      if (m_concurrent_mode) try_issue_concurrent_command();
+      else                   try_issue_nma_command();
       generate_nma_requests();
 
       if (m_addr_gen_slots.empty() && all_req_buffers_empty()) {
@@ -714,17 +1231,15 @@ class AsyncDIMMNMAController {
         m_dram->issue_command(req.command, req.addr_vec);
         update_fsm_on_nma_command(req.command, req.addr_vec);
 
-        if (req.command == m_dram->m_commands("ACT")) {
+        if (req.command == m_dram->m_commands("ACT_L")) {
           s_num_nma_act++;
-          // Request stays at front of FIFO; next tick will issue RD/WR
-        } else if (req.command == m_dram->m_commands("PRE")) {
+        } else if (req.command == m_dram->m_commands("PRE_L")) {
           s_num_nma_pre++;
-          // Request stays at front; next tick ACT→RD/WR
-        } else if (req.command == m_dram->m_commands("RD")) {
+        } else if (req.command == m_dram->m_commands("RD_L")) {
           s_num_nma_rd++;
           fifo.pop_front();
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
-        } else if (req.command == m_dram->m_commands("WR")) {
+        } else if (req.command == m_dram->m_commands("WR_L")) {
           s_num_nma_wr++;
           fifo.pop_front();
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
@@ -745,13 +1260,13 @@ class AsyncDIMMNMAController {
       if (bank.state == BankState::REFRESHING) return -1;
 
       if (bank.state == BankState::CLOSED)
-        return m_dram->m_commands("ACT");
+        return m_dram->m_commands("ACT_L");
 
       if (bank.state == BankState::OPENED) {
         if (bank.open_row == req.addr_vec[m_row_level])
-          return req.final_command;   // Row hit
+          return req.final_command;   // Row hit → RD_L or WR_L
         else
-          return m_dram->m_commands("PRE");  // Row conflict
+          return m_dram->m_commands("PRE_L");  // Row conflict
       }
 
       return -1;
@@ -761,23 +1276,23 @@ class AsyncDIMMNMAController {
      * Update shadow FSM after NMA MC issues a DRAM command.
      */
     void update_fsm_on_nma_command(int command, const AddrVec_t& addr_vec) {
-      if (command == m_dram->m_commands("ACT")) {
+      if (command == m_dram->m_commands("ACT") || command == m_dram->m_commands("ACT_L")) {
         int flat_id = get_flat_bank_id(addr_vec);
         m_bank_fsm[flat_id].state = BankState::OPENED;
         m_bank_fsm[flat_id].open_row = addr_vec[m_row_level];
       }
-      else if (command == m_dram->m_commands("PRE")) {
+      else if (command == m_dram->m_commands("PRE") || command == m_dram->m_commands("PRE_L")) {
         int flat_id = get_flat_bank_id(addr_vec);
         m_bank_fsm[flat_id].state = BankState::CLOSED;
         m_bank_fsm[flat_id].open_row = -1;
       }
-      else if (command == m_dram->m_commands("PREA")) {
+      else if (command == m_dram->m_commands("PREA") || command == m_dram->m_commands("PREA_L")) {
         for (auto& bank : m_bank_fsm) {
           bank.state = BankState::CLOSED;
           bank.open_row = -1;
         }
       }
-      else if (command == m_dram->m_commands("REFab")) {
+      else if (command == m_dram->m_commands("REFab") || command == m_dram->m_commands("REFab_L")) {
         for (auto& bank : m_bank_fsm) {
           bank.state = BankState::REFRESHING;
           bank.open_row = -1;
@@ -795,10 +1310,14 @@ class AsyncDIMMNMAController {
     /**
      * Generate DRAM requests from address generation slots into per-bank FIFOs.
      * Each NMAInst_Slot with memory access is expanded into sequential column accesses.
-     * Transposed ops (T_*) generate 2× the accesses (opsize×2) in the same bank/row.
      *
-     * NOTE: True transposed operand from a different row/bank is expected to be
-     * encoded as a separate NMAInst_Slot by the trace generator.
+     * Memory access classification:
+     *   READ  ops (LOAD, LOAD_ADD, LOAD_MUL, ADD, MUL, V_RED, S_RED, MAC, SCALE_ADD):
+     *     X operand fetched from DRAM → RD × opsize
+     *   WRITE ops (WBD):
+     *     Y (VMA buffer) written back to DRAM → WR × opsize
+     *   NONE  ops (T_ADD, T_MUL, T_V_RED, T_S_RED, T_MAC):
+     *     Both operands Y/Y2 from VMA; no DRAM access (handled in fetch_nma_instructions)
      *
      * Round-robin across active addr_gen_slots. One request per NMA tick.
      */
@@ -826,8 +1345,8 @@ class AsyncDIMMNMAController {
         req.addr_vec[m_bank_level]    = slot.inst.bk;
         req.addr_vec[m_row_level]     = slot.inst.row;
         req.addr_vec[m_column_level]  = slot.current_col;
-        req.final_command = req.is_read ? m_dram->m_commands("RD")
-                                        : m_dram->m_commands("WR");
+        req.final_command = req.is_read ? m_dram->m_commands("RD_L")
+                                        : m_dram->m_commands("WR_L");
         req.arrive = m_clk;
 
         fifo.push_back(req);
@@ -845,121 +1364,130 @@ class AsyncDIMMNMAController {
     }
 
     /**
-     * Fetch instructions from instruction queue into address generation slots.
+     * Fetch and execute the instruction at m_nma_pc from m_nma_program.
+     * PC-based execution (DBX-DIMM style): no inst_queue deque, direct vector access.
+     *
+     * LOOP: in-place counter. inst.cnt tracks current iteration.
+     *   cnt < opsize → cnt++, pc = jump_pc (loop back)
+     *   cnt >= opsize → cnt = 0, pc++ (fall through, loop done)
+     *   Total iterations = opsize + 1 (initial body + opsize repeats)
      */
     void fetch_nma_instructions() {
-      if (m_nma_inst_queue.empty()) return;
+      if (m_nma_pc >= (int)m_nma_program.size()) return;
       if ((int)m_addr_gen_slots.size() >= ADDR_GEN_SLOT_MAX) return;
 
-      NMAInst_Slot& inst = m_nma_inst_queue.front();
+      NMAInst_Slot& inst = m_nma_program[m_nma_pc];
       s_num_nma_instructions++;
-      m_nma_pc++;
 
       auto mem_type = inst.get_mem_access_type();
 
       if (mem_type == NMAInst_Slot::MemAccessType::CONTROL) {
         switch (inst.comp_opcode) {
           case NMAInst_Slot::BARRIER:
-            m_nma_inst_queue.pop_front();
+            m_nma_pc++;
             m_nma_state = NMAState::NMA_BAR;
             return;
 
           case NMAInst_Slot::EXIT:
-            m_nma_inst_queue.pop_front();
+            m_nma_pc++;
             m_nma_state = NMAState::NMA_DONE;
             return;
 
           case NMAInst_Slot::LOOP: {
-            // CRITICAL: Copy inst BEFORE pop_front() to avoid dangling reference.
-            NMAInst_Slot loop_inst = inst;
-            int loop_cnt = (loop_inst.etc >> 6) & 0x3F;
-            int jump_pc  = loop_inst.etc & 0x3F;
+            // DBX-DIMM style: in-place counter using inst.cnt
+            // loop_cnt = number of additional iterations (total = loop_cnt + 1)
+            // jump_pc = target PC to jump back to
+            // Note: loop_cnt/jump_pc decoded from etc field in NMAInst_Slot constructor
+            int loop_limit = inst.loop_cnt; // From etc[11:6], NOT opsize
+            int jump_pc    = inst.jump_pc;  // From etc[5:0]
             s_num_nma_loops++;
 
-            if (loop_cnt > 0) {
-              loop_inst.etc = ((loop_cnt - 1) << 6) | jump_pc;
-
-              // Determine body range [jump_pc, loop_prog_end) in m_nma_program.
-              // m_nma_pc already incremented → LOOP is at index [m_nma_pc - 1].
-              // Cache in cnt for subsequent iterations (m_nma_pc drifts after re-fetch).
-              int loop_prog_end;
-              if (loop_inst.cnt == 0) {
-                loop_prog_end = m_nma_pc - 1;
-                loop_inst.cnt = loop_prog_end;
-              } else {
-                loop_prog_end = loop_inst.cnt;
-              }
-
-              m_nma_inst_queue.pop_front();  // inst now invalid
-
-              if (jump_pc < loop_prog_end &&
-                  loop_prog_end <= (int)m_nma_program.size()) {
-                std::deque<NMAInst_Slot> loop_body;
-                for (int pc = jump_pc; pc < loop_prog_end; pc++)
-                  loop_body.push_back(m_nma_program[pc]);
-                loop_body.push_back(loop_inst);  // Decremented LOOP
-
-                for (int j = (int)loop_body.size() - 1; j >= 0; j--)
-                  m_nma_inst_queue.push_front(loop_body[j]);
-              }
+            if (inst.cnt < loop_limit) {
+              inst.cnt++;          // Increment iteration counter
+              m_nma_pc = jump_pc;  // Jump back to loop body start
             } else {
-              m_nma_inst_queue.pop_front();
+              inst.cnt = 0;        // Reset for potential future re-execution
+              m_nma_pc++;          // Fall through (loop done)
             }
             return;
           }
 
           default:
-            m_nma_inst_queue.pop_front();
+            m_nma_pc++;
             return;
         }
       }
       else if (mem_type == NMAInst_Slot::MemAccessType::NONE) {
-        // Compute-only (ADD/MUL): model as fixed-latency wait
-        int latency = 1;
-        if (inst.comp_opcode == NMAInst_Slot::ADD) latency = COMPUTE_LATENCY_ADD;
-        if (inst.comp_opcode == NMAInst_Slot::MUL) latency = COMPUTE_LATENCY_MUL;
+        // VMA-internal compute (T_* ops). Latency scales with opsize.
+        // Each element takes base_latency NMA ticks; total = base_latency × opsize.
+        int base_latency = 1;
+        switch (inst.comp_opcode) {
+          case NMAInst_Slot::T_ADD:   base_latency = COMPUTE_LATENCY_T_ADD;  break;
+          case NMAInst_Slot::T_MUL:   base_latency = COMPUTE_LATENCY_T_MUL;  break;
+          case NMAInst_Slot::T_V_RED: base_latency = COMPUTE_LATENCY_T_VRED; break;
+          case NMAInst_Slot::T_S_RED: base_latency = COMPUTE_LATENCY_T_SRED; break;
+          case NMAInst_Slot::T_MAC:   base_latency = COMPUTE_LATENCY_T_MAC;  break;
+          default:                    base_latency = 1; break;
+        }
 
         m_nma_wait_cnt = 0;
-        m_nma_wait_target = latency;
-        m_nma_inst_queue.pop_front();
+        m_nma_wait_target = base_latency * std::max(1, (int)inst.opsize);
+        m_nma_pc++;
         m_nma_state = NMAState::NMA_WAIT;
         s_num_nma_compute_only++;
         return;
       }
       else {
-        // Memory access instruction → create addr_gen_slot
+        // Memory access instruction (READ/WRITE) → create addr_gen_slot
         AddrGenSlot slot;
         slot.inst = inst;
         slot.total_accesses = inst.get_total_accesses();
         slot.issued_count = 0;
         slot.current_col = inst.col;
         m_addr_gen_slots.push_back(slot);
-        m_nma_inst_queue.pop_front();
+        m_nma_pc++;
       }
     }
 
     // ===== NMA Refresh Management =====
 
+    /**
+     * Check if refresh is needed.
+     * REFO-based: m_nma_refresh_pending is set by bypass_command() when REFO received.
+     * No independent nREFI tracking — Host MC's RefreshManager is the authority.
+     */
     void check_nma_refresh() {
-      if (m_nma_state == NMAState::NMA_IDLE) return;
-      if ((m_clk - m_last_refresh_clk) >= (Clk_t)m_nREFI)
-        m_nma_refresh_pending = true;
+      // m_nma_refresh_pending is set externally via REFO from Host MC.
+      // Nothing to do here — just a compatibility shim for tick_nma_run().
     }
 
     bool try_issue_nma_refresh() {
-      if (!all_banks_closed()) return false;
+      if (!all_banks_closed()) {
+        // Banks still open → issue PREA to force-close all banks
+        // Next tick: all_banks_closed() → REFab
+        issue_nma_prea();
+        return true;  // PREA issued this tick
+      }
 
       AddrVec_t ref_addr_vec(m_dram->m_levels.size(), -1);
       ref_addr_vec[m_channel_level] = m_channel_id;
       ref_addr_vec[m_rank_level]    = m_rank_id;
 
-      int ref_cmd = m_dram->m_commands("REFab");
+      int ref_cmd = m_dram->m_commands("REFab_L");
       if (m_dram->check_ready(ref_cmd, ref_addr_vec)) {
         m_dram->issue_command(ref_cmd, ref_addr_vec);
         update_fsm_on_nma_command(ref_cmd, ref_addr_vec);
         m_last_refresh_clk = m_clk;
         m_nma_refresh_pending = false;
         s_num_nma_ref++;
+
+        // SR Unit reset: after refresh all banks = CLOSED (ground truth).
+        // Both CMD FIFO and REQ FIFO perspectives are invalidated.
+        // Clear SR state and pending recoveries to avoid stale mismatches.
+        for (int b = 0; b < m_total_banks; b++) {
+          m_sr_unit[b] = SRState{};
+          m_sr_recovery[b].pending = false;
+        }
         return true;
       }
       return false;
@@ -970,7 +1498,7 @@ class AsyncDIMMNMAController {
       prea_addr_vec[m_channel_level] = m_channel_id;
       prea_addr_vec[m_rank_level]    = m_rank_id;
 
-      int prea_cmd = m_dram->m_commands("PREA");
+      int prea_cmd = m_dram->m_commands("PREA_L");
       if (m_dram->check_ready(prea_cmd, prea_addr_vec)) {
         m_dram->issue_command(prea_cmd, prea_addr_vec);
         update_fsm_on_nma_command(prea_cmd, prea_addr_vec);

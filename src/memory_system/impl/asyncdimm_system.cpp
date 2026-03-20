@@ -103,12 +103,18 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
 
     // Per-rank, per-channel mode state (system-level view)
     enum class SystemNMAState {
-      HOST_MODE,          // Host MC active, NMA MC in bypass
-      TRANSITIONING_H2N,  // About to switch to NMA (set Host MC mode, start NMA MC)
-      NMA_MODE,           // NMA MC active, Host MC idle
-      TRANSITIONING_N2H,  // NMA MC done, syncing back to Host Mode
+      HOST_MODE,            // Host MC active, NMA MC in bypass
+      TRANSITIONING_H2N,   // About to switch to NMA (set Host MC mode, start NMA MC)
+      NMA_MODE,             // NMA MC active, Host MC idle
+      TRANSITIONING_N2H,   // NMA MC done, syncing back to Host Mode
+      TRANSITIONING_H2C,   // About to switch to Concurrent (Phase 3)
+      CONCURRENT,           // Both Host MC and NMA MC active (Phase 3 OSR)
+      TRANSITIONING_C2H,   // Concurrent done, syncing back to Host Mode
     };
     std::vector<std::vector<SystemNMAState>> m_rank_state;  // [ch][rk]
+
+    // Phase 3: concurrent mode configuration
+    bool m_concurrent_mode_enable = false;  // Set via YAML: concurrent_mode_enable: true
 
   public:
     Logger_t m_logger;
@@ -196,7 +202,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         }
       }
 
-      // Wire bypass callback: Host MC → NMA MC (explicit sync H2N + magic path)
+      // Wire bypass callback + NMA addresses: Host MC → NMA MC
       for (int ch = 0; ch < m_num_channels; ch++) {
         auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
         if (host_mc) {
@@ -207,7 +213,10 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
               nma_vec[rank_id]->bypass_command(command, addr_vec, payload);
             }
           );
-          m_logger->info("   - Wired bypass: Host MC Ch {} -> NMA MCs (with payload)", ch);
+          // Pass magic-path addresses to Host MC for NMA write tracking
+          host_mc->set_nma_addresses(m_nma_ctrl_row, m_nma_ctrl_bg, m_nma_ctrl_bk,
+                                     m_nma_buf_bg, m_nma_buf_bk);
+          m_logger->info("   - Wired bypass + NMA addresses: Host MC Ch {} -> NMA MCs", ch);
         } else {
           m_logger->warn("   - Host MC Ch {} is not AsyncDIMMHostController, bypass not wired!", ch);
         }
@@ -219,6 +228,31 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         m_rank_state[ch].resize(m_num_ranks, SystemNMAState::HOST_MODE);
 
       m_clock_ratio = param<uint>("clock_ratio").required();
+      m_concurrent_mode_enable = param<bool>("concurrent_mode_enable").default_val(false);
+      if (m_concurrent_mode_enable)
+        m_logger->info("  -- Concurrent Mode (Phase 3 OSR) ENABLED");
+
+      // Pass concurrent mode flag to Host MCs
+      for (int ch = 0; ch < m_num_channels; ch++) {
+        auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+        if (host_mc) host_mc->set_concurrent_mode_enable(m_concurrent_mode_enable);
+      }
+
+      // Phase 3: Wire NMA MC interrupt callback → Host MC on_nma_interrupt()
+      if (m_concurrent_mode_enable) {
+        for (int ch = 0; ch < m_num_channels; ch++) {
+          auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+          if (!host_mc) continue;
+          for (int rk = 0; rk < m_num_ranks; rk++) {
+            m_nma_controllers[ch][rk]->set_interrupt_callback(
+              [host_mc](int rank_id, int batch_size) {
+                host_mc->on_nma_interrupt(rank_id, batch_size);
+              }
+            );
+          }
+          m_logger->info("   - Wired NMA interrupt callback: NMA MCs Ch {} -> Host MC", ch);
+        }
+      }
 
       // NMA trace configuration
       m_trace_core_enable = param<bool>("trace_core_enable").default_val(false);
@@ -361,15 +395,26 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         for (int rk = 0; rk < m_num_ranks; rk++) {
           switch (m_rank_state[ch][rk]) {
 
-            case SystemNMAState::HOST_MODE:
-              // Poll NMA MC for magic-path ctrl-reg WR (start trigger)
-              if (m_nma_controllers[ch][rk]->is_nma_start_pending()) {
-                m_nma_controllers[ch][rk]->consume_nma_start_pending();
-                m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_H2N;
-                m_logger->info("[{}] Ch{} Rk{}: ctrl-reg WR detected, H2N transition",
-                               m_clk, ch, rk);
+            case SystemNMAState::HOST_MODE: {
+              // Host MC driven mode transition (DBX-DIMM style):
+              // Host MC tracks NMAInst write count → issues ctrl-reg WR only after
+              // all NMAInst writes are issued → sets mode to NMA/CONCURRENT at issue time.
+              // System detects mode change by polling Host MC get_mode().
+              auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+              if (host_mc) {
+                AsyncDIMMMode hm = host_mc->get_mode(rk);
+                if (hm == AsyncDIMMMode::NMA) {
+                  m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_H2N;
+                  m_logger->info("[{}] Ch{} Rk{}: Host MC set NMA mode, H2N transition",
+                                 m_clk, ch, rk);
+                } else if (hm == AsyncDIMMMode::CONCURRENT) {
+                  m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_H2C;
+                  m_logger->info("[{}] Ch{} Rk{}: Host MC set CONCURRENT mode, H2C transition",
+                                 m_clk, ch, rk);
+                }
               }
               break;
+            }
 
             case SystemNMAState::TRANSITIONING_H2N:
               tick_transition_h2n(ch, rk);
@@ -382,20 +427,28 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
             case SystemNMAState::TRANSITIONING_N2H:
               tick_transition_n2h(ch, rk);
               break;
+
+            case SystemNMAState::TRANSITIONING_H2C:
+              tick_transition_h2c(ch, rk);
+              break;
+
+            case SystemNMAState::CONCURRENT:
+              tick_concurrent_mode(ch, rk);
+              break;
+
+            case SystemNMAState::TRANSITIONING_C2H:
+              tick_transition_c2h(ch, rk);
+              break;
           }
         }
       }
     }
 
     /**
-     * HOST → NMA: Block Host MC for this rank, start NMA MC execution.
-     * Instructions are already in NMA MC's queue (delivered via magic path WR).
+     * HOST → NMA: Host MC has already set mode to NMA (at ctrl-reg WR issue time).
+     * All NMAInst writes are guaranteed delivered. Start NMA MC execution.
      */
     void tick_transition_h2n(int ch, int rk) {
-      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
-      if (!host_mc) return;
-
-      host_mc->set_mode(rk, AsyncDIMMMode::NMA);
       m_nma_controllers[ch][rk]->start_nma_execution();
 
       m_rank_state[ch][rk] = SystemNMAState::NMA_MODE;
@@ -430,6 +483,60 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
 
       m_rank_state[ch][rk] = SystemNMAState::HOST_MODE;
       m_logger->info("[{}] Ch{} Rk{}: N2H complete, returning to HOST_MODE", m_clk, ch, rk);
+    }
+
+    // Note: NMA MC's m_nma_start_pending is no longer used for mode transitions.
+    // Host MC manages the lifecycle: NMAInst write tracking → start flag → mode change.
+    // NMA MC's start_nma_execution() is called directly by the system.
+
+    // ===== Phase 3: Concurrent Mode Transitions =====
+
+    /**
+     * HOST → CONCURRENT (H2C):
+     * Host MC has already set mode to CONCURRENT (at ctrl-reg WR issue time).
+     * Start NMA MC execution and enter concurrent mode.
+     */
+    void tick_transition_h2c(int ch, int rk) {
+      m_nma_controllers[ch][rk]->start_nma_execution();
+      m_nma_controllers[ch][rk]->enter_concurrent_mode();
+
+      m_rank_state[ch][rk] = SystemNMAState::CONCURRENT;
+      m_logger->info("[{}] Ch{} Rk{}: H2C complete, entering CONCURRENT mode", m_clk, ch, rk);
+    }
+
+    /**
+     * CONCURRENT: Monitor for completion.
+     * Done when NMA MC is idle AND all CMD FIFOs drained AND return buffer empty
+     * AND Host MC has no pending offloads (RU empty + RT pending empty) for this rank.
+     */
+    void tick_concurrent_mode(int ch, int rk) {
+      auto* nma_mc = m_nma_controllers[ch][rk];
+      if (!nma_mc->is_concurrent_complete()) return;
+
+      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+      if (host_mc && host_mc->has_pending_offloads_for_rank(rk)) return;
+
+      m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_C2H;
+      m_logger->info("[{}] Ch{} Rk{}: Concurrent complete (NMA+RU drained), C2H transition", m_clk, ch, rk);
+    }
+
+    /**
+     * CONCURRENT → HOST (C2H, Implicit Sync):
+     * NMA MC has already closed banks (PREA in DONE state).
+     * Exit concurrent mode; restore Host MC to HOST mode.
+     */
+    void tick_transition_c2h(int ch, int rk) {
+      auto* nma_mc = m_nma_controllers[ch][rk];
+      if (!nma_mc->is_nma_idle()) return;
+
+      nma_mc->exit_concurrent_mode();
+
+      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+      if (host_mc)
+        host_mc->set_mode(rk, AsyncDIMMMode::HOST);
+
+      m_rank_state[ch][rk] = SystemNMAState::HOST_MODE;
+      m_logger->info("[{}] Ch{} Rk{}: C2H complete, returning to HOST_MODE", m_clk, ch, rk);
     }
 
     // ===== NMA Trace Workload Driver =====
