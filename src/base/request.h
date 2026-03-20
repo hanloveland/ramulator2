@@ -135,27 +135,44 @@ struct AccInst_Slot {
  *   [27:21] col          (7b)  — Start column
  *   [20:18] id           (3b)  — Instruction group ID
  *   [17:12] reserved     (6b)
- *   [11:0]  etc          (12b) — LOOP: [11:6]=loop_cnt, [5:0]=jump_pc
+ *   [11:0]  etc          (12b) — LOOP uses row/col instead: row=loop_cnt(18b), col=jump_pc(7b)
  *
- * comp_opcode → Memory Access Mapping:
- *   0  LOAD       RD × opsize        DRAM → NMA buffer
- *   1  LOAD_ADD   RD × opsize        DRAM → buffer, ADD
- *   2  LOAD_MUL   RD × opsize        DRAM → buffer, MUL
- *   3  ADD        (none)             Buffer-internal, latency only
- *   4  MUL        (none)             Buffer-internal, latency only
- *   5  V_RED      RD × opsize        Vector reduction
- *   6  S_RED      RD × opsize        Scalar reduction
- *   7  MAC        RD × opsize        Multiply-accumulate
- *   8  SCALE_ADD  RD × opsize        Scale and add
- *  16  T_ADD      RD × opsize×2      Transposed ADD (double access)
- *  17  T_MUL      RD × opsize×2      Transposed MUL
- *  18  T_V_RED    RD × opsize×2      Transposed V_RED
- *  19  T_S_RED    RD × opsize×2      Transposed S_RED
- *  20  T_MAC      RD × opsize×2      Transposed MAC
- *  32  WBD        WR × opsize        NMA buffer → DRAM
- *  48  BARRIER    (none)             Wait for all outstanding requests
- *  49  EXIT       (none)             NMA execution complete
- *  52  LOOP       (none)             etc[11:6]=loop_cnt, etc[5:0]=jump_pc
+ * comp_opcode → Memory Access / Compute Mapping:
+ *
+ *   === READ type: X operand fetched from DRAM (RD_L × opsize) ===
+ *   0  LOAD       Z = X              DRAM → NMA buffer
+ *   1  LOAD_ADD   Z = X + a          DRAM → buffer + scalar const
+ *   2  LOAD_MUL   Z = X * a          DRAM → buffer × scalar const
+ *   3  ADD        Z = X + Y          X from DRAM, Y from VMA buffer
+ *   4  MUL        Z = X * Y          X from DRAM, Y from VMA buffer
+ *   5  V_RED      Z += X             Vector reduction (X from DRAM)
+ *   6  S_RED      z = SUM(X)         Scalar reduction (X from DRAM)
+ *   7  MAC        Z += X * Y         X from DRAM, Y from VMA buffer
+ *   8  SCALE_ADD  Z = aX + Y         X from DRAM, Y from VMA buffer
+ *
+ *   === NONE type: VMA-internal compute, no DRAM access ===
+ *   === Latency = base_latency × opsize NMA ticks ===
+ *  16  T_ADD      Z = Y + Y2         Both operands from VMA buffer
+ *  17  T_MUL      Z = Y * Y2         Both operands from VMA buffer
+ *  18  T_V_RED    Z += Y             Y from VMA buffer
+ *  19  T_S_RED    z = SUM(Y)         Y from VMA buffer
+ *  20  T_MAC      Z += Y * Y2        Both operands from VMA buffer
+ *
+ *   === WRITE type: VMA buffer → DRAM (WR_L × opsize) ===
+ *  32  WBD        DRAM = Y           Write-back from VMA buffer to DRAM
+ *
+ *   === CONTROL type: no DRAM access, no compute ===
+ *  48  BARRIER    —                  Wait for all outstanding requests to drain
+ *  49  EXIT       —                  NMA execution complete → NMA_DONE
+ *  52  LOOP       —                  etc[11:6]=loop_cnt, etc[5:0]=jump_pc
+ *                                    In-place counter: cnt < loop_cnt → jump, else fall through
+ *  53  SET_BASE   —                  base_reg[id] = row (set base address register)
+ *  54  INC_BASE   —                  base_reg[id] += row (increment by stride, 18-bit)
+ *
+ * Base Address Register:
+ *   8 registers indexed by id field (3 bits, 0-7).
+ *   READ/WRITE effective_row = base_reg[id] + inst.row
+ *   If SET_BASE never called: base_reg[*] = 0 → effective_row = inst.row (backward compatible)
  */
 struct NMAInst_Slot {
   // comp_opcode constants
@@ -178,6 +195,8 @@ struct NMAInst_Slot {
     BARRIER   = 48,
     EXIT      = 49,
     LOOP      = 52,
+    SET_BASE  = 53,   // Set base address register: base_reg[id] = row
+    INC_BASE  = 54,   // Increment base address register: base_reg[id] += opsize (stride)
   };
 
   // Memory access type derived from comp_opcode
@@ -208,13 +227,11 @@ struct NMAInst_Slot {
   int col = -1;
   int id = -1;
   int etc = -1;
-  int cnt = 0;         // Dual-use:
-                       //   Memory access instructions: current access count (for address gen)
-                       //   LOOP instruction: cached program end index (loop body upper bound)
-                       //     - Set to (m_nma_pc - 1) on first LOOP execution
-                       //     - Reused on subsequent iterations to avoid m_nma_pc drift
-  int loop_cnt = -1;   // Decoded from etc[11:6]
-  int jump_pc = -1;    // Decoded from etc[5:0]
+  int cnt = 0;         // LOOP: in-place iteration counter (DBX-DIMM style)
+                       //   cnt < loop_cnt → cnt++, pc = jump_pc (loop back)
+                       //   cnt >= loop_cnt → cnt = 0, pc++ (fall through)
+  int loop_cnt = -1;   // LOOP: decoded from row field (18b, max 262143)
+  int jump_pc = -1;    // LOOP: decoded from col field (7b, max 127)
 
   NMAInst_Slot() : valid(false), cnt(0) {};
 
@@ -222,10 +239,10 @@ struct NMAInst_Slot {
                int _row, int _col, int _id, int _etc) :
     valid(is_valid), comp_opcode(_comp_opcode), opsize(_opsize),
     bg(_bg), bk(_bk), row(_row), col(_col), id(_id), etc(_etc), cnt(0) {
-    // Decode LOOP fields from etc
+    // Decode LOOP fields from row/col (LOOP has no memory access, reuses these fields)
     if (_comp_opcode == LOOP) {
-      loop_cnt = (_etc >> 6) & 0x3F;
-      jump_pc  = _etc & 0x3F;
+      loop_cnt = _row;  // row(18b): max 262143 iterations
+      jump_pc  = _col;  // col(7b): max 127 jump target
     }
   };
 
@@ -273,7 +290,7 @@ struct NMAInst_Slot {
         return MemAccessType::NONE;
 
       // Control
-      case BARRIER: case EXIT: case LOOP:
+      case BARRIER: case EXIT: case LOOP: case SET_BASE: case INC_BASE:
         return MemAccessType::CONTROL;
 
       default:
@@ -290,7 +307,7 @@ struct NMAInst_Slot {
     auto type = get_mem_access_type();
     if (type == MemAccessType::NONE || type == MemAccessType::CONTROL)
       return 0;
-    return opsize;
+    return opsize + 1;  // 0-indexed: opsize=127 means 128 accesses
   }
 
   /**

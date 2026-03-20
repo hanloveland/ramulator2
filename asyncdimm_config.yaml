@@ -7,8 +7,9 @@ Frontend:
   
 
   core0_trace: "../spec_trace/403.gcc"
+  # core0_trace: "./trace_single_bk/asyncdimm_nma/asyncdimm_nma_512K_DOT.txt"
   core0_mshr_size: 32
-  core0_is_ndp_trace: false
+  core0_is_ndp_trace: true
   core0_repeat: 1
 
   Translation:
@@ -21,10 +22,12 @@ MemorySystem:
   debug_fsm_sync: false  # Set true to verify NMA MC shadow FSM sync every cycle
   debug_mode: false
   # NMA trace configuration (uncomment for NMA Mode testing)
-  # trace_core_enable: true
-  # trace_nma_type: true
-  # trace_core_mshr_size: 16
-  # trace_path: "path/to/nma_trace.trace"
+  concurrent_mode_enable: true
+  trace_core_enable: true
+  trace_nma_type: true
+  trace_core_mshr_size: 32
+  trace_repeat: 0
+  trace_path: "./trace_single_bk/asyncdimm_nma/asyncdimm_nma_512K_DOT.txt"
 
   DRAM:
     impl: DDR5-AsyncDIMM

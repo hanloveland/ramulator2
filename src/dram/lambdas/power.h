@@ -119,6 +119,30 @@ namespace Bank {
     Bank::debug<T>(node, "Incrementing RVRR counter.", clk);
     node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("RVRR")]++;
   }
+  // NMA-Local commands (rank-local bus, same DRAM energy as originals)
+  template <class T>
+  void ACT_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing ACT_L counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("ACT_L")]++;
+  }
+
+  template <class T>
+  void PRE_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing PRE_L counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("PRE_L")]++;
+  }
+
+  template <class T>
+  void RD_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing RD_L counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("RD_L")]++;
+  }
+
+  template <class T>
+  void WR_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Bank::debug<T>(node, "Incrementing WR_L counter.", clk);
+    node->m_spec->m_power_stats[Bank::get_flat_rank_id<T>(node)].cmd_counters[T::m_cmds_counted("WR_L")]++;
+  }
 }      // namespace Bank
 
 
@@ -394,6 +418,61 @@ namespace Rank {
       Bank::debug<T>(node, msg, clk);
       cur_power_stats.cur_power_state = PowerStats::PowerState::IDLE;
     }
+  }
+
+  // NMA-Local: same rank power state tracking as originals
+  template <class T>
+  void ACT_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "------ACT_L------", clk);
+    auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];
+    bool is_rank_idle = get_open_bank_count<T>(node) == 0 && get_refreshing_bank_count<T>(node) == 0;
+    if (is_rank_idle) {
+      cur_power_stats.idle_cycles += clk - cur_power_stats.idle_start_cycle;
+      cur_power_stats.active_start_cycle = clk;
+      cur_power_stats.cur_power_state = PowerStats::PowerState::ACTIVE;
+    }
+  }
+
+  template <class T>
+  void PRE_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "------PRE_L------", clk);
+    auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];
+    bool is_rank_going_idle = get_open_bank_count<T>(node) == 1 && get_refreshing_bank_count<T>(node) == 0;
+    if (is_rank_going_idle) {
+      cur_power_stats.active_cycles += clk - cur_power_stats.active_start_cycle;
+      cur_power_stats.idle_start_cycle = clk;
+      cur_power_stats.cur_power_state = PowerStats::PowerState::IDLE;
+    }
+  }
+
+  template <class T>
+  void PREA_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "------PREA_L------", clk);
+    auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];
+    bool is_rank_idle = get_open_bank_count<T>(node) == 0 && get_refreshing_bank_count<T>(node) == 0;
+    cur_power_stats.cmd_counters[T::m_cmds_counted("PRE_L")] += get_open_bank_count<T>(node);
+    if (!is_rank_idle) {
+      cur_power_stats.active_cycles += clk - cur_power_stats.active_start_cycle;
+      cur_power_stats.idle_start_cycle = clk;
+      cur_power_stats.cur_power_state = PowerStats::PowerState::IDLE;
+    }
+  }
+
+  template <class T>
+  void REFab_L(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "------REFab_L------", clk);
+    auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];
+    cur_power_stats.cmd_counters[T::m_cmds_counted("REFab_L")]++;
+    cur_power_stats.idle_cycles += clk - cur_power_stats.idle_start_cycle;
+    cur_power_stats.cur_power_state = PowerStats::PowerState::REFRESHING;
+  }
+
+  template <class T>
+  void REFab_L_end(typename T::Node* node, int cmd, const AddrVec_t& addr_vec, Clk_t clk) {
+    Rank::debug<T>(node, "------REFab_L_end------", clk);
+    auto& cur_power_stats = node->m_spec->m_power_stats[Rank::get_flat_rank_id<T>(node)];
+    cur_power_stats.idle_start_cycle = clk;
+    cur_power_stats.cur_power_state = PowerStats::PowerState::IDLE;
   }
 
   template <class T>

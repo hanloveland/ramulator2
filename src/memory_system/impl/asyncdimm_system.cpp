@@ -92,6 +92,10 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     int m_next_request_id = 0;
     bool m_debug_mode = false;
     int m_wait_trace_done = 0;
+    bool m_trace_done = false;
+    bool m_nma_ever_started = false;  // Track if NMA was ever triggered
+    int m_trace_repeat = 1;           // Number of times to repeat the trace
+    int m_trace_repeat_done = 0;      // Number of completed repeats
 
     // Outstanding reads tracking
     struct OutstandingRequest {
@@ -262,7 +266,9 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         m_max_outstanding = m_trace_core_mshr_size;
 
         std::string trace_path = param<std::string>("trace_path").desc("NMA trace file path").required();
+        m_trace_repeat = param<int>("trace_repeat").desc("Number of times to repeat trace").default_val(1);
         m_logger->info("  -- NMA Trace Path: {}", trace_path);
+        m_logger->info("  -- Trace Repeat: {}", m_trace_repeat);
         load_trace(trace_path, m_trace);
         m_logger->info("  -- Loaded {} trace lines", m_trace.size());
       }
@@ -334,12 +340,26 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     }
 
     bool is_finished() override {
+      // Trace-core NMA mode
+      if (m_trace_core_enable && m_nma_trace) {
+        // Infinite repeat (trace_repeat <= 0): never block termination
+        // Frontend cores control simulation lifetime
+        if (m_trace_repeat <= 0) return true;
+        return m_trace_done && is_ndp_finished();
+      }
+
+      // Frontend mode: Host MC completion check
+      // But NMA inst-buf/ctrl-reg WRs have rec/iss counter mismatch (bypass path),
+      // so also accept NDP-finished as sufficient for termination.
+      bool host_done = true;
       for (int i = 0; i < m_num_channels; i++)
-        if (!m_host_controllers[i]->is_abs_finished()) return false;
-      return true;
+        if (!m_host_controllers[i]->is_abs_finished()) { host_done = false; break; }
+
+      return host_done || (m_nma_ever_started && is_ndp_finished());
     }
 
     bool is_ndp_finished() override {
+      if (m_trace_core_enable && m_nma_trace && !m_trace_done) return false;
       for (int ch = 0; ch < m_num_channels; ch++)
         for (int rk = 0; rk < m_num_ranks; rk++)
           if (!m_nma_controllers[ch][rk]->is_nma_idle()) return false;
@@ -450,6 +470,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
      */
     void tick_transition_h2n(int ch, int rk) {
       m_nma_controllers[ch][rk]->start_nma_execution();
+      m_nma_ever_started = true;
 
       m_rank_state[ch][rk] = SystemNMAState::NMA_MODE;
       m_logger->info("[{}] Ch{} Rk{}: H2N complete, entering NMA_MODE", m_clk, ch, rk);
@@ -498,6 +519,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
      */
     void tick_transition_h2c(int ch, int rk) {
       m_nma_controllers[ch][rk]->start_nma_execution();
+      m_nma_ever_started = true;
       m_nma_controllers[ch][rk]->enter_concurrent_mode();
 
       m_rank_state[ch][rk] = SystemNMAState::CONCURRENT;
@@ -549,7 +571,34 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     void try_issue_trace_requests() {
       if (m_curr_trace_idx >= m_trace.size() && m_outstanding_reads.empty()) {
         if (m_nma_trace) {
-          if (is_ndp_finished()) m_wait_trace_done++;
+          // NMA trace: wait for all NMAs to return to idle before repeating or finishing.
+          if (m_nma_ever_started) {
+            bool all_idle = true;
+            for (int ch = 0; ch < m_num_channels && all_idle; ch++)
+              for (int rk = 0; rk < m_num_ranks && all_idle; rk++)
+                if (!m_nma_controllers[ch][rk]->is_nma_idle()) all_idle = false;
+            if (all_idle) {
+              m_trace_repeat_done++;
+              // trace_repeat <= 0 means infinite repeat (until Frontend finishes)
+              if (m_trace_repeat > 0 && m_trace_repeat_done >= m_trace_repeat) {
+                m_trace_done = true;
+              } else {
+                // Reset trace and NMA for next iteration
+                // N2H already completed, so rank_state=HOST_MODE and Host MC mode=HOST
+                m_logger->info("[{}] Trace repeat {}/{} complete, restarting trace",
+                               m_clk, m_trace_repeat_done,
+                               m_trace_repeat > 0 ? m_trace_repeat : -1);
+                m_curr_trace_idx = 0;
+                m_next_request_id = 0;
+                m_nma_ever_started = false;
+                // Clear NMA programs for fresh instruction loading
+                for (int ch = 0; ch < m_num_channels; ch++)
+                  for (int rk = 0; rk < m_num_ranks; rk++)
+                    m_nma_controllers[ch][rk]->clear_program();
+              }
+            }
+          }
+          return;
         } else {
           m_wait_trace_done++;
         }

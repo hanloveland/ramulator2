@@ -1,22 +1,39 @@
 Frontend:
   impl: LoadStoreNCoreTrace
   clock_ratio: 1
-  num_cores: 2
+  num_cores: 1
   debug_mode: false
-  max_inst: 500000
-  # max_inst: 500000000
+  # max_inst: 500000
+  max_inst: 500000000
+  # max_inst: 5000
   
+  core0_trace: "./trace/pch_ndp/pch_ndp_x4_512K_DOT.txt"
+  # core0_trace: "./trace/pch_non_ndp/pch_non_ndp_x4_8K_AXPY.txt"
   # Core 0: NDP unit with high memory bandwidth
-  core0_trace: "../spec_trace/444.namd"
+  # core0_trace: "./trace/pch_ndp/pch_ndp_x4_128K_GEMV.txt"
+  # core0_trace: "./op1_trace/pch_non_ndp/pch_non_ndp_x4_128K_GEMV.txt"
+  # core0_trace: "../spec_trace/403.gcc"
   core0_mshr_size: 32  # Large MSHR for high bandwidth
-  core0_is_ndp_trace: false
+  core0_is_ndp_trace: true
   core0_repeat: 1
   
   # Core 1: CPU core with moderate memory access
-  core1_trace: "../spec_trace/403.gcc"
+  core1_trace: "../spec_trace/470.lbm"
   core1_mshr_size: 32  # Standard MSHR size
   core1_is_ndp: false
   core1_repeat: 1
+
+  # Core 0: NDP unit with high memory bandwidth
+  core2_trace: "../spec_trace/437.leslie3d"
+  core2_mshr_size: 32  # Large MSHR for high bandwidth
+  core2_is_ndp_trace: false
+  core2_repeat: 1
+  
+  # Core 1: CPU core with moderate memory access
+  core3_trace: "../spec_trace/401.bzip2"
+  core3_mshr_size: 32  # Standard MSHR size
+  core3_is_ndp: false
+  core3_repeat: 1
 
   Translation:
     impl: NoTranslation
@@ -28,7 +45,12 @@ MemorySystem:
   clock_ratio: 1
   trace_core_enable: false
   trace_ndp_type: false
-  trace_path: "./trace/pch_ndp/pch_ndp_x4_8K_DOT.txt"
+  trace_path: "./trace/pch_ndp/pch_ndp_x4_128K_GEMV.txt"
+  # trace_path: "./trace/pch_non_ndp/pch_non_ndp_x4_8K_AXPY.txt"
+  # trace_path: "./trace/pch_non_ndp/pch_non_ndp_x4_128K_GEMV.txt"
+  # trace_path: "./bk_split_trace/pch_ndp/pch_ndp_x4_128K_GEMV.txt"
+  # trace_path: "./linear_access_trace/pch_ndp/pch_ndp_x4_128K_GEMV.txt"
+  # trace_path: "./linear_access_trace/pch_non_ndp/pch_non_ndp_x4_128K_GEMV.txt"
   # trace_path: "./trace/pch_non_ndp/pch_non_ndp_x4_8K_DOT.txt"
   trace_core_mshr_size: 32
 
@@ -46,6 +68,7 @@ MemorySystem:
       # IO Freqeucny Boost: 1 2, 4
       io_boost: 1
     timing:
+      # DDR5_4800B, DDR5_8000AN
       preset: DDR5_4800B 
     RFM:
       BRC: 0  
@@ -70,16 +93,25 @@ MemorySystem:
       impl: ClosedRowPolicyPch
       cap: 128
     plugins:
+    adaptive_row_cap: 8
     ndp_wr_max_age: 256
-    ndp_wr_mode_min_time: 256
-    dram_rd_mode_min_time: 256
-    ndp_read_high_threshold: 0.75
-    ndp_write_high_threshold: 0.75
-    ndp_read_low_threshold: 0.25
-    ndp_write_low_threshold: 0.25
+    ndp_wr_mode_min_time: 128
+    dram_rd_mode_min_time: 128
+    abs_ndp_high_threshold: 0.25
+    ndp_read_high_threshold: 0.125
+    ndp_write_high_threshold: 0.125
+    ndp_read_low_threshold: 0
+    ndp_write_low_threshold: 0
+    ndp_req_per_bank: 1
+    m_ndp_row_hit_low_cap: 1
+    pre_rw_per_token: 1
+    target_ndp_ratio: 2
+    prefetch_buffer_size: 8
 
   AddrMapper:
-    impl: RoRaCoBaPcCh
+    # impl: RoRaCoBaPcCh
+    impl: RoRaBkBgCoPcCh
+    # impl: BhRoRaBlBgCoPcCh
     # impl: RoRabkCoBgPcCh    
     # impl: RoBaRaCoPcCh
     # impl: RoCoBaRaPcCh

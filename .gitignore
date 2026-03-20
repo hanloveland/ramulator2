@@ -8,3 +8,7 @@ autobuild.sh
 *.log
 log/*
 trace/*
+*_trace/*
+multi_dimm/*
+*_trace
+trace_single_bk/*

@@ -163,10 +163,8 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       "rfm", "same-bank-rfm",
       "directed-rfm", "same-bank-directed-rfm",
       "open-row", "close-row",
-      // AsyncDIMM offload requests (used in Concurrent Mode)
-      "offload-read", "offload-write",
-      // AsyncDIMM return request
-      "return",
+      // AsyncDIMM offload requests
+      "offload-read", "offload-write", "offload-refresh",
     };
 
     inline static const ImplLUT m_request_translations = LUT (
@@ -213,7 +211,9 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
     };
 
     inline static constexpr ImplDef m_cmds_counted = {
-      "ACT", "PRE", "RD", "WR", "REF", "RFM"
+      "ACT", "PRE", "RD", "WR", "REF", "RFM",
+      // NMA-Local commands (rank-local bus, same DRAM energy as originals)
+      "ACT_L", "PRE_L", "RD_L", "WR_L", "REFab_L"
     };
 
   /************************************************
@@ -699,10 +699,20 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       // Populate the timing constraints
       #define V(timing) (m_timing_vals(timing))
       auto all_commands = std::vector<std::string_view>(m_commands.begin(), m_commands.end());
+
+      // Channel-bus commands: excludes _L commands (rank-local, no channel bus)
+      auto channel_commands = std::vector<std::string_view>();
+      for (auto& cmd : all_commands) {
+        std::string_view sv(cmd);
+        // Exclude NMA-local commands (ACT_L, PRE_L, RD_L, WR_L, PREA_L, REFab_L, REFab_L_end)
+        if (sv.size() >= 2 && sv[sv.size()-1] == 'L' && sv[sv.size()-2] == '_') continue;
+        if (sv == "REFab_L_end") continue;
+        channel_commands.push_back(cmd);
+      }
       populate_timingcons(this, {
           /*** Channel ***/
-          // Two-Cycle Commands (standard DDR5 commands only)
-          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA"}, .following = all_commands, .latency = 2},
+          // Two-Cycle Commands (standard DDR5 commands only) — excludes _L (rank-local)
+          {.level = "channel", .preceding = {"ACT", "RD", "RDA", "WR", "WRA"}, .following = channel_commands, .latency = 2},
 
           // CAS <-> CAS
           /// Data bus occupancy
@@ -710,7 +720,7 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
           {.level = "channel", .preceding = {"WR", "WRA"}, .following = {"WR", "WRA"}, .latency = V("nBL")},
 
           // AsyncDIMM: Offload commands also occupy CA bus (2-cycle)
-          {.level = "channel", .preceding = {"ACTO", "PREO", "RDO", "WRO", "REFO", "RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .following = all_commands, .latency = 2},
+          {.level = "channel", .preceding = {"ACTO", "PREO", "RDO", "WRO", "REFO", "RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .following = channel_commands, .latency = 2},
           // RT_N: DQ bus occupied for N × nBL (batch return)
           // RT_N → any DQ command must wait N × nBL
           {.level = "channel", .preceding = {"RT1"}, .following = {"RD","RDA","WR","WRA","WRO","RT1","RT2","RT3","RT4","RT5","RT6","RT7","RT8"}, .latency = 1 * V("nBL")},
@@ -961,7 +971,19 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
 
       m_powers[m_levels["rank"]][m_commands["PREsb"]] = Lambdas::Power::Rank::PREsb<DDR5AsyncDIMM>;
 
-      // Offload commands: no power tracking (power consumed at DRAM side is tracked by NMA MC)
+      // NMA-Local commands: same DRAM array energy as originals (rank-local bus)
+      m_powers[m_levels["bank"]][m_commands["ACT_L"]] = Lambdas::Power::Bank::ACT_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["bank"]][m_commands["PRE_L"]] = Lambdas::Power::Bank::PRE_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["bank"]][m_commands["RD_L"]]  = Lambdas::Power::Bank::RD_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["bank"]][m_commands["WR_L"]]  = Lambdas::Power::Bank::WR_L<DDR5AsyncDIMM>;
+
+      m_powers[m_levels["rank"]][m_commands["ACT_L"]]       = Lambdas::Power::Rank::ACT_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["rank"]][m_commands["PRE_L"]]       = Lambdas::Power::Rank::PRE_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["rank"]][m_commands["PREA_L"]]      = Lambdas::Power::Rank::PREA_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["rank"]][m_commands["REFab_L"]]     = Lambdas::Power::Rank::REFab_L<DDR5AsyncDIMM>;
+      m_powers[m_levels["rank"]][m_commands["REFab_L_end"]] = Lambdas::Power::Rank::REFab_L_end<DDR5AsyncDIMM>;
+
+      // Offload commands: no DRAM array power (only CA/DQ bus, tracked separately)
 
       // register stats
       register_stat(s_total_background_energy).name("total_background_energy");
@@ -1011,7 +1033,9 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         for (int j = 0; j < num_ranks; j++) {
           process_rank_energy(m_power_stats[i * num_ranks + j], m_channels[i]->m_child_nodes[j]);
           num_trans += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] +
-                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
+                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")] +
+                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD_L")] +
+                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR_L")];
         }
         // DQ Power (nJ)
         double dq_energy = (double)num_trans * (double)(16 * (m_channel_width+m_parity_width)) * (socket_dq_energy + on_board_dq_energy) / 1E3;
@@ -1069,20 +1093,34 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
                                             * rank_stats.idle_cycles * tCK_ns / 1E3;
 
 
+      // Host MC commands (channel bus)
+      size_t act_count = rank_stats.cmd_counters[m_cmds_counted("ACT")];
+      size_t pre_count = rank_stats.cmd_counters[m_cmds_counted("PRE")];
+      size_t rd_count  = rank_stats.cmd_counters[m_cmds_counted("RD")];
+      size_t wr_count  = rank_stats.cmd_counters[m_cmds_counted("WR")];
+      size_t ref_count = rank_stats.cmd_counters[m_cmds_counted("REF")];
+
+      // NMA-Local commands (rank-local bus, same DRAM array energy)
+      act_count += rank_stats.cmd_counters[m_cmds_counted("ACT_L")];
+      pre_count += rank_stats.cmd_counters[m_cmds_counted("PRE_L")];
+      rd_count  += rank_stats.cmd_counters[m_cmds_counted("RD_L")];
+      wr_count  += rank_stats.cmd_counters[m_cmds_counted("WR_L")];
+      ref_count += rank_stats.cmd_counters[m_cmds_counted("REFab_L")];
+
       double act_cmd_energy  = (VE("VDD") * (CE("IDD0") - one_bank_idd3N) + VE("VPP") * (CE("IPP0") - one_bank_ipp3N))
-                                      * rank_stats.cmd_counters[m_cmds_counted("ACT")] * TS("nRAS") * tCK_ns / 1E3;
+                                      * act_count * TS("nRAS") * tCK_ns / 1E3;
 
       double pre_cmd_energy  = (VE("VDD") * (CE("IDD0") - CE("IDD2N")) + VE("VPP") * (CE("IPP0") - CE("IPP2N")))
-                                      * rank_stats.cmd_counters[m_cmds_counted("PRE")] * TS("nRP")  * tCK_ns / 1E3;
+                                      * pre_count * TS("nRP")  * tCK_ns / 1E3;
 
       double rd_cmd_energy   = (VE("VDD") * (CE("IDD4R") - CE("IDD3N")) + VE("VPP") * (CE("IPP4R") - CE("IPP3N")))
-                                      * rank_stats.cmd_counters[m_cmds_counted("RD")] * TS("nBL") * tCK_ns / 1E3;
+                                      * rd_count * TS("nBL") * tCK_ns / 1E3;
 
       double wr_cmd_energy   = (VE("VDD") * (CE("IDD4W") - CE("IDD3N")) + VE("VPP") * (CE("IPP4W") - CE("IPP3N")))
-                                      * rank_stats.cmd_counters[m_cmds_counted("WR")] * TS("nBL") * tCK_ns / 1E3;
+                                      * wr_count * TS("nBL") * tCK_ns / 1E3;
 
       double ref_cmd_energy  = (VE("VDD") * (CE("IDD5B")) + VE("VPP") * (CE("IPP5B")))
-                                      * rank_stats.cmd_counters[m_cmds_counted("REF")] * TS("nRFC1") * tCK_ns / 1E3;
+                                      * ref_count * TS("nRFC1") * tCK_ns / 1E3;
 
       double rfm_cmd_energy = (VE("VDD") * (CE("IDD0") - CE("IDD3N")) + VE("VPP") * (CE("IPP0") - CE("IPP3N"))) * num_bankgroups
                                       * rank_stats.cmd_counters[m_cmds_counted("RFM")] * TS("nRFMsb") * tCK_ns / 1E3;
@@ -1093,10 +1131,15 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         std::cout<<"rd_cmd_energy   : "<<rd_cmd_energy<<std::endl;
         std::cout<<"wr_cmd_energy   : "<<wr_cmd_energy<<std::endl;
         std::cout<<"ref_cmd_energy  : "<<ref_cmd_energy<<std::endl;
-        std::cout<<"rank_stats.cmd_counters[ACT]  : "<<rank_stats.cmd_counters[m_cmds_counted("ACT")]<<std::endl;
-        std::cout<<"rank_stats.cmd_counters[PRE]  : "<<rank_stats.cmd_counters[m_cmds_counted("PRE")]<<std::endl;
-        std::cout<<"rank_stats.cmd_counters[RD]  : "<<rank_stats.cmd_counters[m_cmds_counted("RD")]<<std::endl;
-        std::cout<<"rank_stats.cmd_counters[WR]  : "<<rank_stats.cmd_counters[m_cmds_counted("WR")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[ACT]    : "<<rank_stats.cmd_counters[m_cmds_counted("ACT")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[PRE]    : "<<rank_stats.cmd_counters[m_cmds_counted("PRE")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[RD]     : "<<rank_stats.cmd_counters[m_cmds_counted("RD")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[WR]     : "<<rank_stats.cmd_counters[m_cmds_counted("WR")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[ACT_L]  : "<<rank_stats.cmd_counters[m_cmds_counted("ACT_L")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[PRE_L]  : "<<rank_stats.cmd_counters[m_cmds_counted("PRE_L")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[RD_L]   : "<<rank_stats.cmd_counters[m_cmds_counted("RD_L")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[WR_L]   : "<<rank_stats.cmd_counters[m_cmds_counted("WR_L")]<<std::endl;
+        std::cout<<"rank_stats.cmd_counters[REFab_L]: "<<rank_stats.cmd_counters[m_cmds_counted("REFab_L")]<<std::endl;
       #endif
 
       rank_stats.total_background_energy = num_dev_per_rank * (rank_stats.act_background_energy + rank_stats.pre_background_energy);

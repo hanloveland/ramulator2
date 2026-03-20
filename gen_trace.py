@@ -110,7 +110,9 @@ ndp_inst_opcode = {
     "EXIT"           :49,
     "SELF_EXEC_ON"   :50,
     "SELF_EXEC_OFF"  :51,
-    "LOOP"           :52
+    "LOOP"           :52,
+    "SET_BASE"       :53,
+    "INC_BASE"       :54
 }
 
 ndp_acc_inst_opcode = {
@@ -2117,9 +2119,16 @@ def nma_inst(comp_opcode, opsize, bg, bk, row, col, id, etc=0):
     return inst_64bit
 
 def nma_inst_loop(loop_cnt, jump_pc):
-    """Encode LOOP NMAInst: etc = (loop_cnt << 6) | jump_pc"""
-    etc = ((loop_cnt & 0x3F) << 6) | (jump_pc & 0x3F)
-    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, 0, 0, 0, etc)
+    """Encode LOOP NMAInst: row=loop_cnt(18b), col=jump_pc(7b)"""
+    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, loop_cnt, jump_pc, 0)
+
+def nma_inst_set_base(reg_id, row_value):
+    """SET_BASE: base_reg[reg_id] = row_value"""
+    return nma_inst(ndp_inst_opcode["SET_BASE"], 0, 0, 0, row_value, 0, reg_id)
+
+def nma_inst_inc_base(reg_id, stride):
+    """INC_BASE: base_reg[reg_id] += stride (row field, 18-bit, max 262143)"""
+    return nma_inst(ndp_inst_opcode["INC_BASE"], 0, 0, 0, stride, 0, reg_id)
 
 def encode_asyncdimm_address(channel, rank, bg, bank, row, col):
     """Encode address for AsyncDIMM RoBaCoRaCh mapping (no pseudo-channel)."""
@@ -2172,32 +2181,32 @@ def asyncdimm_start_nma(f, ch, rank):
 
 def asyncdimm_cal_it(input_size):
     """Calculate iteration count and working parameters for AsyncDIMM.
-    AsyncDIMM: base DDR5, 8 BG, 4 BK, 128 col/row (1KB), no pCH."""
-    row_size = 8192   # 1KB * 8 (8B per col access, 128 cols * 64B = 8KB per row)
-    opsize = 127      # 0-indexed: 128 column accesses per instruction
+    AsyncDIMM: base DDR5, 8 BG, 4 BK, 128 col/row, no pCH.
+    Unit = 1 DRAM row (8KB). opsize always 127 (0-indexed: 128 accesses).
+    8K→1BG, 16K→2BG, 32K→4BG, 64K→8BG, 128K→8BG×2iter, ..."""
+    row_size = 8192   # 128 cols × 64B = 8KB per row
+    opsize = 127      # 0-indexed: 128 column accesses (7-bit max=127)
 
     vec_size = input_size_byte_list[input_size]
-    # Each rank: 8 BG available, each BG processes one row per iteration
-    num_working_bg = 8
-    max_size_per_iter = num_working_bg * row_size  # 8 * 8KB = 64KB per iteration
+    total_rows = vec_size // row_size  # Each row = 8KB
 
-    if vec_size > max_size_per_iter:
-        iteration = vec_size // max_size_per_iter
-        return iteration, num_working_bg, opsize
-    else:
-        # Scale down opsize for smaller inputs
-        ratio = max_size_per_iter // vec_size
-        return 1, num_working_bg, max(0, opsize // ratio)
+    # Scale BG count first (1→2→4→8), then increase iteration
+    num_working_bg = min(total_rows, 8)
+    iteration = max(1, total_rows // num_working_bg)
+
+    return iteration, num_working_bg, opsize
 
 def copy_asyncdimm(f, input_size):
     '''
     AsyncDIMM COPY: Y = X
-    NMAInst sequence per rank:
-      For each bg in [0, num_working_bg):
-        LOAD(opsize, bg, bk, src_row=5000+i, col=0)
-      For each bg in [0, num_working_bg):
-        WBD(opsize, bg, bk, dst_row=7000+i, col=0)
-      LOOP(iteration-1, jump_pc=0) if iteration > 1
+    Uses base address registers + LOOP for compact program:
+      SET_BASE(id=0, row=5000)   — source base
+      SET_BASE(id=1, row=7000)   — destination base
+      LOAD(opsize, bg, bk, row=0, id=0) × num_bg  — read from base[0]+0
+      WBD(opsize, bg, bk, row=0, id=1)  × num_bg  — write to base[1]+0
+      INC_BASE(id=0, stride=1)   — base[0]++
+      INC_BASE(id=1, stride=1)   — base[1]++
+      LOOP(loop_cnt, jump_pc)    — repeat
       EXIT
     '''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
@@ -2206,20 +2215,35 @@ def copy_asyncdimm(f, input_size):
     print(f"  AsyncDIMM COPY: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}")
 
-    # Generate NMAInst + start trigger per rank per channel
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
-            # Build NMAInst list
             nma_inst_list = []
-            jump_pc = 0
+
+            # Set base address registers
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # src base
+            nma_inst_list.append(nma_inst_set_base(1, 7000))  # dst base
+
+            # Loop body start (jump_pc points here)
+            jump_pc = len(nma_inst_list)
+
+            # LOAD from base[0] + 0 (effective_row = base_reg[0] + 0)
             for bg in range(num_working_bg):
                 nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 5000, 0, 0))
+                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+                    #                                                   row=0, id=0 → base_reg[0]
+
+            # WBD to base[1] + 0 (effective_row = base_reg[1] + 0)
             for bg in range(num_working_bg):
                 nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 7000, 0, 0))
+                    nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 1))
+                    #                                                  row=0, id=1 → base_reg[1]
+
+            # Increment base registers
             if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))  # base[0] += 1
+                nma_inst_list.append(nma_inst_inc_base(1, 1))  # base[1] += 1
                 nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
             nma_inst_list.append(
                 nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
 
@@ -2231,6 +2255,233 @@ def copy_asyncdimm(f, input_size):
             dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
 
             # Write ctrl-reg (start trigger)
+            asyncdimm_start_nma(f, ch, rk)
+
+
+def axpy_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM AXPY: Z = aX + Y
+      SET_BASE(id=0, row=5000)   — X base
+      SET_BASE(id=1, row=6000)   — Y base
+      SET_BASE(id=2, row=7000)   — Z base
+      LOAD_MUL(opsize, bg, bk, row=0, id=0) × num_bg  — Z = X * a
+      ADD(opsize, bg, bk, row=0, id=1)      × num_bg  — Z = Z + Y (Y from DRAM)
+      WBD(opsize, bg, bk, row=0, id=2)      × num_bg  — write Z
+      INC_BASE × 3, LOOP, EXIT
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    print(f"  AsyncDIMM AXPY: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
+            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
+            jump_pc = len(nma_inst_list)
+
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
+
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                nma_inst_list.append(nma_inst_inc_base(2, 1))
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+            asyncdimm_start_nma(f, ch, rk)
+
+
+def axpby_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM AXPBY: Z = aX + bY
+      LOAD_MUL(X, id=0)  — Z = X * a
+      SCALE_ADD(Y, id=1)  — Z = Z + b*Y
+      WBD(Z, id=2)
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    print(f"  AsyncDIMM AXPBY: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
+            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
+            jump_pc = len(nma_inst_list)
+
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
+
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                nma_inst_list.append(nma_inst_inc_base(2, 1))
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+            asyncdimm_start_nma(f, ch, rk)
+
+
+def axpbypcz_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM AXPBYPCZ: W = aX + bB + cZ
+      LOAD_MUL(X, id=0)   — W = X * a
+      SCALE_ADD(B, id=1)   — W = W + b*B
+      SCALE_ADD(Z, id=2)   — W = W + c*Z
+      WBD(W, id=3)
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    print(f"  AsyncDIMM AXPBYPCZ: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
+            nma_inst_list.append(nma_inst_set_base(1, 6000))  # B
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
+            nma_inst_list.append(nma_inst_set_base(3, 8000))  # W
+            jump_pc = len(nma_inst_list)
+
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 2))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 3))
+
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                nma_inst_list.append(nma_inst_inc_base(2, 1))
+                nma_inst_list.append(nma_inst_inc_base(3, 1))
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+            asyncdimm_start_nma(f, ch, rk)
+
+
+def xmy_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM XMY: Z = X ⊙ Y (element-wise multiply)
+      LOAD(X, id=0)   — Z = X
+      MUL(Y, id=1)    — Z = Z * Y (Y from DRAM)
+      WBD(Z, id=2)
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    print(f"  AsyncDIMM XMY: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
+            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
+            jump_pc = len(nma_inst_list)
+
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["MUL"], opsize, bg, ndp_bk, 0, 0, 1))
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
+
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                nma_inst_list.append(nma_inst_inc_base(2, 1))
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+            asyncdimm_start_nma(f, ch, rk)
+
+
+def dot_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM DOT: c = X · Y (dot product)
+      LOAD(X, id=0)    — Z = X
+      MAC(Y, id=1)     — Z += X * Y (partial sums across BGs)
+      T_V_RED(2*num_bg) — reduce partial sums across BGs
+      T_ADD              — combine
+      T_S_RED            — scalar reduction
+      WBD(c, id=2, opsize=0) — write scalar result (1 element)
+    Note: AsyncDIMM has no SELF_EXEC_ON/OFF. T_* ops are VMA-internal (NONE type).
+    '''
+    iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    print(f"  AsyncDIMM DOT: size={input_size}, iteration={iteration}, "
+          f"working_bg={num_working_bg}, opsize={opsize}")
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
+            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # c (result)
+            jump_pc = len(nma_inst_list)
+
+            # LOAD X
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+            # MAC: Z += X * Y (Y from DRAM)
+            for bg in range(num_working_bg):
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
+
+            # Reduction (VMA-internal, no DRAM access)
+            if num_working_bg > 1:
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["T_V_RED"], (2 * num_working_bg) - 1, 0, 0, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["T_ADD"], 0, 0, 0, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["T_S_RED"], 0, 0, 0, 0, 0, 0))
+
+            # WBD scalar result (opsize=0 → 1 write)
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], 0, 0, ndp_bk, 0, 0, 2))
+
+            if iteration > 1:
+                nma_inst_list.append(nma_inst_inc_base(0, 1))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
             asyncdimm_start_nma(f, ch, rk)
 
 
@@ -2330,7 +2581,7 @@ def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, sc
 
 def generate_asyncdimm_trace(workload, size, output_path=''):
     """Generate trace for AsyncDIMM NMA workload (base DDR5, rank-level NMA MC)."""
-    asyncdimm_workloads = {"COPY"}  # Extend as more workloads are implemented
+    asyncdimm_workloads = {"COPY", "AXPY", "AXPBY", "AXPBYPCZ", "XMY", "DOT"}
 
     if workload not in asyncdimm_workloads:
         print(f"Error: AsyncDIMM workload '{workload}' not implemented. Available: {asyncdimm_workloads}")
@@ -2343,12 +2594,17 @@ def generate_asyncdimm_trace(workload, size, output_path=''):
     file_name = f"asyncdimm_nma_{size}_{workload}.txt"
     file_name = output_path + "/" + file_name
 
+    workload_funcs = {
+        "COPY":     copy_asyncdimm,
+        "AXPY":     axpy_asyncdimm,
+        "AXPBY":    axpby_asyncdimm,
+        "AXPBYPCZ": axpbypcz_asyncdimm,
+        "XMY":      xmy_asyncdimm,
+        "DOT":      dot_asyncdimm,
+    }
+
     with open(file_name, 'w') as f:
-        if workload == "COPY":
-            copy_asyncdimm(f, size)
-        else:
-            print(f"Error: AsyncDIMM workload '{workload}' not implemented")
-            return
+        workload_funcs[workload](f, size)
 
     print(f"-> Generated AsyncDIMM trace in '{file_name}'.")
 
@@ -2394,7 +2650,8 @@ if __name__ == '__main__':
 
     # AsyncDIMM NMA traces
     for size in input_size_list:
-        generate_asyncdimm_trace("COPY", size, asyncdimm_trace_path)
+        for bench in ["COPY", "AXPBY", "AXPBYPCZ", "AXPY", "XMY", "DOT"]:
+            generate_asyncdimm_trace(bench, size, asyncdimm_trace_path)
 
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
     # '''
@@ -2410,7 +2667,7 @@ if __name__ == '__main__':
         for scaling in [1, 2, 4]:
             generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
             generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
-
+    # '''
     '''
     # for size in mat_input_size_list:
     for size in ["128K"]:        

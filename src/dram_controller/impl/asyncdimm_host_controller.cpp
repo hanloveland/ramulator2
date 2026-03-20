@@ -692,6 +692,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (req_it->type_id == Request::Type::Read) {
             req_it->depart = m_clk + m_dram->m_read_latency;
             pending.push_back(*req_it);
+          } else {
+            // WR completes immediately — count as received
+            if (req_it->is_host_req) m_host_acceess_rec_counter++;
           }
           m_host_access_cnt++;
           if (req_it->is_trace_core_req) m_tcore_host_access_cnt++;
@@ -1007,6 +1010,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     bool is_abs_finished() override {
       return (m_host_acceess_rec_counter == m_host_acceess_iss_counter);
     }
+
+    uint64_t get_iss_counter() { return m_host_acceess_iss_counter; }
+    uint64_t get_rec_counter() { return m_host_acceess_rec_counter; }
 
     bool is_empty_ndp_req() override {
       return true;

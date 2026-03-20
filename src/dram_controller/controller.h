@@ -58,6 +58,8 @@ class IDRAMController : public Clocked<IDRAMController> {
     virtual size_t get_host_acces_latency() = 0;   
     virtual std::vector<uint64_t> get_counters() = 0;
     virtual uint64_t get_req_latency() = 0;
+    virtual uint64_t get_iss_counter() { return 0; }
+    virtual uint64_t get_rec_counter() { return 0; }
 };
 
 }       // namespace Ramulator

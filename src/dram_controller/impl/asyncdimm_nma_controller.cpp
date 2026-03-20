@@ -121,6 +121,11 @@ class AsyncDIMMNMAController {
     static constexpr int NMA_INST_MAX = 1024;         // 8KB SRAM / 8B per NMAInst = 1024
     int m_nma_pc = 0;                                 // Program counter
 
+    // Base address registers: effective_row = base_reg[id] + inst.row
+    // Set via SET_BASE instruction, incremented via INC_BASE instruction.
+    // Default 0 → backward compatible (effective_row = inst.row).
+    int m_base_reg[8] = {0};
+
     // Address generation slots
     // Active instructions being expanded into memory requests
     struct AddrGenSlot {
@@ -377,9 +382,18 @@ class AsyncDIMMNMAController {
         return;
       }
       m_nma_pc = 0;
+      for (int i = 0; i < 8; i++) m_base_reg[i] = 0;
       m_nma_state = NMAState::NMA_ISSUE_START;
       m_last_refresh_clk = m_clk;
       s_num_nma_executions++;
+    }
+
+    /**
+     * Clear program buffer for re-loading on trace repeat.
+     */
+    void clear_program() {
+      m_nma_program.clear();
+      m_nma_start_pending = false;
     }
 
     /**
@@ -1343,7 +1357,9 @@ class AsyncDIMMNMAController {
         req.addr_vec[m_rank_level]    = m_rank_id;
         req.addr_vec[m_bankgroup_level] = slot.inst.bg;
         req.addr_vec[m_bank_level]    = slot.inst.bk;
-        req.addr_vec[m_row_level]     = slot.inst.row;
+        // effective_row = base_reg[id] + inst.row (base register addressing)
+        int reg_id = slot.inst.id & 0x7;
+        req.addr_vec[m_row_level]     = m_base_reg[reg_id] + slot.inst.row;
         req.addr_vec[m_column_level]  = slot.current_col;
         req.final_command = req.is_read ? m_dram->m_commands("RD_L")
                                         : m_dram->m_commands("WR_L");
@@ -1393,6 +1409,22 @@ class AsyncDIMMNMAController {
             m_nma_state = NMAState::NMA_DONE;
             return;
 
+          case NMAInst_Slot::SET_BASE: {
+            // Set base address register: base_reg[id] = row
+            int reg_id = inst.id & 0x7;
+            m_base_reg[reg_id] = inst.row;
+            m_nma_pc++;
+            return;
+          }
+
+          case NMAInst_Slot::INC_BASE: {
+            // Increment base address register: base_reg[id] += row (stride, 18-bit)
+            int reg_id = inst.id & 0x7;
+            m_base_reg[reg_id] += inst.row;
+            m_nma_pc++;
+            return;
+          }
+
           case NMAInst_Slot::LOOP: {
             // DBX-DIMM style: in-place counter using inst.cnt
             // loop_cnt = number of additional iterations (total = loop_cnt + 1)
@@ -1431,7 +1463,7 @@ class AsyncDIMMNMAController {
         }
 
         m_nma_wait_cnt = 0;
-        m_nma_wait_target = base_latency * std::max(1, (int)inst.opsize);
+        m_nma_wait_target = base_latency * std::max(1, (int)inst.opsize + 1);  // 0-indexed
         m_nma_pc++;
         m_nma_state = NMAState::NMA_WAIT;
         s_num_nma_compute_only++;
