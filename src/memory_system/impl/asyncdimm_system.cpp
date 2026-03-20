@@ -612,6 +612,11 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
                 for (int ch = 0; ch < m_num_channels; ch++)
                   for (int rk = 0; rk < m_num_ranks; rk++)
                     m_nma_controllers[ch][rk]->clear_program();
+                // Reset Host MC NMA write tracking counters
+                for (int ch = 0; ch < m_num_channels; ch++) {
+                  auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+                  if (host_mc) host_mc->reset_nma_counters();
+                }
               }
             }
           }

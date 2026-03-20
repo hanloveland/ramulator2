@@ -297,6 +297,18 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     void set_concurrent_mode_enable(bool enable) { m_concurrent_mode_enable = enable; }
 
     /**
+     * Reset NMA write tracking counters for all ranks.
+     * Called by system on trace repeat to prevent counter accumulation mismatch.
+     */
+    void reset_nma_counters() {
+      for (int rk = 0; rk < m_num_rank; rk++) {
+        m_nma_wr_send_cnt[rk] = 0;
+        m_nma_wr_issue_cnt[rk] = 0;
+        m_nma_start_requested[rk] = false;
+      }
+    }
+
+    /**
      * Check if any RU entries or RT-pending reads exist for a rank.
      * Used by System for C2H transition: must drain all offloaded accesses first.
      */

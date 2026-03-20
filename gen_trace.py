@@ -2230,13 +2230,14 @@ def copy_asyncdimm(f, input_size):
             for bg in range(num_working_bg):
                 nma_inst_list.append(
                     nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
-                    #                                                   row=0, id=0 → base_reg[0]
+
+            # BARRIER: wait for all LOADs to complete before WBD
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
             # WBD to base[1] + 0 (effective_row = base_reg[1] + 0)
             for bg in range(num_working_bg):
                 nma_inst_list.append(
                     nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 1))
-                    #                                                  row=0, id=1 → base_reg[1]
 
             # Increment base registers
             if iteration > 1:
@@ -2284,8 +2285,10 @@ def axpy_asyncdimm(f, input_size):
 
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
 
@@ -2325,8 +2328,10 @@ def axpby_asyncdimm(f, input_size):
 
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
 
@@ -2368,10 +2373,13 @@ def axpbypcz_asyncdimm(f, input_size):
 
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 2))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 3))
 
@@ -2412,8 +2420,10 @@ def xmy_asyncdimm(f, input_size):
 
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["MUL"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
 
@@ -2458,9 +2468,11 @@ def dot_asyncdimm(f, input_size):
             # LOAD X
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
             # MAC: Z += X * Y (Y from DRAM)
             for bg in range(num_working_bg):
                 nma_inst_list.append(nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
             # Reduction (VMA-internal, no DRAM access)
             if num_working_bg > 1:
@@ -2662,11 +2674,13 @@ if __name__ == '__main__':
                 generate_trace(bench, size,pch_none_ndp_trace_path, pch=True,is_ndp_ops=False, scaling_factor=scaling)
                 generate_trace(bench, size,pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
 
+    '''
     for size in mat_input_size_list:
         generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
         for scaling in [1, 2, 4]:
             generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
             generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
+    '''
     # '''
     '''
     # for size in mat_input_size_list:
