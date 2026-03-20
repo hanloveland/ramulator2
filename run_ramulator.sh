@@ -20,9 +20,9 @@ speed_grade_list=(
 
 dbx_org_list=(
 "DDR5_16Gb_DBX_x4"
+"DDR5_16Gb_DBX_x8"
+"DDR5_16Gb_DBX_x16"
 )
-# "DDR5_16Gb_DBX_x8"
-# "DDR5_16Gb_DBX_x16"
 
 ndp_trace_list=(
 "ndp_128K_AXPBY.txt"  
@@ -87,6 +87,34 @@ address_mapping_list=(
 "RoRaBaCoCh"
 )
 
+spec_bench_list=(
+"401.bzip2"
+"403.gcc"
+"410.bwaves"
+"429.mcf"
+"433.milc"
+"434.zeusmp"
+"435.gromacs"
+"437.leslie3d"
+"444.namd"
+"445.gobmk"
+"453.povray"
+"454.calculix"
+"456.hmmer"
+"458.sjeng"
+"462.libquantum"
+"464.h264ref"
+"465.tonto"
+"470.lbm"
+"471.omnetpp"
+"473.astar"
+"481.wrf"
+"482.sphinx3"
+"483.xalancbmk"
+"998.specrand"
+"999.specrand"
+)
+
 dbx_address_mapping_list=(
 # "RoBaRaCoPcCh"
 # "RoCoBaRaPcCh"
@@ -94,7 +122,7 @@ dbx_address_mapping_list=(
 # "RoRabkCoBgPcCh"
 )
 
-LOG_PATH="./log_tmp"
+LOG_PATH="./log_blas4"
 # Run Example
 # ./ramulator2 -f ddr5_pch_config.yaml -p Frontend.path=./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
 
@@ -112,6 +140,7 @@ fi
 BASELINE="baseline"
 PCHNDP="pch_ndp"
 PCHNONNDP="pch_non_ndp"
+TRACE_ROOT="trace_single_bk"
 mkdir $LOG_PATH
 mkdir $LOG_PATH/$BASELINE
 mkdir $LOG_PATH/$PCHNDP
@@ -119,8 +148,9 @@ mkdir $LOG_PATH/$PCHNONNDP
 ## Nomral Access Test ##
 
 pch_trace_type_list=("ndp" "non_ndp")
-
+bench_tpye="blas"
 num_process=0
+num_work=32
 echo "====================================="
 echo "====================================="
 for speed_grade in ${speed_grade_list[@]}; do
@@ -133,7 +163,14 @@ for speed_grade in ${speed_grade_list[@]}; do
             trace_prefix="${PCHNDP}/${PCHNDP}"
             trace_option="Frontend.core0_is_ndp_trace=true"
             log_prefix="${PCHNDP}"
-        fi             
+        fi         
+
+        if [[ $bench_tpye == "spec" ]]; then
+            if [[ $trace_type == "ndp" ]]; then
+                continue
+            fi
+        fi    
+
         for dbx_org in ${dbx_org_list[@]}; do
             echo " -- DBX Organization: "$dbx_org
             dbx_org_option="MemorySystem.DRAM.org.preset="$dbx_org            
@@ -152,7 +189,7 @@ for speed_grade in ${speed_grade_list[@]}; do
                 real_dq="16"
                 current_preset="DDR5_4800x16"
                 trace_prefix_name="${trace_prefix}_x16"
-                log_prefix_name="${log_prefix}_16"
+                log_prefix_name="${log_prefix}_x16"
             fi
             speed_option="MemorySystem.DRAM.timing.preset="$speed_grade
             real_dq_option="MemorySystem.DRAM.org.real_dq="$real_dq
@@ -162,16 +199,26 @@ for speed_grade in ${speed_grade_list[@]}; do
             echo " -- DBX ORG : "$dbx_org_option
             echo " -- Real DQ on DIMM : "$real_dq_option
             echo " -- Current: "$current_option
-            for trace in ${trace_list[@]}; do
-                trace_path="Frontend.core0_trace=./trace/${trace_prefix_name}_${trace}"
+            if [[ $bench_tpye == "spec" ]]; then
+                mux_list=("${spec_bench_list[@]}")
+            else
+                mux_list=("${trace_list[@]}")
+            fi          
+            for trace in ${mux_list[@]}; do
+                if [[ $bench_tpye == "spec" ]]; then
+                    trace_path="Frontend.core0_trace=../spec_trace/${trace}"
+                else                
+                    trace_path="Frontend.core0_trace=./${TRACE_ROOT}/${trace_prefix_name}_${trace}"
+                fi  
                 log_path="${LOG_PATH}/$log_prefix/$speed_grade_${log_prefix_name}_${trace}.log"
+                err_log_path="${LOG_PATH}/$log_prefix/$speed_grade_${log_prefix_name}_${trace}_err.log"
                 echo "========== Run Ramulator ============"
                 echo "Trace: "$trace
-                cmd="./build/ramulator2 -f $conf_file -p  $trace_path -p $trace_option -p $speed_option -p $dbx_org_option -p $real_dq_option -p $current_option > $log_path &"
+                cmd="./build/ramulator2 -f $conf_file -p  $trace_path -p $trace_option -p $speed_option -p $dbx_org_option -p $real_dq_option -p $current_option 1> $log_path 2> $err_log_path &"
                 echo $cmd
-                eval $cmd
+                eval $cmd 
                 ((num_process++))
-                if [[ $num_process -ge 32 ]]; then 
+                if [[ $num_process -ge $num_work ]]; then 
                     wait -n
                     ((num_process--))
                 fi
@@ -183,30 +230,44 @@ for speed_grade in ${speed_grade_list[@]}; do
 done
 wait
 
+
 echo "====================================="
 echo "====================================="
 num_process=0
+trace_prefix_name="${BASELINE}/${BASELINE}"
+log_prefix="${BASELINE}"
 for speed_grade in ${speed_grade_list[@]}; do
     echo " -- Speed Grade: "$speed_grade
-    for trace in ${non_ndp_trace_list[@]}; do
-        conf_file="ddr5_config.yaml"
+    if [[ $bench_tpye == "spec" ]]; then
+        mux_list=("${spec_bench_list[@]}")
+    else
+        mux_list=("${trace_list[@]}")
+    fi     
+    for trace in ${mux_list[@]}; do
+        conf_file="ddr5_baseline_ncore_config.yaml"
         echo " -- configuration file: "$conf_file
-        trace_path="Frontend.path=./trace/non_ndp/"${trace}
+        if [[ $bench_tpye == "spec" ]]; then
+            trace_path="Frontend.core0_trace=../spec_trace/${trace}"
+        else                
+            trace_path="Frontend.core0_trace=./${TRACE_ROOT}/${trace_prefix_name}_${trace}"
+        fi          
         log_path="${LOG_PATH}/non_ndp/${speed_grade}_${trace}.log"
+        log_path="${LOG_PATH}/$log_prefix/${speed_grade}_${log_prefix}_${trace}.log"
         echo "========== Run Ramulator ============"
         echo "Trace: "$trace
-        cmd="./ramulator2 -f $conf_file -p  $trace_path > $log_path &"
+        cmd="./build/ramulator2 -f $conf_file -p  $trace_path > $log_path &"
         echo $cmd
-        # eval $cmd
+        eval $cmd
         echo "====================================="
         echo "====================================="   
         ((num_process++))
-        if [[ $num_process == 32 ]]; then 
+        if [[ $num_process == $num_work ]]; then 
             num_process=0
             wait
         fi
     done
 done
+wait
 
 ndp_8x_trace_list=(
 "ndp_8x_8K_AXPBY.txt"

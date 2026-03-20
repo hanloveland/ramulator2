@@ -9,7 +9,7 @@ Frontend:
   core0_trace: "../spec_trace/403.gcc"
   # core0_trace: "./trace_single_bk/asyncdimm_nma/asyncdimm_nma_512K_DOT.txt"
   core0_mshr_size: 32
-  core0_is_ndp_trace: true
+  core0_is_ndp_trace: false
   core0_repeat: 1
 
   Translation:

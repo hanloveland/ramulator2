@@ -50,11 +50,11 @@ def extract_from_file(file_path: Path, keyword: str, col_idx: int, sep: str = "w
         return matches[-1]  # last
 
 if __name__ == "__main__":
-    root_path = './log_tmp'
+    root_path = './log_blas4/'
 
-    root = Path(root_path)
-    if not root.exists():
-        raise SystemExit(f" Directory not found: {root}")
+    # root = Path(root_path)
+    # if not root.exists():
+    #     raise SystemExit(f" Directory not found: {root}")
 
     # files = find_files(root,fname_keywords,mode='all',pattern='*.txt.log')
 
@@ -65,44 +65,87 @@ if __name__ == "__main__":
     
     # base_keyword='ndp_4x'
     # base_keyword='ndp_8x'
-    base_keyword='ndp_16x'
+    # base_keyword='ndp_16x'
     # base_keyword='baseline'
-    files = []
-    for b in vec_becch_list:
-        for s in vec_size_list:
-            keyword=[base_keyword]
-            keyword.append(b)
-            keyword.append(s)
-            file = find_files(root,keyword,mode='all',pattern='*.txt.log')
-            if not file:
-                print(f"No files matched filename keywords ({keyword}). ")
-            else:
-                files.append(file)
-    for b in mat_bench_list:
-        for s in mat_size_list:
-            keyword=[base_keyword]
-            keyword.append(b)
-            keyword.append(s)
-            file = find_files(root,keyword,mode='all',pattern='*.txt.log')
-            if not file:
-                print(f"No files matched filename keywords ({keyword}). ")
-            else:
-                files.append(file)            
-
-    if not files:
-        print("No files matched filename keywords.")
-        exit(1)
-
-    print(f"Found {len(files)} matching files.\n")
-    results = []
-
-    value_keyword='Total DRAM Power (W)'
-    for f in files:
-        print(f[0])
-        value = extract_from_file(Path(f[0]), value_keyword, 7, sep='ws', mode="first")
-        results.append((f[0].name, value))
-        print(f"{f[0].name:<60} → {value}")
-
-    print("\n=== SUMMARY ===")
-    for name, val in results:
-        print(f"{name}: {val}")
+    # value_keyword='memory_system_cycles'
+    # value_keyword='Total DRAM Power (W)'
+    # column_idx=7    
+    # keyword_list = [('memory_system_cycles',2), ('Total DRAM Power (W)',7), ('Total DRAM Energy (nJ)',7)]
+    # keyword_list = [('DRAM Background Energy (nJ)',7), ('DRAM Command Energy (nJ)',0), ('DRAM DQ Energy (nJ)',7)]
+    # keyword_list = [('avg_host_read_latency',2,"first")]
+    # keyword_list = [('DB<->DRAM',3,"first")]
+    # keyword_list = [('Host<->DB',3,"first")]    
+    # keyword_list = [('Host<->DB/DRAM',3, "first")]    
+    keyword_list = [('memory_system_cycles',2, "first")]
+    # keyword_list = [('Total DRAM Power (W)',7)]
+    # keyword_list = [('Total DRAM Energy (nJ)',7)]
+    # keyword_list = [('NDP Ops Energy (nJ)',7)]
+    # keyword_list = [('DRAM Background Energy (nJ)',7, "last")]
+    # keyword_list = [('DRAM Command Energy (nJ)',7, "last")]
+    # keyword_list = [('DRAM DQ Energy (nJ)',7,"last")]
+    # keyword_list = [('NDP Ops Energy (nJ)',7,"last")]
+    # keyword_list = [('NDP Ops Power(W)',6,"last")]
+    
+    
+    all_result_list=[]
+    keyword_array = [
+        ("baseline", "baseline"),
+        ("pch_non_ndp", "pch_non_ndp_x4"),
+        ("pch_non_ndp", "pch_non_ndp_x8"),
+        ("pch_non_ndp", "pch_non_ndp_x16"),
+        ("pch_ndp", "pch_ndp_x4"),
+        ("pch_ndp", "pch_ndp_x8"),
+        ("pch_ndp", "pch_ndp_x16")
+    ]
+    for search_value_key, key_idx, search_mode in keyword_list:
+        print(f"Serach Key {search_value_key}")
+        for sub_path, file_keyword in keyword_array:
+            files = []
+            path_name = root_path + sub_path + "/"
+            root = Path(path_name)
+            if not root.exists():
+                raise SystemExit(f" Directory not found: {root}")        
+            for b in vec_becch_list:
+                for s in vec_size_list:
+                    keyword=[file_keyword]
+                    keyword.append(b)
+                    keyword.append(s)
+                    file = find_files(root,keyword,mode='all',pattern='*.txt.log')
+                    if not file:
+                        print(f"No files matched filename keywords ({keyword}) at {path_name}.")
+                    else:
+                        files.append(file)
+            for b in mat_bench_list:
+                for s in mat_size_list:
+                    keyword=[file_keyword]
+                    keyword.append(b)
+                    keyword.append(s)
+                    file = find_files(root,keyword,mode='all',pattern='*.txt.log')
+                    if not file:
+                        print(f"No files matched filename keywords ({keyword}) at {path_name}.")
+                    else:
+                        files.append(file)            
+    
+            if not files:
+                print("No files matched filename keywords.")
+                exit(1)
+    
+            # print(f"Found {len(files)} matching files.\n")
+            results = []
+    
+            for f in files:
+                # print(f[0])
+                value = extract_from_file(Path(f[0]), search_value_key, key_idx, sep='ws', mode=search_mode)
+                results.append((f[0].name, value))
+                # print(f"{f[0].name:<60} → {value}")
+    
+            all_result_list.append(results)
+        print(f"\n=== SUMMARY ({search_value_key}) ===")
+        # print(all_result_list)
+        for i in range(len(all_result_list[0])):
+            trace_name = all_result_list[0][i][0].split("_")        
+            vec_name = trace_name[4].split(".")
+            # print(f"{vec_name[0]} {trace_name[3]} {all_result_list[0][i][1]}")        
+            # print(f"{vec_name[0]} {trace_name[3]} {all_result_list[0][i][1]} {all_result_list[1][i][1]} {all_result_list[2][i][1]}")     
+            print(f"{vec_name[0]} {trace_name[3]} {all_result_list[0][i][1]} {all_result_list[1][i][1]} {all_result_list[2][i][1]} {all_result_list[3][i][1]} {all_result_list[4][i][1]} {all_result_list[5][i][1]} {all_result_list[6][i][1]}")        
+            # print(f"{all_result_list[0][i][0]} {all_result_list[0][i][1]} {all_result_list[1][i][1]} {all_result_list[2][i][1]} {all_result_list[3][i][1]} {all_result_list[4][i][1]} {all_result_list[5][i][1]} {all_result_list[6][i][1]}")

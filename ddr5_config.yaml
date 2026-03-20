@@ -7,6 +7,7 @@ Frontend:
   path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
   # path: ./perf_comparison/traces/stream_5M_R5W5_ramulatorv2.trace
   # path: ./perf_comparison/traces/stream_5M_R2W8_ramulatorv2.trace
+  # path: ./trace/non_ndp/non_ndp_8M_AXPBY.txt
 
   Translation:
     impl: NoTranslation

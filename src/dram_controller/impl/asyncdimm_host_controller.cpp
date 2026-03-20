@@ -1,3 +1,4 @@
+#include <optional>
 #include "dram_controller/controller.h"
 #include "memory_system/memory_system.h"
 
@@ -118,8 +119,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Host MC manages NMA instruction delivery ordering:
     //   1. send() detects NMAInst writes (inst-buf address) → nma_wr_send_cnt++
     //   2. tick() detects WR issue to inst-buf address → nma_wr_issue_cnt++
-    //   3. send() detects ctrl-reg write → nma_start_requested = true
-    //   4. tick() waits for nma_wr_send_cnt == nma_wr_issue_cnt, then issues ctrl-reg WR
+    //   3. send() detects ctrl-reg write → held in m_nma_start_hold[rank] (NOT in write buffer)
+    //   4. tick() checks m_nma_wr_send_cnt == m_nma_wr_issue_cnt → enqueues to write buffer
     //   5. When ctrl-reg WR is ISSUED → mode transition + bypass start to NMA MC
     int m_nma_ctrl_row = -1;  // Magic-path addresses (set by system via set_nma_addresses())
     int m_nma_ctrl_bg  = -1;
@@ -133,11 +134,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     std::vector<int> m_nma_wr_send_cnt;   // [rank] NMAInst writes enqueued via send()
     std::vector<int> m_nma_wr_issue_cnt;  // [rank] NMAInst writes issued to DRAM
     std::vector<bool> m_nma_start_requested; // [rank] ctrl-reg write received, awaiting drain
+    std::vector<std::optional<Request>> m_nma_start_hold; // [rank] ctrl-reg write held until NMAInst drain
 
     // ===== Phase 3: Concurrent Mode =====
     // Per-bank Offload Table (OT): counts outstanding offloaded commands.
-    // Prevents CMD FIFO overflow; threshold = NMA_CMD_FIFO_SIZE (8).
-    static constexpr int HOST_OT_THRESHOLD = 8;
+    // Prevents CMD FIFO overflow; threshold = CMD FIFO size in concurrent mode (paper §V.B.2).
+    static constexpr int HOST_OT_THRESHOLD = 12;  // CMD(8) + half REQ(4) = 12
     std::vector<int> m_ot_counter;  // [total_banks flat index]
     int m_total_banks_flat = -1;
 
@@ -161,6 +163,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
     // RT command IDs: RT_N occupies N × nBL on DQ bus (DRAM model enforced)
     int m_rt_cmds[9] = {};  // m_rt_cmds[1]=RT1, ..., m_rt_cmds[8]=RT8
+
+    // Debug: per-rank next milestone for priority_buffer size logging
 
 
   public:
@@ -261,6 +265,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         register_stat(s_num_refresh_cc_per_rank[i]).name("s_num_refresh_cc_per_rank_{}_{}", m_channel_id, i);
       }
 
+
       // Initialize per-rank mode register (Host Mode only in Phase 1)
       m_mode_per_rank.resize(m_num_rank, AsyncDIMMMode::HOST);
 
@@ -268,6 +273,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       m_nma_wr_send_cnt.resize(num_ranks, 0);
       m_nma_wr_issue_cnt.resize(num_ranks, 0);
       m_nma_start_requested.resize(num_ranks, false);
+      m_nma_start_hold.resize(num_ranks, std::nullopt);
       m_nma_row_idx = m_dram->m_levels("row");
       m_nma_bg_idx  = m_dram->m_levels("bankgroup");
       m_nma_bk_idx  = m_dram->m_levels("bank");
@@ -305,6 +311,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         m_nma_wr_send_cnt[rk] = 0;
         m_nma_wr_issue_cnt[rk] = 0;
         m_nma_start_requested[rk] = false;
+        m_nma_start_hold[rk] = std::nullopt;
       }
     }
 
@@ -458,10 +465,17 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             req.is_ndp_req = true;  // Flag for issue-time tracking
           }
           else if (req_bg == m_nma_ctrl_bg && req_bk == m_nma_ctrl_bk) {
-            // Ctrl-reg (start) write → register start request
-            // Host MC will issue this AFTER all NMAInst writes are drained
+            // Ctrl-reg (start) write → hold in separate unit, NOT in write buffer
+            // Will be released to write buffer when all NMAInst writes are issued
             m_nma_start_requested[req_rank_id] = true;
-            req.is_ndp_req = true;  // Flag for issue-time tracking
+            req.is_ndp_req = true;
+            req.arrive = m_clk;
+            m_nma_start_hold[req_rank_id] = req;
+            s_num_write_reqs++;
+            if (req.is_host_req) {
+              m_host_acceess_rec_counter++;
+            }
+            return true;  // Accepted but held — skip normal enqueue
           }
         }
       }
@@ -532,6 +546,17 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       s_read_queue_len += m_read_buffer.size() + pending.size();
       s_write_queue_len += m_write_buffer.size();
       s_priority_queue_len += m_priority_buffer.size();
+
+      // NMA start hold: release ctrl-reg WR to write buffer when all NMAInst WRs are issued
+      for (int rk_id = 0; rk_id < m_num_rank; rk_id++) {
+        if (m_nma_start_hold[rk_id].has_value() &&
+            m_nma_wr_send_cnt[rk_id] == m_nma_wr_issue_cnt[rk_id]) {
+          auto& held_req = m_nma_start_hold[rk_id].value();
+          if (m_write_buffers[rk_id].enqueue(held_req)) {
+            m_nma_start_hold[rk_id] = std::nullopt;
+          }
+        }
+      }
 
       // Update row cap for adaptive open-page policy
       for (int rk_id = 0; rk_id < num_ranks; rk_id++) {
@@ -606,16 +631,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       if (request_found) {
         int req_rank = req_it->addr_vec[m_rank_addr_idx];
 
-        // NMA start gate: hold ctrl-reg WR until all NMAInst writes are issued
-        if (req_it->is_ndp_req && req_rank >= 0 && req_rank < m_num_rank) {
-          int rr = req_it->addr_vec[m_nma_row_idx];
-          int rb = req_it->addr_vec[m_nma_bg_idx];
-          int rk = req_it->addr_vec[m_nma_bk_idx];
-          if (rr == m_nma_ctrl_row && rb == m_nma_ctrl_bg && rk == m_nma_ctrl_bk) {
-            if (m_nma_wr_send_cnt[req_rank] != m_nma_wr_issue_cnt[req_rank])
-              request_found = false;
-          }
-        }
+        // NMA start gate: no longer needed here — ctrl-reg WR is held in
+        // m_nma_start_hold[] and only released to write buffer when
+        // m_nma_wr_send_cnt == m_nma_wr_issue_cnt (see tick() above)
 
         // NMA mode: only allow offload commands (REFO), block real commands
         if (request_found && req_rank >= 0 && req_rank < m_num_rank &&
@@ -642,8 +660,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         // Issue command to DRAM model
         m_dram->issue_command(cmd, req_it->addr_vec);
 
-        // NMA write tracking: inst-buf WR → issue count; ctrl-reg WR → mode transition
-        if (req_it->is_ndp_req && (cmd == req_it->final_command) &&
+        // NMA write tracking: inst-buf WR/WRO → issue count; ctrl-reg WR → mode transition
+        // Note: In CONCURRENT mode, NMAInst writes are offloaded as WRO (not WR).
+        // Must check both final_command (WR in HOST) and WRO (offload in CONCURRENT).
+        bool is_nma_final = (cmd == req_it->final_command) ||
+                            (cmd == m_dram->m_commands("WRO"));
+        if (req_it->is_ndp_req && is_nma_final &&
             cmd_rank_id >= 0 && cmd_rank_id < m_num_rank) {
           int rr = req_it->addr_vec[m_nma_row_idx];
           int rb = req_it->addr_vec[m_nma_bg_idx];
@@ -938,38 +960,89 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     bool schedule_request(ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
       bool request_found = false;
 
+
       // Priority queue empty flag array
       for (int rk_idx = 0; rk_idx < m_num_rank; rk_idx++) {
         is_empty_priority_per_rank[rk_idx] = (m_priority_buffers[rk_idx].size() == 0);
       }
 
-      // 1. Active buffer (highest priority — avoid useless ACTs)
-      if (req_it = m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
-        int ab_rk = req_it->addr_vec[m_rank_addr_idx];
-        if (ab_rk >= 0 && ab_rk < m_num_rank &&
-            m_mode_per_rank[ab_rk] != AsyncDIMMMode::HOST) {
-          // CONCURRENT/NMA: convert RD/WR → RDO/WRO (needs RU entry)
-          if ((int)m_return_unit.size() >= RU_MAX_ENTRIES) {
-            // RU full: can't create RU entry, skip
-          } else {  // RU has space
-          bool is_read = (req_it->type_id == Request::Type::Read);
+      // 1. Active buffer — drain entries for refresh-pending ranks first,
+      //    then serve remaining entries via FRFCFS.
+
+      // 1a. CONCURRENT/NMA entries: serve directly with RDO/WRO, bypassing FRFCFS.
+      //     get_best_request() calls get_preq_command() which checks real DRAM bank state.
+      //     NMA MC modifies that state during concurrent execution, so CONCURRENT entries
+      //     appear "not ready" and are never picked by FRFCFS — causing permanent stall.
+      //     RDO/WRO have NoRequire prerequisites, so we issue them directly.
+      if ((int)m_return_unit.size() < RU_MAX_ENTRIES) {
+        for (auto it = m_active_buffer.begin(); it != m_active_buffer.end(); it++) {
+          int ab_rk = it->addr_vec[m_rank_addr_idx];
+          if (ab_rk < 0 || ab_rk >= m_num_rank) continue;
+          if (m_mode_per_rank[ab_rk] == AsyncDIMMMode::HOST) continue;
+          bool is_read = (it->type_id == Request::Type::Read);
           int offload_cmd = is_read ? m_dram->m_commands("RDO") : m_dram->m_commands("WRO");
-          if (m_dram->check_ready(offload_cmd, req_it->addr_vec)) {
-            req_it->command = offload_cmd;
+          if (m_dram->check_ready(offload_cmd, it->addr_vec)) {
+            it->command = offload_cmd;
+            req_it = it;
             request_found = true;
             req_buffer = &m_active_buffer;
-          }
-          } // end RU capacity check
-        } else {
-          // HOST: normal scheduling
-          if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
-            request_found = true;
-            req_buffer = &m_active_buffer;
+
+            break;
           }
         }
       }
 
-      // 2. Priority buffer (refresh) — round-robin across ranks
+      // 1b. Prioritize active_buffer entries for refresh-pending HOST ranks.
+      //     Without this, FRFCFS picks entries for OTHER ranks, starving refresh.
+      if (!request_found) {
+        for (auto it = m_active_buffer.begin(); it != m_active_buffer.end(); it++) {
+          int ab_rk = it->addr_vec[m_rank_addr_idx];
+          if (ab_rk < 0 || ab_rk >= m_num_rank) continue;
+          if (m_mode_per_rank[ab_rk] != AsyncDIMMMode::HOST) continue;
+          if (is_empty_priority_per_rank[ab_rk]) continue;  // No pending refresh
+          it->command = m_dram->get_preq_command(it->final_command, it->addr_vec);
+          if (m_dram->check_ready(it->command, it->addr_vec)) {
+            req_it = it;
+            request_found = true;
+            req_buffer = &m_active_buffer;
+
+            break;
+          }
+        }
+      }
+
+      // 1c. HOST entries: use FRFCFS scheduler (normal path)
+      if (!request_found) {
+        if (req_it = m_scheduler->get_best_request(m_active_buffer); req_it != m_active_buffer.end()) {
+          int ab_rk = req_it->addr_vec[m_rank_addr_idx];
+          if (ab_rk >= 0 && ab_rk < m_num_rank &&
+              m_mode_per_rank[ab_rk] != AsyncDIMMMode::HOST) {
+            // CONCURRENT/NMA entry picked by FRFCFS (1a didn't serve it — RU full or CA timing)
+            if ((int)m_return_unit.size() < RU_MAX_ENTRIES) {
+              bool is_read = (req_it->type_id == Request::Type::Read);
+              int offload_cmd = is_read ? m_dram->m_commands("RDO") : m_dram->m_commands("WRO");
+              if (m_dram->check_ready(offload_cmd, req_it->addr_vec)) {
+                req_it->command = offload_cmd;
+                request_found = true;
+                req_buffer = &m_active_buffer;
+
+              }
+            }
+          } else {
+            // HOST: normal scheduling
+            if (m_dram->check_ready(req_it->command, req_it->addr_vec)) {
+              request_found = true;
+              req_buffer = &m_active_buffer;
+
+            }
+          }
+        }
+      }
+
+      // 2. Priority buffer (refresh) — per-rank, runs when rank has no active_buffer conflict.
+      //    Unlike before, this runs even if Step 1 found a request for a DIFFERENT rank.
+      //    This prevents refresh starvation when other ranks' active_buffer entries
+      //    keep Step 1 busy.
       if (!request_found) {
         for (auto rk_idx : rr_rk_idx) {
           if (m_priority_buffers[rk_idx].size() == 0) continue;
@@ -982,6 +1055,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
               req_it->command = refo_cmd;
               request_found = true;
               req_buffer = &m_priority_buffers[rk_idx];
+
               break;
             }
           } else {
@@ -1004,6 +1078,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             // Offload: use m_open_row[] for prerequisite, check OT
             if (schedule_offload_for_rank(rk_idx, req_it, req_buffer)) {
               request_found = true;
+
               break;
             }
           } else {
@@ -1021,7 +1096,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         }
       }
 
-      // 3. Check if the scheduled command would close an open row in the active buffer
+      // 4. Check if the scheduled command would close an open row in the active buffer
       if (request_found) {
         if (m_dram->m_command_meta(req_it->command).is_closing) {
           auto& rowgroup = req_it->addr_vec;

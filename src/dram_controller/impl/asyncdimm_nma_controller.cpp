@@ -146,6 +146,8 @@ class AsyncDIMMNMAController {
       int command = -1;       // Current command to issue (ACT/RD/WR/PRE)
       int final_command = -1; // Final command needed (RD or WR)
       Clk_t arrive = -1;
+      bool data_pending = false;      // Waiting for DRAM data response
+      Clk_t data_complete_clk = -1;   // Clock when data response arrives
     };
     std::vector<std::deque<NMARequest>> m_nma_req_buffer;  // [total_banks]
     static constexpr int NMA_REQ_BUFFER_PER_BANK = 8;
@@ -218,7 +220,10 @@ class AsyncDIMMNMAController {
       uint64_t seq_num;    // Global seq number (valid only for reads)
     };
     std::vector<std::deque<CmdFifoEntry>> m_cmd_fifo;  // [total_banks]
-    static constexpr int NMA_CMD_FIFO_SIZE = 8;        // Per-bank CMD FIFO depth
+    static constexpr int NMA_CMD_FIFO_SIZE = 8;        // Per-bank CMD FIFO depth (NMA-only)
+    // Effective FIFO capacities (halved in concurrent mode per paper §V.B.2)
+    int m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE;
+    int m_eff_req_fifo_size = NMA_REQ_BUFFER_PER_BANK;
 
     // H/N Arbiter: per-bank FIFO selection (true = CMD FIFO, false = REQ FIFO)
     std::vector<bool> m_arbiter_use_cmd;  // [total_banks]
@@ -282,8 +287,9 @@ class AsyncDIMMNMAController {
     };
     std::deque<PendingRead> m_pending_reads;
 
-    // Cached DRAM read timing (nCL = column latency, nBL = burst length)
+    // Cached DRAM timing (nCL = read column latency, nCWL = write column latency, nBL = burst length)
     int m_nCL = -1;
+    int m_nCWL = -1;
     int m_nBL = -1;
 
     // Phase 3 Statistics
@@ -337,6 +343,7 @@ class AsyncDIMMNMAController {
 
       // Cache DRAM read timing for read completion modeling
       m_nCL = m_dram->m_timing_vals("nCL");
+      m_nCWL = m_dram->m_timing_vals("nCWL");
       m_nBL = m_dram->m_timing_vals("nBL");
 
       // Store magic path addresses
@@ -426,6 +433,10 @@ class AsyncDIMMNMAController {
         }
       }
 
+      // Process NMA REQ FIFO data completions every DRAM cycle
+      // (RD_L/WR_L data responses arrive at DRAM clock granularity)
+      process_nma_data_completions();
+
       // Phase 3: check pending read completions, queue/deliver interrupts every DRAM cycle
       if (m_concurrent_mode) {
         process_pending_reads();
@@ -477,7 +488,7 @@ class AsyncDIMMNMAController {
 
         if (decoded_cmd >= 0) {
           int flat_id = get_flat_bank_id(addr_vec);
-          if ((int)m_cmd_fifo[flat_id].size() < NMA_CMD_FIFO_SIZE) {
+          if ((int)m_cmd_fifo[flat_id].size() < m_eff_cmd_fifo_size) {
             CmdFifoEntry entry;
             entry.command  = decoded_cmd;
             entry.addr_vec = addr_vec;
@@ -712,6 +723,10 @@ class AsyncDIMMNMAController {
      */
     void enter_concurrent_mode() {
       m_concurrent_mode = true;
+      // Concurrent mode FIFO rebalancing (paper §V.B.2):
+      // REQ FIFO gives half its capacity (4) to CMD FIFO → CMD=12, REQ=4
+      m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE + NMA_REQ_BUFFER_PER_BANK / 2;  // 8 + 4 = 12
+      m_eff_req_fifo_size = NMA_REQ_BUFFER_PER_BANK / 2;                       // 8 / 2 = 4
       // Arbiter starts at REQ FIFO (NMA workload may already be running)
       for (size_t i = 0; i < m_arbiter_use_cmd.size(); i++) m_arbiter_use_cmd[i] = false;
       // Clear stale CMD FIFO state and SR recovery
@@ -729,6 +744,9 @@ class AsyncDIMMNMAController {
      */
     void exit_concurrent_mode() {
       m_concurrent_mode = false;
+      // Restore full capacity for REQ FIFO in NMA-only mode
+      m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE;
+      m_eff_req_fifo_size = NMA_REQ_BUFFER_PER_BANK;
       // Clear any remaining concurrent state
       for (auto& fifo : m_cmd_fifo) fifo.clear();
       m_return_buffer.clear();
@@ -1027,6 +1045,10 @@ class AsyncDIMMNMAController {
       if (fifo.empty()) return false;
 
       auto& req = fifo.front();
+
+      // Skip if front request is waiting for data response
+      if (req.data_pending) return false;
+
       int cmd = get_nma_preq_command(req);
       if (cmd < 0) return false;  // Bank refreshing
 
@@ -1040,8 +1062,16 @@ class AsyncDIMMNMAController {
 
       if      (cmd == m_dram->m_commands("ACT_L")) { s_num_nma_act++; }
       else if (cmd == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; }
-      else if (cmd == m_dram->m_commands("RD_L"))  { s_num_nma_rd++; fifo.pop_front(); }
-      else if (cmd == m_dram->m_commands("WR_L"))  { s_num_nma_wr++; fifo.pop_front(); }
+      else if (cmd == m_dram->m_commands("RD_L"))  {
+        s_num_nma_rd++;
+        req.data_pending = true;
+        req.data_complete_clk = m_clk + m_nCL + m_nBL;
+      }
+      else if (cmd == m_dram->m_commands("WR_L"))  {
+        s_num_nma_wr++;
+        req.data_pending = true;
+        req.data_complete_clk = m_clk + m_nCWL + m_nBL;
+      }
 
       // H/N Arbiter: PRE issued → switch to CMD FIFO if it has work
       if (is_pre && !m_cmd_fifo[bank_id].empty()) {
@@ -1303,6 +1333,10 @@ class AsyncDIMMNMAController {
         if (fifo.empty()) continue;
 
         auto& req = fifo.front();
+
+        // Skip banks whose front request is waiting for data response
+        if (req.data_pending) continue;
+
         int cmd = get_nma_preq_command(req);
         if (cmd < 0) continue;  // Bank is refreshing, skip
 
@@ -1319,15 +1353,35 @@ class AsyncDIMMNMAController {
           s_num_nma_pre++;
         } else if (req.command == m_dram->m_commands("RD_L")) {
           s_num_nma_rd++;
-          fifo.pop_front();
+          // Don't pop — wait for data response (nCL + nBL)
+          req.data_pending = true;
+          req.data_complete_clk = m_clk + m_nCL + m_nBL;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
         } else if (req.command == m_dram->m_commands("WR_L")) {
           s_num_nma_wr++;
-          fifo.pop_front();
+          // Don't pop — wait for write data transfer (nCWL + nBL)
+          req.data_pending = true;
+          req.data_complete_clk = m_clk + m_nCWL + m_nBL;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
         }
 
         return;  // One command per NMA tick
+      }
+    }
+
+    /**
+     * Process NMA REQ FIFO data completions.
+     * Called every DRAM cycle (data responses arrive at DRAM clock granularity).
+     * When data_complete_clk is reached, pop the request from the FIFO.
+     */
+    void process_nma_data_completions() {
+      for (int bank_id = 0; bank_id < m_total_banks; bank_id++) {
+        auto& fifo = m_nma_req_buffer[bank_id];
+        if (fifo.empty()) continue;
+        auto& req = fifo.front();
+        if (req.data_pending && m_clk >= req.data_complete_clk) {
+          fifo.pop_front();
+        }
       }
     }
 
@@ -1414,7 +1468,7 @@ class AsyncDIMMNMAController {
         int flat_bank_id = slot.inst.bg * m_num_banks + slot.inst.bk;
         auto& fifo = m_nma_req_buffer[flat_bank_id];
 
-        if ((int)fifo.size() >= NMA_REQ_BUFFER_PER_BANK) continue;  // Bank FIFO full
+        if ((int)fifo.size() >= m_eff_req_fifo_size) continue;  // Bank FIFO full
 
         // Build request
         NMARequest req;

@@ -4,10 +4,11 @@ Frontend:
   # path: ./perf_comparison/traces/random_5M_R8W2_ramulatorv2.trace
   # path: ./perf_comparison/traces/random_5M_R5W5_ramulatorv2.trace
   # path: ./perf_comparison/traces/random_5M_R2W8_ramulatorv2.trace
-  path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
+  # path: ./perf_comparison/traces/stream_5M_R8W2_ramulatorv2.trace
   # path: ./perf_comparison/traces/stream_5M_R5W5_ramulatorv2.trace
   # path: ./perf_comparison/traces/stream_5M_R2W8_ramulatorv2.trace
-  # path: memory_trace.txt
+  # path: ./perf_comparison/traces/test.trace
+  path: ./trace/ndp/ndp_8M_AXPBY.txt
   Translation:
     impl: NoTranslation
     max_addr: 2147483648
@@ -28,6 +29,8 @@ MemorySystem:
       # DRAM DQs on DIMM-side: 4, 8, 16  
       dq: 4
       real_dq: 4
+      # IO Freqeucny Boost: 1 2, 4
+      io_boost: 1
     timing:
       preset: DDR5_4800B 
     RFM:
@@ -58,5 +61,7 @@ MemorySystem:
     # impl: RoRaCoBaPcCh
     # impl: RoRabkCoBgPcCh    
     # impl: RoBaRaCoPcCh
-    impl: RoCoBaRaPcCh
+    # impl: RoCoBaRaPcCh
+    impl: RoRaBkBgCoPcCh
+    
     
