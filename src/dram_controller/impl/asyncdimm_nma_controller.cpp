@@ -483,12 +483,15 @@ class AsyncDIMMNMAController {
             entry.addr_vec = addr_vec;
             entry.arrive   = m_clk;
             entry.is_read  = (decoded_cmd == m_dram->m_commands("RD_L"));
-            if (entry.is_read) {
+            // Only RD_L/WR_L need return_buffer entries for interrupt-based completion.
+            // ACT_L/PRE_L are prerequisites — Host MC RU only tracks RDO/WRO.
+            if (decoded_cmd == m_dram->m_commands("RD_L") ||
+                decoded_cmd == m_dram->m_commands("WR_L")) {
               entry.seq_num = m_next_seq_num;
               m_return_buffer.push_back({m_next_seq_num, false});
               m_next_seq_num++;
             } else {
-              entry.seq_num = 0;
+              entry.seq_num = -1;  // No return tracking for ACT_L/PRE_L
             }
             m_cmd_fifo[flat_id].push_back(entry);
             s_num_cmd_received++;
@@ -726,6 +729,29 @@ class AsyncDIMMNMAController {
      */
     void exit_concurrent_mode() {
       m_concurrent_mode = false;
+      // Clear any remaining concurrent state
+      for (auto& fifo : m_cmd_fifo) fifo.clear();
+      m_return_buffer.clear();
+      m_pending_reads.clear();
+      m_pending_interrupts.clear();
+      m_nma_refresh_pending = false;
+      for (auto& sr : m_sr_recovery) sr.pending = false;
+    }
+
+    void flush_pending_interrupts() {
+      // Deliver all queued interrupts immediately (C2H cleanup)
+      while (!m_pending_interrupts.empty()) {
+        auto& pi = m_pending_interrupts.front();
+        if (m_interrupt_cb)
+          m_interrupt_cb(m_rank_id, pi.batch_size);
+        m_pending_interrupts.pop_front();
+      }
+      // Mark all remaining return_buffer entries as done and send interrupts
+      while (!m_return_buffer.empty()) {
+        if (m_interrupt_cb)
+          m_interrupt_cb(m_rank_id, 1);
+        m_return_buffer.pop_front();
+      }
     }
 
     /**
@@ -751,11 +777,10 @@ class AsyncDIMMNMAController {
      */
     bool is_concurrent_complete() const {
       if (!m_concurrent_mode) return false;
-      if (!is_nma_idle()) return false;
-      for (const auto& fifo : m_cmd_fifo)
-        if (!fifo.empty()) return false;
-      return m_return_buffer.empty() && m_pending_reads.empty() &&
-             m_pending_interrupts.empty();
+      // NMA work done = sufficient for concurrent completion.
+      // Remaining CMD FIFO entries (host offloaded commands) will be
+      // drained during C2H transition or handled by Host MC after mode change.
+      return is_nma_idle();
     }
 
     /**
@@ -767,6 +792,9 @@ class AsyncDIMMNMAController {
         total += (int)fifo.size();
       return total;
     }
+    int get_return_buffer_size() const { return (int)m_return_buffer.size(); }
+    int get_pending_reads_size() const { return (int)m_pending_reads.size(); }
+    int get_pending_interrupts_size() const { return (int)m_pending_interrupts.size(); }
 
   private:
     int get_flat_bank_id(const AddrVec_t& addr_vec) const {
@@ -919,10 +947,10 @@ class AsyncDIMMNMAController {
 
       auto& entry = fifo.front();
 
-      // Bank-state recovery: post-refresh, bank may be CLOSED but CMD FIFO
-      // front is RD/WR (ACT was already issued and popped before refresh).
-      // Insert ACT recovery using the RD/WR's row address.
+      // Bank-state recovery for CMD FIFO command/bank state mismatch:
       const auto& bank = m_bank_fsm[bank_id];
+
+      // Case 1: Bank CLOSED but front is RD/WR → need ACT first
       if (bank.state == BankState::CLOSED &&
           (entry.command == m_dram->m_commands("RD_L") ||
            entry.command == m_dram->m_commands("WR_L"))) {
@@ -932,9 +960,24 @@ class AsyncDIMMNMAController {
           update_fsm_on_nma_command(act_cmd, entry.addr_vec);
           s_num_nma_act++;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
-          return true;  // ACT issued; next tick RD/WR proceeds
+          return true;
         }
-        return false;  // ACT not ready yet
+        return false;
+      }
+
+      // Case 2: Bank OPENED but front is ACT → need PRE first (close current row)
+      if (bank.state == BankState::OPENED &&
+          entry.command == m_dram->m_commands("ACT_L")) {
+        int pre_cmd = m_dram->m_commands("PRE_L");
+        AddrVec_t pre_addr = entry.addr_vec;  // same bank address
+        if (m_dram->check_ready(pre_cmd, pre_addr)) {
+          m_dram->issue_command(pre_cmd, pre_addr);
+          update_fsm_on_nma_command(pre_cmd, pre_addr);
+          s_num_nma_pre++;
+          m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
+          return true;  // PRE issued; next tick ACT proceeds
+        }
+        return false;
       }
 
       if (!m_dram->check_ready(entry.command, entry.addr_vec)) return false;
@@ -947,9 +990,18 @@ class AsyncDIMMNMAController {
       bool is_pre = (entry.command == m_dram->m_commands("PRE_L"));
       bool is_rd  = (entry.command == m_dram->m_commands("RD_L"));
 
-      // Schedule read completion for Return Unit interrupt generation
+      // Schedule completion for Return Unit interrupt generation
       if (is_rd) {
+        // Read: completion after nCL + nBL (data available in buffer)
         m_pending_reads.push_back({entry.seq_num, m_clk + m_nCL + m_nBL});
+      } else if (entry.command == m_dram->m_commands("WR_L")) {
+        // Write: mark done immediately in return_buffer (no data return needed)
+        for (auto& rb_entry : m_return_buffer) {
+          if (rb_entry.seq_num == entry.seq_num) {
+            rb_entry.is_done = true;
+            break;
+          }
+        }
       }
 
       fifo.pop_front();  // Each CMD FIFO entry is one discrete DRAM command
@@ -1103,6 +1155,12 @@ class AsyncDIMMNMAController {
     void tick_nma_state_machine() {
       switch (m_nma_state) {
         case NMAState::NMA_IDLE:
+          // In concurrent mode, host offloaded commands may still arrive in CMD FIFO
+          // after NMA execution completes. Must continue draining CMD FIFO and refresh.
+          if (m_concurrent_mode) {
+            check_nma_refresh();
+            try_issue_concurrent_command();
+          }
           s_nma_idle_cycles++;
           break;
 
@@ -1195,16 +1253,24 @@ class AsyncDIMMNMAController {
       generate_nma_requests();
 
       if (m_addr_gen_slots.empty() && all_req_buffers_empty()) {
-        bool all_closed = true;
-        for (const auto& bank : m_bank_fsm) {
-          if (bank.state == BankState::OPENED) { all_closed = false; break; }
-        }
-
-        if (all_closed) {
+        if (m_concurrent_mode) {
+          // Concurrent mode: NMA work is done, transition to IDLE immediately.
+          // Do NOT issue PREA — host offloaded commands (CMD FIFO) may still use open banks.
+          // Bank cleanup happens during C2H transition.
           m_nma_program.clear();
           m_nma_state = NMAState::NMA_IDLE;
         } else {
-          issue_nma_prea();
+          // NMA-only mode: close all banks (N2H implicit sync) before going IDLE.
+          bool all_closed = true;
+          for (const auto& bank : m_bank_fsm) {
+            if (bank.state == BankState::OPENED) { all_closed = false; break; }
+          }
+          if (all_closed) {
+            m_nma_program.clear();
+            m_nma_state = NMAState::NMA_IDLE;
+          } else {
+            issue_nma_prea();
+          }
         }
       }
     }

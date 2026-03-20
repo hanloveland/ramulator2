@@ -301,16 +301,47 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
      * Used by System for C2H transition: must drain all offloaded accesses first.
      */
     bool has_pending_offloads_for_rank(int rank_id) const {
-      // Check RU for entries targeting this rank
       for (const auto& entry : m_return_unit) {
         if (entry.req.addr_vec[m_rank_addr_idx] == rank_id) return true;
       }
-      // Check RT-pending reads for this rank
       if (rank_id >= 0 && rank_id < m_num_rank) {
         if (!m_rt_read_pending[rank_id].empty()) return true;
         if (m_rt_pending_count[rank_id] > 0) return true;
       }
       return false;
+    }
+
+    /**
+     * Drain all offloaded entries for a rank during C2H transition.
+     * Completes reads (into pending for callback) and writes immediately.
+     */
+    void drain_offloads_for_rank(int rank_id) {
+      // Drain RU entries for this rank
+      for (auto it = m_return_unit.begin(); it != m_return_unit.end(); ) {
+        if (it->req.addr_vec[m_rank_addr_idx] == rank_id) {
+          if (it->bank_flat_id >= 0 && it->bank_flat_id < m_total_banks_flat)
+            m_ot_counter[it->bank_flat_id] = std::max(0, m_ot_counter[it->bank_flat_id] - it->cmd_count);
+          if (it->is_read) {
+            it->req.depart = m_clk + m_dram->m_read_latency;
+            pending.push_back(it->req);
+          } else {
+            if (it->req.is_host_req) m_host_acceess_rec_counter++;
+          }
+          it = m_return_unit.erase(it);
+        } else {
+          ++it;
+        }
+      }
+      // Drain RT-pending reads
+      if (rank_id >= 0 && rank_id < m_num_rank) {
+        while (!m_rt_read_pending[rank_id].empty()) {
+          auto& req = m_rt_read_pending[rank_id].front();
+          req.depart = m_clk + m_dram->m_read_latency;
+          pending.push_back(req);
+          m_rt_read_pending[rank_id].pop_front();
+        }
+        m_rt_pending_count[rank_id] = 0;
+      }
     }
 
     // Set magic-path addresses (called by AsyncDIMMSystem during init)
@@ -340,21 +371,27 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       if (rank_id < 0 || rank_id >= m_num_rank) return;
       if (m_return_unit.empty()) return;
 
-      auto& entry = m_return_unit.front();
+      // Find the OLDEST entry for this rank (head-of-line per rank)
+      for (auto it = m_return_unit.begin(); it != m_return_unit.end(); ++it) {
+        if (it->req.addr_vec[m_rank_addr_idx] != rank_id) continue;
 
-      // OT decrement: cmd_count commands completed for this bank
-      if (entry.bank_flat_id >= 0 && entry.bank_flat_id < m_total_banks_flat)
-        m_ot_counter[entry.bank_flat_id] -= entry.cmd_count;
+        // OT decrement: cmd_count commands completed for this bank
+        if (it->bank_flat_id >= 0 && it->bank_flat_id < m_total_banks_flat)
+          m_ot_counter[it->bank_flat_id] -= it->cmd_count;
 
-      if (entry.is_read) {
-        // Read: interrupt received. Data not yet returned.
-        // Store req in rt_read_pending → Host MC issues RT → data arrives → callback
-        m_rt_read_pending[rank_id].push_back(entry.req);
-        m_rt_pending_count[rank_id]++;
+        if (it->is_read) {
+          // Read: data not yet returned. Queue for RT.
+          m_rt_read_pending[rank_id].push_back(it->req);
+          m_rt_pending_count[rank_id]++;
+        } else {
+          // Write: complete on interrupt. Fire callback if host req.
+          if (it->req.is_host_req)
+            m_host_acceess_rec_counter++;
+        }
+
+        m_return_unit.erase(it);
+        return;
       }
-      // Write: complete on interrupt (no data return, no frontend callback)
-
-      m_return_unit.pop_front();
     }
 
     // Get open row for a specific bank (for FSM sync verification)

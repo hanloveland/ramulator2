@@ -533,13 +533,30 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
      */
     void tick_concurrent_mode(int ch, int rk) {
       auto* nma_mc = m_nma_controllers[ch][rk];
-      if (!nma_mc->is_concurrent_complete()) return;
+      if (!nma_mc->is_concurrent_complete()) {
+        if (m_debug_mode && m_clk % 100000 == 0)
+          m_logger->info("[{}] Ch{} Rk{}: CONCURRENT not complete — NMA state={}, idle={}, cmd_fifo={}, ret_buf={}, pend_rd={}, pend_int={}, req_fifo={}",
+            m_clk, ch, rk, (int)nma_mc->get_nma_state(), nma_mc->is_nma_idle(),
+            nma_mc->get_cmd_fifo_outstanding(),
+            nma_mc->get_return_buffer_size(),
+            nma_mc->get_pending_reads_size(),
+            nma_mc->get_pending_interrupts_size(),
+            nma_mc->get_nma_outstanding());
+        return;
+      }
 
+      // NMA idle → drain remaining offloaded commands before C2H
+      // Deliver any pending interrupts first
+      nma_mc->flush_pending_interrupts();
+
+      // Remove all RU entries for this rank from Host MC
+      // (offloaded commands that haven't completed via interrupt)
       auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
-      if (host_mc && host_mc->has_pending_offloads_for_rank(rk)) return;
+      if (host_mc)
+        host_mc->drain_offloads_for_rank(rk);
 
       m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_C2H;
-      m_logger->info("[{}] Ch{} Rk{}: Concurrent complete (NMA+RU drained), C2H transition", m_clk, ch, rk);
+      m_logger->info("[{}] Ch{} Rk{}: Concurrent complete, C2H transition", m_clk, ch, rk);
     }
 
     /**
