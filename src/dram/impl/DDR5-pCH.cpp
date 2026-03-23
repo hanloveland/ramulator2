@@ -472,6 +472,35 @@ class DDR5PCH : public IDRAM, public Implementation {
     // "idle", "run", "barrier", "wait_done", "self_exec_wait", "self_exec", "self_exec_done", "self_exec_barrier", "done"
     std::vector<std::vector<size_t>>                pch_dsnc_status_cnt;
 
+    // NDP Segment Tracking (per pCH)
+    // Tracks cycle counts for each RUN→BARRIER segment
+    enum class NdpSegType { RD, WR, WAIT, SELF_EXEC, UNKNOWN };
+    struct NdpSegment {
+      int        seg_id;
+      NdpSegType type;
+      Clk_t      fetch_start;   // cycle when `run` entered (fetch phase begins)
+      Clk_t      drain_start;   // cycle when `barrier` entered (drain phase begins)
+      Clk_t      end;           // cycle when `barrier→run` or `done` (segment ends)
+    };
+    // Completed segments per pCH
+    std::vector<std::vector<NdpSegment>>  ndp_segments_per_pch;
+    // Current segment being tracked per pCH
+    std::vector<NdpSegment>               ndp_cur_segment_per_pch;
+    // Whether a segment is currently being tracked per pCH
+    std::vector<bool>                     ndp_seg_tracking_per_pch;
+    // Segment counter per pCH
+    std::vector<int>                      ndp_seg_cnt_per_pch;
+
+    static const char* ndp_seg_type_str(NdpSegType t) {
+      switch(t) {
+        case NdpSegType::RD:        return "RD";
+        case NdpSegType::WR:        return "WR";
+        case NdpSegType::WAIT:      return "WAIT";
+        case NdpSegType::SELF_EXEC: return "SELF_EXEC";
+        default:                    return "UNKNOWN";
+      }
+    }
+
     #ifdef PCH_DEBUG
     bool is_pch_error = false;
     int error_pch = -1;
@@ -620,20 +649,41 @@ class DDR5PCH : public IDRAM, public Implementation {
 
                 if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("barrier");
-                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> barrier"); 
-                } 
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> barrier");
+                  // Segment tracking: run → barrier (drain phase begins)
+                  if (ndp_seg_tracking_per_pch[pch_idx]) {
+                    ndp_cur_segment_per_pch[pch_idx].drain_start = m_clk;
+                  }
+                }
                 else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("wait_done");
-                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> wait_done"); 
-                } 
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> wait_done");
+                  // Segment tracking: run → wait_done (final drain)
+                  if (ndp_seg_tracking_per_pch[pch_idx]) {
+                    ndp_cur_segment_per_pch[pch_idx].drain_start = m_clk;
+                  }
+                }
                 else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_ON")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_wait");
-                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_wait"); 
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_wait");
+                  // Segment tracking: end current segment at self_exec_wait, start SELF_EXEC segment
+                  if (ndp_seg_tracking_per_pch[pch_idx]) {
+                    ndp_cur_segment_per_pch[pch_idx].drain_start = m_clk;
+                  }
                 } else if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
                   // Nothing
                 }
-                else {                  
+                else {
                   ndp_inst_slot_per_pch[pch_idx].push_back(inst);
+                  // Segment tracking: determine type from fetched instruction opcode
+                  if (ndp_seg_tracking_per_pch[pch_idx] && ndp_cur_segment_per_pch[pch_idx].type == NdpSegType::UNKNOWN) {
+                    if (inst.opcode == m_ndp_inst_op.at("WBD")) {
+                      ndp_cur_segment_per_pch[pch_idx].type = NdpSegType::WR;
+                    } else {
+                      // LOAD, LOAD_ADD, LOAD_MUL, ADD, MUL, V_RED, S_RED, MAC, SCALE_ADD → RD
+                      ndp_cur_segment_per_pch[pch_idx].type = NdpSegType::RD;
+                    }
+                  }
                 }
                 
                 // Loop Control 
@@ -661,7 +711,14 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP Status: Barrier
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("run");
-                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status barrier -> run"); 
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status barrier -> run");
+                // Segment tracking: barrier → run (end current segment, start new)
+                if (ndp_seg_tracking_per_pch[pch_idx]) {
+                  ndp_cur_segment_per_pch[pch_idx].end = m_clk;
+                  ndp_segments_per_pch[pch_idx].push_back(ndp_cur_segment_per_pch[pch_idx]);
+                  ndp_seg_cnt_per_pch[pch_idx]++;
+                  ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::UNKNOWN, m_clk, 0, 0};
+                }
               }
 
               // NDP Status: Barrier END
@@ -669,12 +726,19 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP Status: Wait DONE
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("done");
-                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status wait_done -> done"); 
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status wait_done -> done");
                 // std::cout<<m_clk<<" - NDP Unit ["<<ch<<"]["<<pch<<"] Status DONE!"<<std::endl;
+                // Segment tracking: wait_done → done (end final segment)
+                if (ndp_seg_tracking_per_pch[pch_idx]) {
+                  ndp_cur_segment_per_pch[pch_idx].end = m_clk;
+                  ndp_segments_per_pch[pch_idx].push_back(ndp_cur_segment_per_pch[pch_idx]);
+                  ndp_seg_cnt_per_pch[pch_idx]++;
+                  ndp_seg_tracking_per_pch[pch_idx] = false;
+                }
               }
 
               // NDP Status: Wait DONE END
-            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {       
+            } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("done")) {
               // NDP Status: Wait DONE
               ndp_pc_per_pch[pch_idx] = 0;
               ndp_status_per_pch[pch_idx] = m_ndp_status("idle");
@@ -684,10 +748,17 @@ class DDR5PCH : public IDRAM, public Implementation {
 
               // NDP Status: idle END
             } else if(ndp_status_per_pch[pch_idx] == m_ndp_status("self_exec_wait")) {
-              // NDP Status: Self NDP Execution Wait Until Previous Request all done 
+              // NDP Status: Self NDP Execution Wait Until Previous Request all done
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec");
-                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_wait -> self_exec"); 
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_wait -> self_exec");
+                // Segment tracking: end previous segment (drained), start SELF_EXEC segment
+                if (ndp_seg_tracking_per_pch[pch_idx]) {
+                  ndp_cur_segment_per_pch[pch_idx].end = m_clk;
+                  ndp_segments_per_pch[pch_idx].push_back(ndp_cur_segment_per_pch[pch_idx]);
+                  ndp_seg_cnt_per_pch[pch_idx]++;
+                  ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::SELF_EXEC, m_clk, 0, 0};
+                }
               }
 
               // NDP Status: Self NDP Execution Wait END
@@ -703,8 +774,12 @@ class DDR5PCH : public IDRAM, public Implementation {
 
                 if(inst.opcode == m_ndp_inst_op.at("BARRIER")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_barrier");
-                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec -> self_exec_barrier"); 
-                } 
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec -> self_exec_barrier");
+                  // Segment tracking: self_exec → self_exec_barrier (drain)
+                  if (ndp_seg_tracking_per_pch[pch_idx]) {
+                    ndp_cur_segment_per_pch[pch_idx].drain_start = m_clk;
+                  }
+                }
                 else if(inst.opcode == m_ndp_inst_op.at("EXIT")) {
                   print_ndp_all_pch_status();
                   print_ndp_pch_inst_mem(pch_idx);                
@@ -718,7 +793,11 @@ class DDR5PCH : public IDRAM, public Implementation {
                 } 
                 else if(inst.opcode == m_ndp_inst_op.at("SELF_EXEC_OFF")) {
                   ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec_done");
-                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_done"); 
+                  DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status run -> self_exec_done");
+                  // Segment tracking: self_exec_off means drain remaining T_* ops
+                  if (ndp_seg_tracking_per_pch[pch_idx]) {
+                    ndp_cur_segment_per_pch[pch_idx].drain_start = m_clk;
+                  }
                 } else if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
                   // Nothing
                 }                
@@ -750,7 +829,14 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP Status: Self Exeuction Done Mode until Previous Request are all completed
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("run");
-                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_done -> run"); 
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_done -> run");
+                // Segment tracking: end SELF_EXEC segment, start new segment
+                if (ndp_seg_tracking_per_pch[pch_idx]) {
+                  ndp_cur_segment_per_pch[pch_idx].end = m_clk;
+                  ndp_segments_per_pch[pch_idx].push_back(ndp_cur_segment_per_pch[pch_idx]);
+                  ndp_seg_cnt_per_pch[pch_idx]++;
+                  ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::UNKNOWN, m_clk, 0, 0};
+                }
               }
 
               // NDP Status: Self Exeuction Done Mode
@@ -758,7 +844,14 @@ class DDR5PCH : public IDRAM, public Implementation {
               // NDP Status: Self Exeuction Barrier until Previous Request are all completed and transit to self_exec mode
               if(ndp_inst_slot_per_pch[pch_idx].size() == 0) {
                 ndp_status_per_pch[pch_idx] = m_ndp_status("self_exec");
-                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_barrier -> self_exec"); 
+                DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status self_exec_barrier -> self_exec");
+                // Segment tracking: end self_exec sub-segment, start new self_exec segment
+                if (ndp_seg_tracking_per_pch[pch_idx]) {
+                  ndp_cur_segment_per_pch[pch_idx].end = m_clk;
+                  ndp_segments_per_pch[pch_idx].push_back(ndp_cur_segment_per_pch[pch_idx]);
+                  ndp_seg_cnt_per_pch[pch_idx]++;
+                  ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::SELF_EXEC, m_clk, 0, 0};
+                }
               }
 
               // NDP Status: Self Exeuction Barrier
@@ -803,8 +896,11 @@ class DDR5PCH : public IDRAM, public Implementation {
                                 throw std::runtime_error("NDP Unit start when is not idle");                                
                               #endif  
                             } else {
-                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");           
+                              DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");
                               ndp_status_per_pch[pch_idx] = m_ndp_status("run");
+                              // Segment tracking: start first segment
+                              ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::UNKNOWN, m_clk, 0, 0};
+                              ndp_seg_tracking_per_pch[pch_idx] = true;
                             }
                           }                        
                         }
@@ -1766,7 +1862,14 @@ class DDR5PCH : public IDRAM, public Implementation {
       ndp_op_cnt_per_pch.resize(num_channels*num_pseudochannel,std::vector<uint64_t>(m_ndp_ops.size(),0));     
       // NDP RD CONF REG RESPONSE (magic path... to simple simulation)
       ndp_rd_config_reg_per_pch.resize(num_channels*num_pseudochannel,std::vector<int>(0,0));      
-      pch_dsnc_status_cnt.resize(num_channels*num_pseudochannel,std::vector<size_t>(9,0));      
+      pch_dsnc_status_cnt.resize(num_channels*num_pseudochannel,std::vector<size_t>(9,0));
+
+      // NDP Segment Tracking init
+      int total_pch = num_channels * num_pseudochannel;
+      ndp_segments_per_pch.resize(total_pch);
+      ndp_cur_segment_per_pch.resize(total_pch, {0, NdpSegType::UNKNOWN, 0, 0, 0});
+      ndp_seg_tracking_per_pch.resize(total_pch, false);
+      ndp_seg_cnt_per_pch.resize(total_pch, 0);
     };
 
     void set_timing_vals() {
@@ -2507,6 +2610,61 @@ class DDR5PCH : public IDRAM, public Implementation {
         std::cout<<std::endl;
       }
       std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+
+      // NDP Segment Tracking Report
+      double tCK_ns = (double)m_timing_vals("tCK_ps") / 1000.0;
+      std::cout<<"\n=== NDP Segment Tracking Report ==="<<std::endl;
+      for(int ch=0;ch<m_num_channels;ch++) {
+        for(int pch=0;pch<m_num_pseudochannel;pch++) {
+          int pch_idx = ch*m_num_pseudochannel + pch;
+          auto& segs = ndp_segments_per_pch[pch_idx];
+          if (segs.empty()) continue;
+          std::cout<<"\n--- CH["<<ch<<"] PCH["<<pch<<"] ("<<segs.size()<<" segments) ---"<<std::endl;
+          std::cout<<"  Seg | Type      | FetchStart | DrainStart |    SegEnd  |  Total | Fetch | Drain"<<std::endl;
+          std::cout<<"------+-----------+------------+------------+-----------+--------+-------+------"<<std::endl;
+
+          // Per-type aggregation
+          Clk_t total_rd_cycles = 0, total_wr_cycles = 0, total_wait_cycles = 0, total_self_exec_cycles = 0;
+          int rd_cnt = 0, wr_cnt = 0, wait_cnt = 0, self_exec_cnt = 0;
+
+          for (auto& s : segs) {
+            Clk_t total  = s.end - s.fetch_start;
+            Clk_t fetch  = (s.drain_start > 0) ? (s.drain_start - s.fetch_start) : total;
+            Clk_t drain  = (s.drain_start > 0) ? (s.end - s.drain_start) : 0;
+            std::cout<<"  "<<std::setw(3)<<s.seg_id<<" | "
+                     <<std::setw(9)<<std::left<<ndp_seg_type_str(s.type)<<std::right<<" | "
+                     <<std::setw(10)<<s.fetch_start<<" | "
+                     <<std::setw(10)<<((s.drain_start > 0) ? std::to_string(s.drain_start) : "-")<<" | "
+                     <<std::setw(9)<<s.end<<" | "
+                     <<std::setw(6)<<total<<" | "
+                     <<std::setw(5)<<fetch<<" | "
+                     <<std::setw(5)<<drain
+                     <<std::endl;
+            switch(s.type) {
+              case NdpSegType::RD:        total_rd_cycles += total; rd_cnt++; break;
+              case NdpSegType::WR:        total_wr_cycles += total; wr_cnt++; break;
+              case NdpSegType::WAIT:      total_wait_cycles += total; wait_cnt++; break;
+              case NdpSegType::SELF_EXEC: total_self_exec_cycles += total; self_exec_cnt++; break;
+              default: break;
+            }
+          }
+          std::cout<<"------+-----------+------------+------------+-----------+--------+-------+------"<<std::endl;
+          Clk_t first_start = segs.front().fetch_start;
+          Clk_t last_end = segs.back().end;
+          Clk_t total_span = last_end - first_start;
+          std::cout<<"  Total NDP span: "<<total_span<<" cycles ("
+                   <<(double)total_span * tCK_ns<<" ns)"<<std::endl;
+          if (rd_cnt > 0)
+            std::cout<<"  RD segments:        "<<rd_cnt<<" segs, "<<total_rd_cycles<<" cycles (avg "<<(total_rd_cycles/rd_cnt)<<")"<<std::endl;
+          if (wr_cnt > 0)
+            std::cout<<"  WR segments:        "<<wr_cnt<<" segs, "<<total_wr_cycles<<" cycles (avg "<<(total_wr_cycles/wr_cnt)<<")"<<std::endl;
+          if (self_exec_cnt > 0)
+            std::cout<<"  SELF_EXEC segments: "<<self_exec_cnt<<" segs, "<<total_self_exec_cycles<<" cycles (avg "<<(total_self_exec_cycles/self_exec_cnt)<<")"<<std::endl;
+          if (wait_cnt > 0)
+            std::cout<<"  WAIT segments:      "<<wait_cnt<<" segs, "<<total_wait_cycles<<" cycles (avg "<<(total_wait_cycles/wait_cnt)<<")"<<std::endl;
+        }
+      }
+      std::cout<<"=== End NDP Segment Tracking Report ===\n"<<std::endl;
     }
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
       

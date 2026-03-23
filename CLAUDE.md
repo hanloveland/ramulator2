@@ -2,6 +2,11 @@
 
 Forked from Ramulator 2.0 to customize DRAM structure (DDR5-DIMM with pseudochannel, NDP capability).
 
+## Runtime Environment
+
+- Docker container: `my_linx:gem5`
+- Ramulator2 path (inside container): `/home/mklee/sim_env/ramulator2`
+
 ## Build
 
 ```bash
@@ -545,3 +550,9 @@ init(): if (concurrent_mode_enable)
     host_mc->on_nma_interrupt(rank_id, batch_size);
   });
 ```
+
+---
+
+### Future Tasks
+
+- [ ] **Concurrent Mode host access 성능 저하 분석**: Host + NMA 동시 실행 시 host read latency 및 throughput 저하 원인 분석. OT backpressure, CMD/REQ FIFO 경합, row-hit low cap, arbiter switching 빈도, refresh 간섭 등 병목 요소 식별 및 최적화.

@@ -2182,18 +2182,27 @@ def asyncdimm_start_nma(f, ch, rank):
 def asyncdimm_cal_it(input_size):
     """Calculate iteration count and working parameters for AsyncDIMM.
     AsyncDIMM: base DDR5, 8 BG, 4 BK, 128 col/row, no pCH.
-    Unit = 1 DRAM row (8KB). opsize always 127 (0-indexed: 128 accesses).
-    8K→1BG, 16K→2BG, 32K→4BG, 64K→8BG, 128K→8BG×2iter, ..."""
+    Same data memory constraint as DBX-DIMM cal_it_v2 (scaling=1, x4):
+      Data memory = 32KB → max num_working_bg * row_size / 2 per iteration.
+    opsize is 0-indexed (opsize=N means N+1 column accesses)."""
     row_size = 8192   # 128 cols × 64B = 8KB per row
-    opsize = 127      # 0-indexed: 128 column accesses (7-bit max=127)
+    accesses = 128    # Initial column accesses per instruction (= cal_it_v2 opsize=128)
+    num_working_bg = 8
 
     vec_size = input_size_byte_list[input_size]
-    total_rows = vec_size // row_size  # Each row = 8KB
+    # Data memory: 32KB (same as DBX-DIMM x4: num_working_bg * row_size / 2)
+    max_size = num_working_bg * row_size // 2
 
-    # Scale BG count first (1→2→4→8), then increase iteration
-    num_working_bg = min(total_rows, 8)
-    iteration = max(1, total_rows // num_working_bg)
+    if vec_size > max_size:
+        ratio     = vec_size // max_size
+        iteration = ratio
+        accesses  = accesses // 2
+    else:
+        ratio     = max_size // vec_size
+        iteration = 1
+        accesses  = accesses // 2 // ratio
 
+    opsize = accesses - 1  # Convert to 0-indexed
     return iteration, num_working_bg, opsize
 
 def copy_asyncdimm(f, input_size):
@@ -2497,6 +2506,226 @@ def dot_asyncdimm(f, input_size):
             asyncdimm_start_nma(f, ch, rk)
 
 
+def gemv_asyncdimm(f, input_size):
+    '''
+    AsyncDIMM GEMV: y = Ax (matrix-vector multiply)
+    Adapted from gemv_pch (scaling=1, x4).
+
+    Tiling algorithm:
+      - Partial vector loaded to VMA via LOAD
+      - MAC across bank groups for each matrix tile row
+      - T_ADD + T_S_RED reduction for partial sums
+      - WBD writes result
+
+    Base registers:
+      id=0: vector base (row 1000)
+      id=1: matrix base (row 3000)
+      id=2: result base (row 7000)
+    '''
+    row_size = 4096       # elements per row (FP16, 8KB physical row = 128 cols × 64B)
+    n_bg = 8              # bank groups per rank
+    max_p_vec_size = 8192 # max partial vector size (elements)
+    n_per_acc = 32        # elements per column access (x4)
+    max_opsize = 127      # 128 column accesses (0-indexed)
+    opsize = max_opsize
+    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+
+    vec_size = int(mat_input_size_byte_list[input_size] / 2)  # bytes→elements (FP16)
+
+    # Partial vector sizing
+    if max_p_vec_size > vec_size:
+        p_vec_size = vec_size
+        col_tile = 1
+        if row_size > vec_size:
+            row_vec_ratio = int(row_size / vec_size)
+            opsize = int((opsize + 1) / row_vec_ratio) - 1
+    else:
+        p_vec_size = max_p_vec_size
+        col_tile = int(vec_size / p_vec_size)
+
+    # Rows needed for partial vector
+    if row_size > p_vec_size:
+        n_row_p_vec = 1
+    else:
+        n_row_p_vec = int(p_vec_size / row_size)
+
+    # Total tile rows across all units (ch × rank × bg)
+    n_tile_row = n_bg * ASYNCDIMM_NUM_CHANNEL * ASYNCDIMM_NUM_RANK
+
+    # Tile block row sizing (same algorithm as gemv_pch)
+    tmp0 = n_row_p_vec * n_bg
+    if col_tile > 1:
+        tmp0 = tmp0 * 2
+    tmp1 = int(1024 / tmp0)
+    if tmp1 >= 256:
+        n_tile_block_row = 256
+    elif tmp1 >= 128:
+        n_tile_block_row = 128
+    elif tmp1 >= 64:
+        n_tile_block_row = 64
+    elif tmp1 >= 32:
+        n_tile_block_row = 32
+    elif tmp1 >= 16:
+        n_tile_block_row = 16
+    elif tmp1 >= 8:
+        n_tile_block_row = 8
+    elif tmp1 >= 4:
+        n_tile_block_row = 4
+    elif tmp1 >= 2:
+        n_tile_block_row = 2
+    elif tmp1 >= 1:
+        n_tile_block_row = 1
+    else:
+        print("Error: too small n_tile_block_row")
+        exit(1)
+
+    if col_tile > 1:
+        tmp2 = n_tile_block_row * n_row_p_vec * n_bg * 2
+    else:
+        tmp2 = n_tile_block_row * n_row_p_vec * n_bg
+    if tmp2 > 1000:
+        n_tile_block_row = int(n_tile_block_row / 2)
+
+    # Iteration count
+    iteration_tile_block = int(vec_size / (n_tile_block_row * n_tile_row))
+    if iteration_tile_block == 0:
+        n_tile_block_row = int(vec_size / n_tile_row)
+        iteration_tile_block = int(vec_size / (n_tile_block_row * n_tile_row))
+
+    # Result vector parameters
+    n_partial_y = n_tile_block_row * n_bg
+    post_n_it = int(n_partial_y / (max_opsize + 1))
+    opsize_v_rec = max_opsize
+    opsize_s_rec = max_opsize
+    opsize_wbd = int(n_partial_y / n_per_acc)
+
+    print(f"  AsyncDIMM GEMV: size={input_size}, vec_size={vec_size}")
+    print(f"    opsize={opsize}, p_vec_size={p_vec_size}, col_tile={col_tile}")
+    print(f"    n_row_p_vec={n_row_p_vec}, n_tile_block_row={n_tile_block_row}")
+    print(f"    iteration_tile_block={iteration_tile_block}, post_n_it={post_n_it}")
+    print(f"    opsize_wbd={opsize_wbd}")
+
+    n_mac_iterations = n_tile_block_row * n_row_p_vec
+
+    for ch in range(ASYNCDIMM_NUM_CHANNEL):
+        for rk in range(ASYNCDIMM_NUM_RANK):
+            nma_inst_list = []
+
+            # Set base registers (matrix and result set once before outer loop)
+            nma_inst_list.append(nma_inst_set_base(1, 3000))  # matrix base
+            nma_inst_list.append(nma_inst_set_base(2, 7000))  # result base
+
+            # Outer loop start
+            if col_tile > 1:
+                # Reset vector base at each outer iteration (before jump target)
+                jump_outer = len(nma_inst_list)
+                nma_inst_list.append(nma_inst_set_base(0, 1000))  # vector base reset
+            else:
+                nma_inst_list.append(nma_inst_set_base(0, 1000))  # vector base (fixed)
+                jump_outer = len(nma_inst_list)
+
+            # Load partial vector (first or only col tile)
+            for bg in range(n_row_p_vec):
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+
+            # MAC inner loop: n_tile_block_row × n_row_p_vec iterations
+            jump_mac = len(nma_inst_list)
+            for bg in range(n_bg):
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+            nma_inst_list.append(nma_inst_inc_base(1, 1))  # advance matrix row
+            if n_mac_iterations > 1:
+                nma_inst_list.append(
+                    nma_inst_loop(n_mac_iterations - 1, jump_mac))
+
+            # Column tile inner loop (col_tile > 1)
+            if col_tile > 1:
+                jump_col = len(nma_inst_list)
+                nma_inst_list.append(nma_inst_inc_base(0, n_row_p_vec))  # next vector segment
+
+                # Load next partial vector segment
+                for bg in range(n_row_p_vec):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+
+                # MAC inner loop for this col tile
+                jump_mac2 = len(nma_inst_list)
+                for bg in range(n_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                if n_mac_iterations > 1:
+                    nma_inst_list.append(
+                        nma_inst_loop(n_mac_iterations - 1, jump_mac2))
+
+                if col_tile > 2:
+                    nma_inst_list.append(
+                        nma_inst_loop(col_tile - 2, jump_col))
+
+            # Final barrier before reduction
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+
+            # Reduction: T_ADD (partial sum vector reduction)
+            if post_n_it // n_bg > 0:
+                for _ in range(post_n_it // n_bg):
+                    for bg in range(n_bg):
+                        nma_inst_list.append(
+                            nma_inst(ndp_inst_opcode["T_ADD"], opsize_v_rec, bg, 0, 0, 0, 0))
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+            if post_n_it % n_bg != 0:
+                for bg in range(post_n_it % n_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["T_ADD"], opsize_v_rec, bg, 0, 0, 0, 0))
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+
+            # Reduction: T_S_RED (scalar reduction)
+            if post_n_it // n_bg > 0:
+                for _ in range(post_n_it // n_bg):
+                    for bg in range(n_bg):
+                        nma_inst_list.append(
+                            nma_inst(ndp_inst_opcode["T_S_RED"], opsize_s_rec, bg, 0, 0, 0, 0))
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+            if post_n_it % n_bg != 0:
+                for bg in range(post_n_it % n_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["T_S_RED"], opsize_s_rec, bg, 0, 0, 0, 0))
+                nma_inst_list.append(
+                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+
+            # WBD result (bg=0, write to base[2])
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["WBD"], opsize_wbd, 0, ndp_bk, 0, 0, 2))
+
+            # Outer loop: advance result base + repeat
+            if iteration_tile_block > 1:
+                nma_inst_list.append(nma_inst_inc_base(2, 1))
+                nma_inst_list.append(
+                    nma_inst_loop(iteration_tile_block - 1, jump_outer))
+
+            nma_inst_list.append(
+                nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
+
+            if len(nma_inst_list) >= MAX_INST:
+                print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
+                exit(1)
+
+            dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
+            asyncdimm_start_nma(f, ch, rk)
+
+
 def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, scaling_factor=-1):
     global GEN_PCH_NORMAL_MODE
     if pch:
@@ -2593,15 +2822,21 @@ def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, sc
 
 def generate_asyncdimm_trace(workload, size, output_path=''):
     """Generate trace for AsyncDIMM NMA workload (base DDR5, rank-level NMA MC)."""
-    asyncdimm_workloads = {"COPY", "AXPY", "AXPBY", "AXPBYPCZ", "XMY", "DOT"}
+    asyncdimm_workloads = {"COPY", "AXPY", "AXPBY", "AXPBYPCZ", "XMY", "DOT", "GEMV"}
 
     if workload not in asyncdimm_workloads:
         print(f"Error: AsyncDIMM workload '{workload}' not implemented. Available: {asyncdimm_workloads}")
         return
 
-    if size not in input_size_list:
-        print(f"Error: Invalid size '{size}'")
-        return
+    # GEMV uses mat_input_size_list; others use input_size_list
+    if workload == "GEMV":
+        if size not in mat_input_size_list:
+            print(f"Error: Invalid GEMV size '{size}'")
+            return
+    else:
+        if size not in input_size_list:
+            print(f"Error: Invalid size '{size}'")
+            return
 
     file_name = f"asyncdimm_nma_{size}_{workload}.txt"
     file_name = output_path + "/" + file_name
@@ -2613,6 +2848,7 @@ def generate_asyncdimm_trace(workload, size, output_path=''):
         "AXPBYPCZ": axpbypcz_asyncdimm,
         "XMY":      xmy_asyncdimm,
         "DOT":      dot_asyncdimm,
+        "GEMV":     gemv_asyncdimm,
     }
 
     with open(file_name, 'w') as f:
@@ -2665,6 +2901,10 @@ if __name__ == '__main__':
         for bench in ["COPY", "AXPBY", "AXPBYPCZ", "AXPY", "XMY", "DOT"]:
             generate_asyncdimm_trace(bench, size, asyncdimm_trace_path)
 
+    # AsyncDIMM GEMV traces (uses mat_input_size_list)
+    for size in mat_input_size_list:
+        generate_asyncdimm_trace("GEMV", size, asyncdimm_trace_path)
+
     # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
     # '''
     for size in input_size_list:
@@ -2674,7 +2914,7 @@ if __name__ == '__main__':
                 generate_trace(bench, size,pch_none_ndp_trace_path, pch=True,is_ndp_ops=False, scaling_factor=scaling)
                 generate_trace(bench, size,pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
 
-    '''
+    # '''
     for size in mat_input_size_list:
         generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
         for scaling in [1, 2, 4]:

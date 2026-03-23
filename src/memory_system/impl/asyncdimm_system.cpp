@@ -243,7 +243,21 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
       }
 
       // Phase 3: Wire NMA MC interrupt callback → Host MC on_nma_interrupt()
+      // and configure H/N Arbiter fairness parameters
       if (m_concurrent_mode_enable) {
+        // H/N Arbiter fairness parameters (YAML configurable)
+        int fairness_interval = param<int>("hn_cmd_service_interval")
+            .desc("(A) REQ consecutive NMA ticks before forced CMD switch (0=disabled)")
+            .default_val(16);
+        int fairness_quota = param<int>("hn_cmd_service_quota")
+            .desc("(A) Minimum CMD ticks per forced CMD switch")
+            .default_val(4);
+        int fairness_cap = param<int>("hn_req_continuous_cap")
+            .desc("(C) REQ consecutive service cap before CMD switch (0=disabled)")
+            .default_val(8);
+        m_logger->info("  -- H/N Arbiter fairness: interval={}, quota={}, cap={}",
+                       fairness_interval, fairness_quota, fairness_cap);
+
         for (int ch = 0; ch < m_num_channels; ch++) {
           auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
           if (!host_mc) continue;
@@ -253,6 +267,16 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
                 host_mc->on_nma_interrupt(rank_id, batch_size);
               }
             );
+            // [DEBUG]
+            // m_nma_controllers[ch][rk]->set_host_debug_callback(
+            //   [host_mc](int rank_id) -> AsyncDIMMNMAController::HostDebugState {
+            //     auto s = host_mc->get_debug_state(rank_id);
+            //     return {s.rd_buf, s.wr_buf, s.pri_buf, s.active_buf,
+            //             s.rt_pending, s.ru_size, s.ot_sum, s.pending_depart};
+            //   }
+            // );
+            m_nma_controllers[ch][rk]->set_fairness_params(
+              fairness_interval, fairness_quota, fairness_cap);
           }
           m_logger->info("   - Wired NMA interrupt callback: NMA MCs Ch {} -> Host MC", ch);
         }
@@ -333,6 +357,248 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
 
       if (m_debug_fsm_sync)
         verify_fsm_sync();
+
+      // [DEBUG]
+      // // Debug dump at cycle 2100000 and exit (disabled)
+      // if (false && m_clk == 2100000) {
+      //   printf("\n========== DEBUG DUMP @ cycle %ld ==========\n", m_clk);
+      //   for (int ch = 0; ch < m_num_channels; ch++) {
+      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]);
+      //     if (!host_mc) continue;
+      //     int n_bg = host_mc->get_num_bankgroups();
+      //     int n_bk = host_mc->get_num_banks();
+      //     int n_rk = host_mc->get_num_ranks();
+      //
+      //     printf("[Host MC ch=%d] OT total_inc=%zu  total_dec=%zu  delta=%zd\n",
+      //       ch, host_mc->get_ot_total_inc(), host_mc->get_ot_total_dec(),
+      //       (ssize_t)host_mc->get_ot_total_inc() - (ssize_t)host_mc->get_ot_total_dec());
+      //     {
+      //       auto* h = host_mc->get_ru_cmd_count_hist();
+      //       printf("[Host MC ch=%d] RU cmd_count histogram: cc=1:%zu  cc=2:%zu  cc=3:%zu  (total=%zu)\n",
+      //         ch, h[1], h[2], h[3], h[1]+h[2]+h[3]);
+      //     }
+      //     for (int rk = 0; rk < n_rk; rk++) {
+      //       auto* nma_mc = m_nma_controllers[ch][rk];
+      //       printf("[ch=%d rk=%d] Interrupts sent(NMA): %zu  received(Host): %zu  delta: %zd\n",
+      //         ch, rk, nma_mc->get_num_interrupts_sent(), host_mc->get_interrupt_count(rk),
+      //         (ssize_t)nma_mc->get_num_interrupts_sent() - (ssize_t)host_mc->get_interrupt_count(rk));
+      //     }
+      //
+      //     for (int rk = 0; rk < n_rk; rk++) {
+      //       auto* nma_mc = m_nma_controllers[ch][rk];
+      //
+      //       // Per-rank summary
+      //       size_t h_acto=0,h_preo=0,h_rdo=0,h_wro=0;
+      //       size_t n_acto=0,n_preo=0,n_rdo=0,n_wro=0;
+      //       size_t i_act=0,i_pre=0,i_rd=0,i_wr=0;
+      //       for (int bg = 0; bg < n_bg; bg++)
+      //         for (int bk = 0; bk < n_bk; bk++) {
+      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
+      //           int nf = bg * n_bk + bk;
+      //           auto& ho = host_mc->get_offload_per_bank(hf);
+      //           h_acto+=ho.acto; h_preo+=ho.preo; h_rdo+=ho.rdo; h_wro+=ho.wro;
+      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
+      //           n_acto+=nc.acto; n_preo+=nc.preo; n_rdo+=nc.rdo; n_wro+=nc.wro;
+      //           i_act+=nc.issue_act; i_pre+=nc.issue_pre; i_rd+=nc.issue_rd; i_wr+=nc.issue_wr;
+      //         }
+      //       printf("\n--- ch=%d rk=%d ---\n", ch, rk);
+      //       printf("[Host Offload Total] ACTO=%zu  PREO=%zu  RDO=%zu  WRO=%zu  (sum=%zu)\n",
+      //         h_acto, h_preo, h_rdo, h_wro, h_acto+h_preo+h_rdo+h_wro);
+      //       printf("[NMA  Recv    Total] ACTO=%zu  PREO=%zu  RDO=%zu  WRO=%zu  (sum=%zu)\n",
+      //         n_acto, n_preo, n_rdo, n_wro, n_acto+n_preo+n_rdo+n_wro);
+      //       printf("[NMA  Issue   Total] ACT_L=%zu PRE_L=%zu RD_L=%zu WR_L=%zu (sum=%zu)\n",
+      //         i_act, i_pre, i_rd, i_wr, i_act+i_pre+i_rd+i_wr);
+      //       printf("[NMA  Queue] CMD_FIFO=%d  ret_buf=%d  pend_rd=%d  pend_int=%d\n",
+      //         nma_mc->get_cmd_fifo_outstanding(), nma_mc->get_return_buffer_size(),
+      //         nma_mc->get_pending_reads_size(), nma_mc->get_pending_interrupts_size());
+      //
+      //       // Per-bank detail
+      //       printf("  BG BK | Host:ACTO PREO  RDO  WRO | NMA_Recv:ACTO PREO  RDO  WRO | CMD_Issue:ACT  PRE   RD   WR | OT CMDQ | OT_inc OT_dec delta | dec_cc1 dec_cc2 dec_cc3\n");
+      //       printf("  ------+---------------------------+------------------------------+-------------------------------+---------+---------------------+-----------------------\n");
+      //       for (int bg = 0; bg < n_bg; bg++) {
+      //         for (int bk = 0; bk < n_bk; bk++) {
+      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
+      //           int nf = bg * n_bk + bk;
+      //           auto& ho = host_mc->get_offload_per_bank(hf);
+      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
+      //           auto& dh = host_mc->get_ot_dec_hist(hf);
+      //           int ot = host_mc->get_ot_counter(hf);
+      //           int cmdq = (int)nma_mc->get_per_bank_cmd_fifo_size(nf);
+      //           printf("  %2d %2d | %5zu %4zu %4zu %4zu | %5zu %5zu %4zu %4zu | %5zu %4zu %4zu %4zu | %2d  %2d  | %6zu %6zu %5zd | %7zu %7zu %7zu\n",
+      //             bg, bk,
+      //             ho.acto, ho.preo, ho.rdo, ho.wro,
+      //             nc.acto, nc.preo, nc.rdo, nc.wro,
+      //             nc.issue_act, nc.issue_pre, nc.issue_rd, nc.issue_wr,
+      //             ot, cmdq,
+      //             ho.ot_inc, ho.ot_dec, (ssize_t)ho.ot_inc - (ssize_t)ho.ot_dec,
+      //             dh.hist[1], dh.hist[2], dh.hist[3]);
+      //         }
+      //       }
+      //     }
+      //   }
+      //   // === Filtered logs: Ch0 Rk2 BG3 BK0 (ALL entries) ===
+      //   {
+      //     const char* cmd_names[] = {"ACTO", "PREO", "RDO", "WRO"};
+      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[0]);
+      //     if (host_mc) {
+      //       // Offload command timeline
+      //       auto& cmd_log = host_mc->get_offload_cmd_log();
+      //       size_t cnt = 0;
+      //       for (auto& e : cmd_log)
+      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0) cnt++;
+      //       printf("\n[Host MC ch=0 rk=2 BG=3 BK=0] Offload Cmd Log (ALL %zu entries):\n", cnt);
+      //       printf("  %10s  %4s\n", "cycle", "cmd");
+      //       for (auto& e : cmd_log) {
+      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0)
+      //           printf("  %10ld  %4s\n", e.clk, cmd_names[e.cmd_type]);
+      //       }
+      //
+      //       // RU pop log
+      //       auto& ru_log = host_mc->get_ru_pop_log();
+      //       cnt = 0;
+      //       for (auto& e : ru_log)
+      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0) cnt++;
+      //       printf("\n[Host MC ch=0 rk=2 BG=3 BK=0] RU Pop Log (ALL %zu entries):\n", cnt);
+      //       printf("  %10s  %3s  %4s\n", "cycle", "cc", "R/W");
+      //       for (auto& e : ru_log) {
+      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0)
+      //           printf("  %10ld  %3d  %4s\n", e.clk, e.cmd_count, e.is_read ? "RD" : "WR");
+      //       }
+      //     }
+      //     // Matching NMA interrupt log for same bank
+      //     auto* nma_mc = m_nma_controllers[0][2];
+      //     if (nma_mc) {
+      //       auto& int_log = nma_mc->get_interrupt_log();
+      //       size_t cnt = 0;
+      //       for (auto& e : int_log)
+      //         if (e.bg == 3 && e.bk == 0) cnt++;
+      //       printf("\n[NMA MC ch=0 rk=2 BG=3 BK=0] Interrupt Log (ALL %zu entries):\n", cnt);
+      //       printf("  %10s  %6s  %4s\n", "cycle", "seq", "R/W");
+      //       for (auto& e : int_log) {
+      //         if (e.bg == 3 && e.bk == 0)
+      //           printf("  %10ld  %6lu  %4s\n", (long)e.clk, e.seq_num, e.is_read ? "RD" : "WR");
+      //       }
+      //     }
+      //   }
+      //
+      //   printf("\n============================================\n");
+      //   std::exit(0);
+      // }
+
+      // [DEBUG]
+      // // Debug dump at cycle 900000: Host MC + NMA MC full state per rank, then exit
+      // if (false && m_clk == 2900000) {
+      //   printf("\n========== BUFFER DEBUG DUMP @ cycle %ld ==========\n", m_clk);
+      //   for (int ch = 0; ch < m_num_channels; ch++) {
+      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]);
+      //     if (!host_mc) continue;
+      //     int n_rk = host_mc->get_num_ranks();
+      //     int n_bg = host_mc->get_num_bankgroups();
+      //     int n_bk = host_mc->get_num_banks();
+      //
+      //     // Global RU cmd_count histogram
+      //     {
+      //       auto* h = host_mc->get_ru_cmd_count_hist();
+      //       printf("[Host MC ch=%d] RU cmd_count histogram: cc=1:%zu  cc=2:%zu  cc=3:%zu  (total=%zu)\n",
+      //         ch, h[1], h[2], h[3], h[1]+h[2]+h[3]);
+      //     }
+      //
+      //     for (int rk = 0; rk < n_rk; rk++) {
+      //       auto ds = host_mc->get_debug_state(rk);
+      //       auto* nma_mc = m_nma_controllers[ch][rk];
+      //
+      //       printf("\n===== ch=%d rk=%d =====\n", ch, rk);
+      //
+      //       // --- Host MC summary ---
+      //       printf("[Host MC] active_buf=%d  rd_buf=%d  wr_buf=%d  pri_buf=%d\n",
+      //         ds.active_buf, ds.rd_buf, ds.wr_buf, ds.pri_buf);
+      //       printf("[Host MC] RU_size=%d  RT_pending=%d  OT_sum=%d  pending_depart=%d\n",
+      //         ds.ru_size, ds.rt_pending, ds.ot_sum, ds.pending_depart);
+      //       printf("[Host MC] Interrupts_received=%zu\n", host_mc->get_interrupt_count(rk));
+      //
+      //       // --- NMA MC summary ---
+      //       printf("[NMA  MC] CMD_FIFO_total=%d  REQ_FIFO_outstanding=%d\n",
+      //         nma_mc->get_cmd_fifo_outstanding(), nma_mc->get_nma_outstanding());
+      //       printf("[NMA  MC] return_buf=%d  pending_reads=%d  pending_interrupts=%d\n",
+      //         nma_mc->get_return_buffer_size(),
+      //         nma_mc->get_pending_reads_size(),
+      //         nma_mc->get_pending_interrupts_size());
+      //       printf("[NMA  MC] Interrupts_sent=%zu\n", nma_mc->get_num_interrupts_sent());
+      //
+      //       // --- Per-bank detail table ---
+      //       printf("  BG BK | Host_Offload:ACTO PREO  RDO  WRO | RU_dec:cc1  cc2  cc3 | OT  | NMA_CMD_Issue:ACT  PRE   RD   WR | CMDQ\n");
+      //       printf("  ------+------------------------------------+---------------------+-----+-----------------------------------+-----\n");
+      //       for (int bg = 0; bg < n_bg; bg++) {
+      //         for (int bk = 0; bk < n_bk; bk++) {
+      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
+      //           int nf = bg * n_bk + bk;
+      //           auto& ho = host_mc->get_offload_per_bank(hf);
+      //           auto& dh = host_mc->get_ot_dec_hist(hf);
+      //           int ot = host_mc->get_ot_counter(hf);
+      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
+      //           int cmdq = (int)nma_mc->get_per_bank_cmd_fifo_size(nf);
+      //           printf("  %2d %2d | %5zu %4zu %4zu %4zu | %4zu %4zu %4zu | %3d | %5zu %4zu %4zu %4zu | %3d\n",
+      //             bg, bk,
+      //             ho.acto, ho.preo, ho.rdo, ho.wro,
+      //             dh.hist[1], dh.hist[2], dh.hist[3],
+      //             ot,
+      //             nc.issue_act, nc.issue_pre, nc.issue_rd, nc.issue_wr,
+      //             cmdq);
+      //         }
+      //       }
+      //     }
+      //   }
+      //   // === Filtered timeline logs: Ch0 Rk0 BG0 BK0 ===
+      //   {
+      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[0]);
+      //     auto* nma_mc = m_nma_controllers[0][0];
+      //     if (host_mc && nma_mc) {
+      //       const char* offload_names[] = {"ACTO", "PREO", "RDO", "WRO"};
+      //       const char* issue_names[] = {"ACT", "PRE", "RD", "WR"};
+      //
+      //       // Host offload command timeline
+      //       auto& cmd_log = host_mc->get_offload_cmd_log();
+      //       size_t cnt = 0;
+      //       for (auto& e : cmd_log)
+      //         if (e.rank == 0 && e.bg == 6 && e.bk == 1) cnt++;
+      //       const char* buf_names[] = {"ACT_BUF", "RD_BUF", "WR_BUF"};
+      //       printf("\n[Host MC ch=0 rk=0 BG=6 BK=1] Offload Cmd Log (%zu entries):\n", cnt);
+      //       printf("  %10s  %4s  %8s  %7s\n", "cycle", "cmd", "row", "buffer");
+      //       for (auto& e : cmd_log) {
+      //         if (e.rank == 0 && e.bg == 6 && e.bk == 1)
+      //           printf("  %10ld  %4s  %8d  %7s\n", e.clk, offload_names[e.cmd_type],
+      //             e.row, buf_names[e.buf_type]);
+      //       }
+      //
+      //       // NMA CMD FIFO issue timeline
+      //       auto& issue_log = nma_mc->get_cmd_fifo_issue_log();
+      //       cnt = 0;
+      //       for (auto& e : issue_log)
+      //         if (e.bg == 6 && e.bk == 1) cnt++;
+      //       printf("\n[NMA MC ch=0 rk=0 BG=6 BK=1] CMD FIFO Issue Log (%zu entries):\n", cnt);
+      //       printf("  %10s  %4s\n", "cycle", "cmd");
+      //       for (auto& e : issue_log) {
+      //         if (e.bg == 6 && e.bk == 1)
+      //           printf("  %10ld  %4s\n", (long)e.clk, issue_names[e.cmd_type]);
+      //       }
+      //
+      //       // NMA interrupt log for same bank
+      //       auto& int_log = nma_mc->get_interrupt_log();
+      //       cnt = 0;
+      //       for (auto& e : int_log)
+      //         if (e.bg == 6 && e.bk == 1) cnt++;
+      //       printf("\n[NMA MC ch=0 rk=0 BG=6 BK=1] Interrupt Log (%zu entries):\n", cnt);
+      //       printf("  %10s  %6s  %4s\n", "cycle", "seq", "R/W");
+      //       for (auto& e : int_log) {
+      //         if (e.bg == 6 && e.bk == 1)
+      //           printf("  %10ld  %6lu  %4s\n", (long)e.clk, e.seq_num, e.is_read ? "RD" : "WR");
+      //       }
+      //     }
+      //   }
+      //
+      //   printf("\n============================================\n");
+      //   std::exit(0);
+      // }
     };
 
     float get_tCK() override {
@@ -375,15 +641,87 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         ? -1.0f
         : (float)total_latency / (float)s_num_read_requests;
 
-      // Bandwidth report
-      std::cout << "\n=== AsyncDIMM Memory System Bandwidth (GB/s) ===\n";
-      std::vector<uint64_t> counters(2, 0);
+      // Bandwidth report (AsyncDIMM: Host<->NMA, NMA<->DRAM)
+      std::cout << "\n=== Memory System Bandwidth (GB/s) ===\n";
+      std::cout << "Assume: 512 bits/access, BW = bytes/ns\n\n";
+
+      int tCK_ps = m_dram->m_timing_vals("tCK_ps");
+
+      // Collect Host MC counters (Host<->NMA side)
+      // Layout: [0] main bypass, [1] main offload, [2-4] NMA<->DRAM placeholders,
+      //         [5] tcore bypass, [6] tcore offload, [7-9] NMA<->DRAM placeholders
+      std::vector<uint64_t> counters(10, 0);
       for (int i = 0; i < m_num_channels; i++) {
         auto c = m_host_controllers[i]->get_counters();
-        if (c.size() == 2) { counters[0] += c[0]; counters[1] += c[1]; }
+        if (c.size() == 10) {
+          for (int ci = 0; ci < 10; ci++) counters[ci] += c[ci];
+        }
       }
-      int tCK_ps = m_dram->m_timing_vals("tCK_ps");
-      print_bw("Host<->DRAM", calc_bw_gbs(counters[0], 1.0, m_clk, tCK_ps));
+
+      // Fill NMA<->DRAM counters from NMA MCs
+      // NMA<->DRAM Bypass = Host<->NMA Bypass (same data path)
+      counters[2] = counters[0];  // main
+      counters[7] = counters[5];  // tcore
+      // NMA<->DRAM Offload = CMD FIFO RD+WR (from host frontend → main window)
+      // NMA<->DRAM NMA = REQ FIFO RD+WR (from NMA computation → tcore window)
+      uint64_t total_cmd_fifo_rw = 0, total_req_fifo_rw = 0;
+      for (int ch = 0; ch < m_num_channels; ch++)
+        for (int rk = 0; rk < m_num_ranks; rk++) {
+          total_cmd_fifo_rw += m_nma_controllers[ch][rk]->get_cmd_fifo_rd()
+                             + m_nma_controllers[ch][rk]->get_cmd_fifo_wr();
+          total_req_fifo_rw += m_nma_controllers[ch][rk]->get_req_fifo_rd()
+                             + m_nma_controllers[ch][rk]->get_req_fifo_wr();
+        }
+      counters[3] = total_cmd_fifo_rw;  // main NMA<->DRAM Offload
+      counters[4] = 0;                  // main NMA<->DRAM NMA (NMA requests are tcore, not main)
+      counters[8] = 0;                  // tcore NMA<->DRAM Offload (offloads are from host frontend, not tcore)
+      counters[9] = total_req_fifo_rw;  // tcore NMA<->DRAM NMA
+
+      // Separate main window = total - tcore
+      // Host<->NMA: counters[0,1] are total, [5,6] are tcore
+      // NMA<->DRAM: [2,3,4] and [7,8,9] — but [3](CMD FIFO) and [9](REQ FIFO)
+      //   are already exclusive, so just subtract for [0,1] and [2]
+      uint64_t m0 = counters[0] - counters[5];  // main bypass
+      uint64_t m1 = counters[1] - counters[6];  // main offload
+      uint64_t m2 = m0;                          // main NMA<->DRAM bypass = main Host<->NMA bypass
+      uint64_t m3 = counters[3];                 // main NMA<->DRAM offload (CMD FIFO, already non-tcore)
+      uint64_t m4 = counters[4];                 // main NMA<->DRAM NMA (always 0)
+
+      // ---- Main window (non-tcore only) ----
+      std::cout << "[Main window]\n";
+      print_bw("Host <-> NMA",
+          calc_bw_gbs(m0+m1, 1.0, m_clk, tCK_ps));
+      print_bw("Host <-> NMA: Bypass",
+          calc_bw_gbs(m0, 1.0, m_clk, tCK_ps));
+      print_bw("Host <-> NMA: Offload",
+          calc_bw_gbs(m1, 1.0, m_clk, tCK_ps));
+      print_bw("NMA <-> DRAM",
+          calc_bw_gbs(m2+m3+m4, 1.0, m_clk, tCK_ps));
+      print_bw("NMA <-> DRAM: Bypass",
+          calc_bw_gbs(m2, 1.0, m_clk, tCK_ps));
+      print_bw("NMA <-> DRAM: Offload",
+          calc_bw_gbs(m3, 1.0, m_clk, tCK_ps));
+      print_bw("NMA <-> DRAM: NMA",
+          calc_bw_gbs(m4, 1.0, m_clk, tCK_ps));
+
+      // ---- tcore window ----
+      std::cout << "\n[tcore window]\n";
+      print_bw("tcore Host <-> NMA",
+          calc_bw_gbs(counters[5]+counters[6], 1.0, m_clk, tCK_ps));
+      print_bw("tcore Host <-> NMA: Bypass",
+          calc_bw_gbs(counters[5], 1.0, m_clk, tCK_ps));
+      print_bw("tcore Host <-> NMA: Offload",
+          calc_bw_gbs(counters[6], 1.0, m_clk, tCK_ps));
+      print_bw("tcore NMA <-> DRAM",
+          calc_bw_gbs(counters[7]+counters[8]+counters[9], 1.0, m_clk, tCK_ps));
+      print_bw("tcore NMA <-> DRAM: Bypass",
+          calc_bw_gbs(counters[7], 1.0, m_clk, tCK_ps));
+      print_bw("tcore NMA <-> DRAM: Offload",
+          calc_bw_gbs(counters[8], 1.0, m_clk, tCK_ps));
+      print_bw("tcore NMA <-> DRAM: NMA",
+          calc_bw_gbs(counters[9], 1.0, m_clk, tCK_ps));
+
+      std::cout << std::endl;
 
       // NMA MC stats
       for (int ch = 0; ch < m_num_channels; ch++)

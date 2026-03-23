@@ -220,7 +220,7 @@ class AsyncDIMMNMAController {
       uint64_t seq_num;    // Global seq number (valid only for reads)
     };
     std::vector<std::deque<CmdFifoEntry>> m_cmd_fifo;  // [total_banks]
-    static constexpr int NMA_CMD_FIFO_SIZE = 8;        // Per-bank CMD FIFO depth (NMA-only)
+    static constexpr int NMA_CMD_FIFO_SIZE = 80;       // Per-bank CMD FIFO depth (10x for testing)
     // Effective FIFO capacities (halved in concurrent mode per paper §V.B.2)
     int m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE;
     int m_eff_req_fifo_size = NMA_REQ_BUFFER_PER_BANK;
@@ -245,9 +245,29 @@ class AsyncDIMMNMAController {
     struct ReturnEntry {
       uint64_t seq_num;
       bool is_done = false;
+      int bg = -1;
+      int bk = -1;
+      bool is_read = false;
     };
     std::deque<ReturnEntry> m_return_buffer;  // Ordered by offload arrival
     uint64_t m_next_seq_num = 0;
+
+    // Debug: log of interrupt-generating entries (NMA side)
+    struct InterruptLogEntry {
+      uint64_t seq_num;
+      int bg, bk;
+      bool is_read;
+      Clk_t clk;
+    };
+    std::vector<InterruptLogEntry> s_interrupt_log;
+
+    // Per-command CMD FIFO issue log (NMA side, tracks what NMA actually issues to DRAM)
+    struct CmdFifoIssueLogEntry {
+      int bg, bk;
+      int cmd_type;  // 0=ACT, 1=PRE, 2=RD, 3=WR
+      Clk_t clk;
+    };
+    std::vector<CmdFifoIssueLogEntry> s_cmd_fifo_issue_log;
 
     // Interrupt signal to Host MC
     using InterruptCallback = std::function<void(int rank_id, int batch_size)>;
@@ -287,6 +307,31 @@ class AsyncDIMMNMAController {
     };
     std::deque<PendingRead> m_pending_reads;
 
+    // Row-hit low cap for REQ FIFO in concurrent mode (like DBX-DIMM m_ndp_row_hit_low_cap).
+    // When CMD FIFO has entries, limit REQ FIFO same-row requests to this cap
+    // so CMD FIFO gets more execution opportunities.
+    static constexpr int NMA_ROW_HIT_LOW_CAP = 1;
+    std::vector<int> m_req_row_hit_count;   // [total_banks] per-bank row-hit counter
+    std::vector<int> m_req_row_hit_row;     // [total_banks] row being tracked (-1 = none)
+
+    // ===== Fairness mechanisms for H/N Arbiter =====
+    //
+    // (A) CMD Service Quota: after REQ FIFO serves CMD_SERVICE_INTERVAL consecutive
+    //     NMA ticks, force-switch to CMD FIFO for CMD_SERVICE_QUOTA ticks.
+    //     Prevents CMD starvation when NDP workload has sustained bank activity.
+    //
+    // (C) REQ Continuous Service Cap: regardless of row-hit/miss pattern,
+    //     if REQ FIFO has been served REQ_CONTINUOUS_CAP times consecutively
+    //     while CMD FIFO has pending entries, treat REQ as "effectively empty"
+    //     to force CMD switch. Fixes the gap in row-hit-low-cap which only
+    //     triggers on row hits (GEMV has mostly row misses).
+    int m_cmd_service_interval = 16;   // (A) REQ ticks before forced CMD switch
+    int m_cmd_service_quota    = 4;    // (A) Minimum CMD ticks per forced switch
+    int m_req_continuous_cap   = 8;    // (C) REQ consecutive service limit
+
+    std::vector<int> m_req_continuous_count;  // [total_banks] consecutive REQ service counter
+    std::vector<int> m_cmd_quota_remaining;   // [total_banks] forced CMD service remaining
+
     // Cached DRAM timing (nCL = read column latency, nCWL = write column latency, nBL = burst length)
     int m_nCL = -1;
     int m_nCWL = -1;
@@ -295,12 +340,40 @@ class AsyncDIMMNMAController {
     // Phase 3 Statistics
     size_t s_num_cmd_received    = 0;  // Offload commands received into CMD FIFO
     size_t s_num_cmd_issued      = 0;  // DRAM commands issued from CMD FIFO
+    size_t s_num_cmd_fifo_rd     = 0;  // RD issued from CMD FIFO (DB<->DRAM offload)
+    size_t s_num_cmd_fifo_wr     = 0;  // WR issued from CMD FIFO (DB<->DRAM offload)
+    size_t s_num_req_fifo_rd     = 0;  // RD issued from REQ FIFO (DB<->DRAM NMA)
+    size_t s_num_req_fifo_wr     = 0;  // WR issued from REQ FIFO (DB<->DRAM NMA)
     size_t s_num_hn_switches     = 0;  // H/N Arbiter FIFO switches
     size_t s_num_sr_recoveries   = 0;  // SR Unit recovery commands issued
     size_t s_num_interrupts_sent = 0;  // Interrupts sent to Host MC
     size_t s_num_rt_received     = 0;  // RT commands received from Host MC
+    size_t s_num_forced_cmd_switches  = 0;  // (A) Forced CMD switches via service interval
+    size_t s_num_req_cap_switches     = 0;  // (C) CMD switches via REQ continuous cap
+    // Per-bank per-command receive counters (from Host MC bypass_command)
+    // Indexed by flat_bank_id = bg * num_banks + bk
+    struct PerBankCmdCount {
+      size_t acto = 0, preo = 0, rdo = 0, wro = 0;
+      size_t issue_act = 0, issue_pre = 0, issue_rd = 0, issue_wr = 0;
+    };
+    std::vector<PerBankCmdCount> s_per_bank_cmd;  // [total_banks]
+
+    // Issue tracking (per 100K cycle window, CMD FIFO = host offload, REQ FIFO = NMA)
+    static constexpr int ISSUE_TRACK_WINDOW = 100000;
+    int m_issue_track_cmd = 0;       // CMD FIFO issues in current window
+    int m_issue_track_req = 0;       // REQ FIFO issues in current window
+    long m_issue_track_start = 0;    // Start cycle of current window
 
   public:
+    // Host MC debug state query callback (wired by system)
+    struct HostDebugState {
+      int rd_buf, wr_buf, pri_buf, active_buf;
+      int rt_pending, ru_size, ot_sum;
+      int pending_depart;
+    };
+    using HostDebugCallback = std::function<HostDebugState(int rank_id)>;
+    HostDebugCallback m_host_debug_cb = nullptr;
+
     AsyncDIMMNMAController() = default;
 
     void init(int rank_id, IDRAM* dram,
@@ -340,6 +413,11 @@ class AsyncDIMMNMAController {
       m_arbiter_use_cmd.resize(m_total_banks, false);  // Default: REQ FIFO
       m_sr_unit.resize(m_total_banks);
       m_sr_recovery.resize(m_total_banks);
+      m_req_row_hit_count.resize(m_total_banks, 0);
+      m_req_row_hit_row.resize(m_total_banks, -1);
+      m_req_continuous_count.resize(m_total_banks, 0);
+      m_cmd_quota_remaining.resize(m_total_banks, 0);
+      s_per_bank_cmd.resize(m_total_banks);
 
       // Cache DRAM read timing for read completion modeling
       m_nCL = m_dram->m_timing_vals("nCL");
@@ -355,6 +433,18 @@ class AsyncDIMMNMAController {
     }
 
     void set_channel_id(int ch_id) { m_channel_id = ch_id; }
+
+    /**
+     * Configure H/N Arbiter fairness parameters (called by AsyncDIMMSystem from YAML).
+     * @param interval  (A) REQ consecutive ticks before forced CMD switch (0=disabled)
+     * @param quota     (A) Minimum CMD ticks per forced switch
+     * @param cap       (C) REQ consecutive service cap before CMD switch (0=disabled)
+     */
+    void set_fairness_params(int interval, int quota, int cap) {
+      m_cmd_service_interval = interval;
+      m_cmd_service_quota    = quota;
+      m_req_continuous_cap   = cap;
+    }
 
     // ===== NMA Mode API =====
 
@@ -444,6 +534,38 @@ class AsyncDIMMNMAController {
         deliver_pending_interrupts();
       }
 
+      // [DEBUG] Issue tracking: print CMD(host) vs REQ(NMA) issue counts per 100K cycle window
+      // if (m_concurrent_mode && (m_clk - m_issue_track_start >= ISSUE_TRACK_WINDOW)) {
+      //   // CMD/REQ FIFO total sizes across all banks
+      //   int cmd_fifo_total = 0, req_fifo_total = 0;
+      //   for (int b = 0; b < m_total_banks; b++) {
+      //     cmd_fifo_total += (int)m_cmd_fifo[b].size();
+      //     req_fifo_total += (int)m_nma_req_buffer[b].size();
+      //   }
+      //   int ret_buf = (int)m_return_buffer.size();
+      //   int pend_rd = (int)m_pending_reads.size();
+      //   int pend_int = (int)m_pending_interrupts.size();
+      //
+      //   printf("[NMA-ISSUE] ch=%d rk=%d cycle=%ld-%ld | CMD(host)=%d REQ(nma)=%d | "
+      //          "CMD_Q=%d REQ_Q=%d ret_buf=%d pend_rd=%d pend_int=%d",
+      //     m_channel_id, m_rank_id, m_issue_track_start, m_clk,
+      //     m_issue_track_cmd, m_issue_track_req,
+      //     cmd_fifo_total, req_fifo_total, ret_buf, pend_rd, pend_int);
+      //
+      //   // Host MC state for this rank
+      //   if (m_host_debug_cb) {
+      //     auto hs = m_host_debug_cb(m_rank_id);
+      //     printf(" | H:rd=%d wr=%d pri=%d act=%d rt=%d ru=%d ot=%d pend=%d",
+      //       hs.rd_buf, hs.wr_buf, hs.pri_buf, hs.active_buf,
+      //       hs.rt_pending, hs.ru_size, hs.ot_sum, hs.pending_depart);
+      //   }
+      //   printf("\n");
+      //
+      //   m_issue_track_cmd = 0;
+      //   m_issue_track_req = 0;
+      //   m_issue_track_start = m_clk;
+      // }
+
       // NMA state machine runs at 1/4 DRAM clock
       if (m_clk % NMA_CLOCK_RATIO == 0) {
         tick_nma_state_machine();
@@ -499,13 +621,32 @@ class AsyncDIMMNMAController {
             if (decoded_cmd == m_dram->m_commands("RD_L") ||
                 decoded_cmd == m_dram->m_commands("WR_L")) {
               entry.seq_num = m_next_seq_num;
-              m_return_buffer.push_back({m_next_seq_num, false});
+              m_return_buffer.push_back({m_next_seq_num, false,
+                addr_vec[m_bankgroup_level], addr_vec[m_bank_level], entry.is_read});
               m_next_seq_num++;
             } else {
               entry.seq_num = -1;  // No return tracking for ACT_L/PRE_L
             }
             m_cmd_fifo[flat_id].push_back(entry);
             s_num_cmd_received++;
+            // Per-bank per-command receive counters
+            if      (command == m_dram->m_commands("ACTO")) s_per_bank_cmd[flat_id].acto++;
+            else if (command == m_dram->m_commands("PREO")) s_per_bank_cmd[flat_id].preo++;
+            else if (command == m_dram->m_commands("RDO"))  s_per_bank_cmd[flat_id].rdo++;
+            else if (command == m_dram->m_commands("WRO"))  s_per_bank_cmd[flat_id].wro++;
+          } else {
+            // [DEBUG] CMD_DROP logging
+            // const char* cn = "?";
+            // if (decoded_cmd == m_dram->m_commands("ACT_L")) cn = "ACT_L";
+            // else if (decoded_cmd == m_dram->m_commands("PRE_L")) cn = "PRE_L";
+            // else if (decoded_cmd == m_dram->m_commands("RD_L")) cn = "RD_L";
+            // else if (decoded_cmd == m_dram->m_commands("WR_L")) cn = "WR_L";
+            // printf("[CMD_DROP] ch=%d rk=%d cmd=%s bg=%d bk=%d row=%d col=%d "
+            //        "cmd_q=%d/%d cycle=%ld\n",
+            //   m_channel_id, m_rank_id, cn,
+            //   addr_vec[m_bankgroup_level], addr_vec[m_bank_level],
+            //   addr_vec[m_row_level], addr_vec[m_column_level],
+            //   (int)m_cmd_fifo[flat_id].size(), m_eff_cmd_fifo_size, m_clk);
           }
           // Offload commands: no shadow FSM update, return immediately
           return;
@@ -691,7 +832,36 @@ class AsyncDIMMNMAController {
         std::cout << "  SR recoveries:     " << s_num_sr_recoveries   << std::endl;
         std::cout << "  Interrupts sent:   " << s_num_interrupts_sent << std::endl;
         std::cout << "  RT received:       " << s_num_rt_received     << std::endl;
+        std::cout << "  Forced CMD switches: " << s_num_forced_cmd_switches << std::endl;
+        std::cout << "  REQ cap switches:    " << s_num_req_cap_switches    << std::endl;
         std::cout << "  CMD FIFO pending:  " << get_cmd_fifo_outstanding() << std::endl;
+      }
+
+      // Flush final issue tracking window
+      {
+        // [DEBUG] NMA-ISSUE FINAL print block
+        // int cmd_fifo_total = 0, req_fifo_total = 0;
+        // for (int b = 0; b < m_total_banks; b++) {
+        //   cmd_fifo_total += (int)m_cmd_fifo[b].size();
+        //   req_fifo_total += (int)m_nma_req_buffer[b].size();
+        // }
+        // int ret_buf = (int)m_return_buffer.size();
+        // int pend_rd = (int)m_pending_reads.size();
+        // int pend_int = (int)m_pending_interrupts.size();
+        //
+        // printf("[NMA-ISSUE] ch=%d rk=%d cycle=%ld-%ld (FINAL) | CMD(host)=%d REQ(nma)=%d | "
+        //        "CMD_Q=%d REQ_Q=%d ret_buf=%d pend_rd=%d pend_int=%d",
+        //   m_channel_id, m_rank_id, m_issue_track_start, m_clk,
+        //   m_issue_track_cmd, m_issue_track_req,
+        //   cmd_fifo_total, req_fifo_total, ret_buf, pend_rd, pend_int);
+        //
+        // if (m_host_debug_cb) {
+        //   auto hs = m_host_debug_cb(m_rank_id);
+        //   printf(" | H:rd=%d wr=%d pri=%d act=%d rt=%d ru=%d ot=%d pend=%d",
+        //     hs.rd_buf, hs.wr_buf, hs.pri_buf, hs.active_buf,
+        //     hs.rt_pending, hs.ru_size, hs.ot_sum, hs.pending_depart);
+        // }
+        // printf("\n");
       }
     }
 
@@ -725,7 +895,7 @@ class AsyncDIMMNMAController {
       m_concurrent_mode = true;
       // Concurrent mode FIFO rebalancing (paper §V.B.2):
       // REQ FIFO gives half its capacity (4) to CMD FIFO → CMD=12, REQ=4
-      m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE + NMA_REQ_BUFFER_PER_BANK / 2;  // 8 + 4 = 12
+      m_eff_cmd_fifo_size = NMA_CMD_FIFO_SIZE + NMA_REQ_BUFFER_PER_BANK / 2 + 1;  // 80 + 4 + 1(SR) = 85
       m_eff_req_fifo_size = NMA_REQ_BUFFER_PER_BANK / 2;                       // 8 / 2 = 4
       // Arbiter starts at REQ FIFO (NMA workload may already be running)
       for (size_t i = 0; i < m_arbiter_use_cmd.size(); i++) m_arbiter_use_cmd[i] = false;
@@ -735,7 +905,13 @@ class AsyncDIMMNMAController {
       m_return_buffer.clear();
       m_pending_reads.clear();
       m_pending_interrupts.clear();
+
       m_next_seq_num = 0;
+      // Reset row-hit tracking and fairness counters
+      std::fill(m_req_row_hit_count.begin(), m_req_row_hit_count.end(), 0);
+      std::fill(m_req_row_hit_row.begin(), m_req_row_hit_row.end(), -1);
+      std::fill(m_req_continuous_count.begin(), m_req_continuous_count.end(), 0);
+      std::fill(m_cmd_quota_remaining.begin(), m_cmd_quota_remaining.end(), 0);
     }
 
     /**
@@ -752,8 +928,14 @@ class AsyncDIMMNMAController {
       m_return_buffer.clear();
       m_pending_reads.clear();
       m_pending_interrupts.clear();
+
       m_nma_refresh_pending = false;
       for (auto& sr : m_sr_recovery) sr.pending = false;
+      // Reset row-hit tracking and fairness counters
+      std::fill(m_req_row_hit_count.begin(), m_req_row_hit_count.end(), 0);
+      std::fill(m_req_row_hit_row.begin(), m_req_row_hit_row.end(), -1);
+      std::fill(m_req_continuous_count.begin(), m_req_continuous_count.end(), 0);
+      std::fill(m_cmd_quota_remaining.begin(), m_cmd_quota_remaining.end(), 0);
     }
 
     void flush_pending_interrupts() {
@@ -778,6 +960,10 @@ class AsyncDIMMNMAController {
      */
     void set_interrupt_callback(InterruptCallback cb) {
       m_interrupt_cb = cb;
+    }
+
+    void set_host_debug_callback(HostDebugCallback cb) {
+      m_host_debug_cb = cb;
     }
 
     /**
@@ -814,6 +1000,25 @@ class AsyncDIMMNMAController {
     int get_pending_reads_size() const { return (int)m_pending_reads.size(); }
     int get_pending_interrupts_size() const { return (int)m_pending_interrupts.size(); }
 
+    int get_total_banks() const { return m_total_banks; }
+    int get_num_bankgroups() const { return m_num_bankgroups; }
+    int get_num_banks() const { return m_num_banks; }
+    const PerBankCmdCount& get_per_bank_cmd(int flat_bank_id) const {
+      return s_per_bank_cmd[flat_bank_id];
+    }
+    int get_per_bank_cmd_fifo_size(int flat_bank_id) const {
+      return (int)m_cmd_fifo[flat_bank_id].size();
+    }
+    size_t get_num_interrupts_sent() const { return s_num_interrupts_sent; }
+    const std::vector<InterruptLogEntry>& get_interrupt_log() const { return s_interrupt_log; }
+    const std::vector<CmdFifoIssueLogEntry>& get_cmd_fifo_issue_log() const { return s_cmd_fifo_issue_log; }
+
+    // DB<->DRAM bandwidth counters
+    size_t get_cmd_fifo_rd() const { return s_num_cmd_fifo_rd; }
+    size_t get_cmd_fifo_wr() const { return s_num_cmd_fifo_wr; }
+    size_t get_req_fifo_rd() const { return s_num_req_fifo_rd; }
+    size_t get_req_fifo_wr() const { return s_num_req_fifo_wr; }
+
   private:
     int get_flat_bank_id(const AddrVec_t& addr_vec) const {
       return addr_vec[m_bankgroup_level] * m_num_banks + addr_vec[m_bank_level];
@@ -845,27 +1050,100 @@ class AsyncDIMMNMAController {
         bool cmd_empty = cmd_fifo.empty() && !m_sr_recovery[bank_id].pending;
         bool req_empty = req_fifo.empty();
 
-        // Arbiter switch: active FIFO empty → switch to other if non-empty
-        if (use_cmd && cmd_empty) {
+        // ---- (A) CMD Service Quota: forced CMD service in progress ----
+        // If quota remaining > 0, stay on CMD FIFO until quota exhausted or CMD empty.
+        if (m_cmd_quota_remaining[bank_id] > 0) {
+          if (!cmd_empty) {
+            // Continue forced CMD service
+            bool issued = try_issue_from_cmd_fifo(bank_id);
+            if (issued) {
+              // [DEBUG] m_issue_track_cmd++;
+              m_cmd_quota_remaining[bank_id]--;
+              return;
+            }
+            // CMD not ready this tick — try other banks (don't block)
+            continue;
+          }
+          // CMD became empty during quota — end forced service, fall through
+          m_cmd_quota_remaining[bank_id] = 0;
           if (!req_empty) {
             m_arbiter_use_cmd[bank_id] = false;
             use_cmd = false;
             s_num_hn_switches++;
           } else {
-            continue;  // Both sides empty
-          }
-        } else if (!use_cmd && req_empty) {
-          if (!cmd_empty) {
-            switch_to_cmd_fifo(bank_id);
-            use_cmd = true;
-          } else {
-            continue;  // Both sides empty
+            continue;  // Both empty
           }
         }
 
-        // Issue from selected FIFO
-        bool issued = use_cmd ? try_issue_from_cmd_fifo(bank_id)
-                              : try_issue_from_req_fifo(bank_id);
+        // ---- Determine if REQ FIFO should be treated as "effectively empty" ----
+        bool req_effectively_empty = false;
+
+        if (!req_empty && !cmd_empty) {
+          // (Original) Row-hit low cap: consecutive same-row hits exceed threshold
+          int req_front_row = req_fifo.front().addr_vec[m_row_level];
+          if (m_req_row_hit_row[bank_id] == req_front_row &&
+              m_req_row_hit_count[bank_id] >= NMA_ROW_HIT_LOW_CAP) {
+            req_effectively_empty = true;
+          }
+
+          // (C) REQ Continuous Service Cap: regardless of row-hit/miss pattern,
+          //     if REQ has been served too many times consecutively, force CMD switch.
+          //     Disabled when m_req_continuous_cap <= 0.
+          if (m_req_continuous_cap > 0 &&
+              m_req_continuous_count[bank_id] >= m_req_continuous_cap) {
+            req_effectively_empty = true;
+            s_num_req_cap_switches++;
+          }
+        }
+
+        // ---- Arbiter switch logic ----
+        if (use_cmd && cmd_empty) {
+          // CMD empty → switch to REQ if available
+          if (!req_empty && !req_effectively_empty) {
+            m_arbiter_use_cmd[bank_id] = false;
+            use_cmd = false;
+            s_num_hn_switches++;
+            m_req_continuous_count[bank_id] = 0;
+          } else {
+            continue;  // Both sides empty/capped
+          }
+        } else if (!use_cmd && (req_empty || req_effectively_empty)) {
+          if (!cmd_empty) {
+            // (A) Check if forced CMD service interval reached (disabled when interval <= 0)
+            bool force_quota = (m_cmd_service_interval > 0 &&
+                                m_req_continuous_count[bank_id] >= m_cmd_service_interval);
+            switch_to_cmd_fifo(bank_id);
+            use_cmd = true;
+            m_req_continuous_count[bank_id] = 0;
+            if (force_quota) {
+              m_cmd_quota_remaining[bank_id] = m_cmd_service_quota;
+              s_num_forced_cmd_switches++;
+            }
+          } else if (req_empty) {
+            continue;  // Both sides truly empty
+          } else {
+            // req_effectively_empty but cmd_empty → fall through to try REQ anyway
+            req_effectively_empty = false;
+          }
+        }
+
+        // ---- Issue from selected FIFO ----
+        bool issued;
+        if (use_cmd) {
+          issued = try_issue_from_cmd_fifo(bank_id);
+          if (issued) {
+            // [DEBUG] m_issue_track_cmd++;
+            m_req_continuous_count[bank_id] = 0;  // Reset REQ counter on CMD service
+            if (m_cmd_quota_remaining[bank_id] > 0)
+              m_cmd_quota_remaining[bank_id]--;
+          }
+        } else {
+          issued = try_issue_from_req_fifo(bank_id);
+          if (issued) {
+            // [DEBUG] m_issue_track_req++;
+            m_req_continuous_count[bank_id]++;
+          }
+        }
         if (issued) return;  // One command per NMA tick
       }
     }
@@ -947,6 +1225,19 @@ class AsyncDIMMNMAController {
      * Returns true if a command was issued.
      */
     bool try_issue_from_cmd_fifo(int bank_id) {
+      // Helper: log CMD FIFO issue
+      auto log_cmd_fifo_issue = [&](int cmd, int bid) {
+        int bg = bid / m_num_banks;
+        int bk = bid % m_num_banks;
+        int cmd_type = -1;
+        if      (cmd == m_dram->m_commands("ACT_L")) cmd_type = 0;
+        else if (cmd == m_dram->m_commands("PRE_L")) cmd_type = 1;
+        else if (cmd == m_dram->m_commands("RD_L"))  cmd_type = 2;
+        else if (cmd == m_dram->m_commands("WR_L"))  cmd_type = 3;
+        // [DEBUG] if (cmd_type >= 0)
+        //   s_cmd_fifo_issue_log.push_back({bg, bk, cmd_type, m_clk});
+      };
+
       // SR recovery has priority within CMD FIFO issuing
       if (m_sr_recovery[bank_id].pending) {
         int rec_cmd      = m_sr_recovery[bank_id].cmd;
@@ -954,6 +1245,7 @@ class AsyncDIMMNMAController {
         if (m_dram->check_ready(rec_cmd, rec_addr)) {
           m_dram->issue_command(rec_cmd, rec_addr);
           update_fsm_on_nma_command(rec_cmd, rec_addr);
+          log_cmd_fifo_issue(rec_cmd, bank_id);
           m_sr_recovery[bank_id].pending = false;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
           return true;
@@ -977,6 +1269,7 @@ class AsyncDIMMNMAController {
         if (m_dram->check_ready(act_cmd, entry.addr_vec)) {
           m_dram->issue_command(act_cmd, entry.addr_vec);
           update_fsm_on_nma_command(act_cmd, entry.addr_vec);
+          log_cmd_fifo_issue(act_cmd, bank_id);
           s_num_nma_act++;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
           return true;
@@ -992,6 +1285,7 @@ class AsyncDIMMNMAController {
         if (m_dram->check_ready(pre_cmd, pre_addr)) {
           m_dram->issue_command(pre_cmd, pre_addr);
           update_fsm_on_nma_command(pre_cmd, pre_addr);
+          log_cmd_fifo_issue(pre_cmd, bank_id);
           s_num_nma_pre++;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
           return true;  // PRE issued; next tick ACT proceeds
@@ -1005,6 +1299,13 @@ class AsyncDIMMNMAController {
       m_dram->issue_command(entry.command, entry.addr_vec);
       update_fsm_on_nma_command(entry.command, entry.addr_vec);
       s_num_cmd_issued++;
+
+      // Per-bank per-command CMD FIFO issue counters
+      if      (entry.command == m_dram->m_commands("ACT_L")) { s_num_nma_act++; s_per_bank_cmd[bank_id].issue_act++; }
+      else if (entry.command == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; s_per_bank_cmd[bank_id].issue_pre++; }
+      else if (entry.command == m_dram->m_commands("RD_L"))  { s_num_nma_rd++; s_num_cmd_fifo_rd++; s_per_bank_cmd[bank_id].issue_rd++; }
+      else if (entry.command == m_dram->m_commands("WR_L"))  { s_num_nma_wr++; s_num_cmd_fifo_wr++; s_per_bank_cmd[bank_id].issue_wr++; }
+      log_cmd_fifo_issue(entry.command, bank_id);
 
       bool is_pre = (entry.command == m_dram->m_commands("PRE_L"));
       bool is_rd  = (entry.command == m_dram->m_commands("RD_L"));
@@ -1029,6 +1330,8 @@ class AsyncDIMMNMAController {
       if (is_pre && !m_nma_req_buffer[bank_id].empty()) {
         m_arbiter_use_cmd[bank_id] = false;
         s_num_hn_switches++;
+        m_req_continuous_count[bank_id] = 0;
+        m_cmd_quota_remaining[bank_id] = 0;
       }
 
       m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
@@ -1063,14 +1366,20 @@ class AsyncDIMMNMAController {
       if      (cmd == m_dram->m_commands("ACT_L")) { s_num_nma_act++; }
       else if (cmd == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; }
       else if (cmd == m_dram->m_commands("RD_L"))  {
-        s_num_nma_rd++;
+        s_num_nma_rd++; s_num_req_fifo_rd++;
         req.data_pending = true;
         req.data_complete_clk = m_clk + m_nCL + m_nBL;
       }
       else if (cmd == m_dram->m_commands("WR_L"))  {
-        s_num_nma_wr++;
+        s_num_nma_wr++; s_num_req_fifo_wr++;
         req.data_pending = true;
         req.data_complete_clk = m_clk + m_nCWL + m_nBL;
+      }
+
+      // PRE issued from REQ FIFO → reset row-hit counter (row closed)
+      if (is_pre) {
+        m_req_row_hit_count[bank_id] = 0;
+        m_req_row_hit_row[bank_id] = -1;
       }
 
       // H/N Arbiter: PRE issued → switch to CMD FIFO if it has work
@@ -1117,6 +1426,8 @@ class AsyncDIMMNMAController {
       if ((m_clk - m_last_interrupt_clk) < (Clk_t)TDM_INTERRUPT_PERIOD) return;
 
       // Fire ONE interrupt (1 access completion, always batch_size=1)
+      auto& front = m_return_buffer.front();
+      // [DEBUG] s_interrupt_log.push_back({front.seq_num, front.bg, front.bk, front.is_read, m_clk});
       m_return_buffer.pop_front();
       m_pending_interrupts.push_back({1, m_clk + TDM_INTERRUPT_LATENCY});
       m_last_interrupt_clk = m_clk;
@@ -1352,13 +1663,13 @@ class AsyncDIMMNMAController {
         } else if (req.command == m_dram->m_commands("PRE_L")) {
           s_num_nma_pre++;
         } else if (req.command == m_dram->m_commands("RD_L")) {
-          s_num_nma_rd++;
+          s_num_nma_rd++; s_num_req_fifo_rd++;
           // Don't pop — wait for data response (nCL + nBL)
           req.data_pending = true;
           req.data_complete_clk = m_clk + m_nCL + m_nBL;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
         } else if (req.command == m_dram->m_commands("WR_L")) {
-          s_num_nma_wr++;
+          s_num_nma_wr++; s_num_req_fifo_wr++;
           // Don't pop — wait for write data transfer (nCWL + nBL)
           req.data_pending = true;
           req.data_complete_clk = m_clk + m_nCWL + m_nBL;
@@ -1470,6 +1781,17 @@ class AsyncDIMMNMAController {
 
         if ((int)fifo.size() >= m_eff_req_fifo_size) continue;  // Bank FIFO full
 
+        // Row-hit low cap: in concurrent mode, when CMD FIFO has work,
+        // limit same-row REQ generation so CMD FIFO gets execution opportunity.
+        int reg_id = slot.inst.id & 0x7;
+        int target_row = m_base_reg[reg_id] + slot.inst.row;
+        if (m_concurrent_mode && !m_cmd_fifo[flat_bank_id].empty()) {
+          if (m_req_row_hit_row[flat_bank_id] == target_row &&
+              m_req_row_hit_count[flat_bank_id] >= NMA_ROW_HIT_LOW_CAP) {
+            continue;  // Cap reached — let CMD FIFO run
+          }
+        }
+
         // Build request
         NMARequest req;
         auto mem_type = slot.inst.get_mem_access_type();
@@ -1479,15 +1801,21 @@ class AsyncDIMMNMAController {
         req.addr_vec[m_rank_level]    = m_rank_id;
         req.addr_vec[m_bankgroup_level] = slot.inst.bg;
         req.addr_vec[m_bank_level]    = slot.inst.bk;
-        // effective_row = base_reg[id] + inst.row (base register addressing)
-        int reg_id = slot.inst.id & 0x7;
-        req.addr_vec[m_row_level]     = m_base_reg[reg_id] + slot.inst.row;
+        req.addr_vec[m_row_level]     = target_row;
         req.addr_vec[m_column_level]  = slot.current_col;
         req.final_command = req.is_read ? m_dram->m_commands("RD_L")
                                         : m_dram->m_commands("WR_L");
         req.arrive = m_clk;
 
         fifo.push_back(req);
+
+        // Update row-hit tracking
+        if (m_req_row_hit_row[flat_bank_id] != target_row) {
+          m_req_row_hit_row[flat_bank_id] = target_row;
+          m_req_row_hit_count[flat_bank_id] = 1;
+        } else {
+          m_req_row_hit_count[flat_bank_id]++;
+        }
 
         // Advance column; remove slot when complete
         slot.issued_count++;

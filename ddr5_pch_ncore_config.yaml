@@ -7,7 +7,7 @@ Frontend:
   max_inst: 500000000
   # max_inst: 5000
   
-  core0_trace: "./trace/pch_ndp/pch_ndp_x4_512K_DOT.txt"
+  core0_trace: "./trace/pch_ndp/pch_ndp_x4_512K_COPY.txt"
   # core0_trace: "./trace/pch_non_ndp/pch_non_ndp_x4_8K_AXPY.txt"
   # Core 0: NDP unit with high memory bandwidth
   # core0_trace: "./trace/pch_ndp/pch_ndp_x4_128K_GEMV.txt"

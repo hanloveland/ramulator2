@@ -332,6 +332,9 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         case m_commands("DRFMsb"):
           m_future_actions.push_back({command, addr_vec, m_clk + m_timing_vals("nDRFMsb") - 1});
           break;
+        case m_commands("REFab_L"):
+          m_future_actions.push_back({command, addr_vec, m_clk + m_timing_vals("nRFC1") - 1});
+          break;
         default:
           // Other commands (including offload commands) do not require future actions
           break;
@@ -364,6 +367,10 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         case m_commands("DRFMsb"):
           m_channels[channel_id]->update_powers(m_commands("DRFMsb_end"), addr_vec, m_clk);
           m_channels[channel_id]->update_states(m_commands("DRFMsb_end"), addr_vec, m_clk);
+          break;
+        case m_commands("REFab_L"):
+          m_channels[channel_id]->update_powers(m_commands("REFab_L_end"), addr_vec, m_clk);
+          m_channels[channel_id]->update_states(m_commands("REFab_L_end"), addr_vec, m_clk);
           break;
         default:
           break;
@@ -1024,23 +1031,30 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       int num_channels = m_organization.count[m_levels["channel"]];
       int num_ranks = m_organization.count[m_levels["rank"]];
 
-      // pJ
-      double socket_dq_energy = 18.48;
-      double on_board_dq_energy = 10.08;
+      // pJ per bit
+      double socket_dq_energy = 18.48;    // Host MC <-> DIMM connector (external channel)
+      double on_board_dq_energy = 10.08;  // DIMM internal traces (buffer chip <-> DRAM)
       size_t total_acc = 0;
       for (int i = 0; i < num_channels; i++) {
-        size_t num_trans = 0;
+        size_t num_host_trans = 0;  // Host RD/WR: traverse socket + on-board
+        size_t num_nma_trans = 0;   // NMA RD_L/WR_L: on-board only (rank-local)
         for (int j = 0; j < num_ranks; j++) {
           process_rank_energy(m_power_stats[i * num_ranks + j], m_channels[i]->m_child_nodes[j]);
-          num_trans += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] +
-                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")] +
-                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD_L")] +
-                       m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR_L")];
+          num_host_trans += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] +
+                            m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
+          num_nma_trans  += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD_L")] +
+                            m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR_L")];
         }
-        // DQ Power (nJ)
-        double dq_energy = (double)num_trans * (double)(16 * (m_channel_width+m_parity_width)) * (socket_dq_energy + on_board_dq_energy) / 1E3;
+        size_t num_trans = num_host_trans + num_nma_trans;
+        // Socket DQ: only host transactions cross the DIMM connector
+        double channel_socket_dq_energy = (double)num_host_trans * (double)(16 * (m_channel_width+m_parity_width)) * socket_dq_energy / 1E3;
+        // On-board DQ: all transactions traverse DIMM internal traces
+        double channel_onboard_dq_energy = (double)num_trans * (double)(16 * (m_channel_width+m_parity_width)) * on_board_dq_energy / 1E3;
+        double dq_energy = channel_socket_dq_energy + channel_onboard_dq_energy;
         double dq_power = dq_energy/((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0);
         std::cout<<"["<<num_channels<<"] Channel DQ Power Report"<<std::endl;
+        std::cout<<" - DQ (Socket) Energy (nJ) : "<<channel_socket_dq_energy<<std::endl;
+        std::cout<<" - DQ (OnBoard) Energy (nJ): "<<channel_onboard_dq_energy<<std::endl;
         std::cout<<" - DQ Energy (nJ) : "<<dq_energy<<std::endl;
         std::cout<<" - DQ Power (W)   : "<<dq_power<<std::endl;
         s_total_dq_energy += (dq_energy);
@@ -1063,9 +1077,25 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
       std::cout<<" - Total DRAM Power (W)         : "<<s_total_power<<std::endl;
 
       std::cout<<" ==== Total Channel Bandwidth (GB/s) Report === "<<std::endl;
+      size_t total_host_acc = 0;
+      size_t total_nma_acc = 0;
+      for (int i = 0; i < num_channels; i++) {
+        for (int j = 0; j < num_ranks; j++) {
+          total_host_acc += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD")] +
+                            m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR")];
+          total_nma_acc  += m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("RD_L")] +
+                            m_power_stats[i * num_ranks + j].cmd_counters[m_cmds_counted("WR_L")];
+        }
+      }
       double total_bw = (double)((double)total_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
+      double host_bw  = (double)((double)total_host_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
+      double nma_bw   = (double)((double)total_nma_acc * 512.0) / ((double)m_clk * (double)m_timing_vals("tCK_ps") / 1000.0) / 8;
       std::cout<<" - Total Bandwidth                  : "<<total_bw<<std::endl;
-      std::cout<<" - Total Host Access                : "<<total_acc<<std::endl;
+      std::cout<<" - Host Bandwidth                   : "<<host_bw<<std::endl;
+      std::cout<<" - NMA Bandwidth                    : "<<nma_bw<<std::endl;
+      std::cout<<" - Total Access                     : "<<total_acc<<std::endl;
+      std::cout<<" - Host Access                      : "<<total_host_acc<<std::endl;
+      std::cout<<" - NMA Access                       : "<<total_nma_acc<<std::endl;
 
     }
 

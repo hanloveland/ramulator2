@@ -225,10 +225,58 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     uint32_t s_num_post_rd  = 0;    
     uint32_t s_num_p_pre    = 0;    
 
-    uint32_t s_num_ndp_dram_rd = 0; 
-    uint32_t s_num_ndp_dram_wr = 0; 
-    uint32_t s_num_ndp_db_rd   = 0; 
-    uint32_t s_num_ndp_db_wr   = 0; 
+    uint32_t s_num_ndp_dram_rd = 0;
+    uint32_t s_num_ndp_dram_wr = 0;
+    uint32_t s_num_ndp_db_rd   = 0;
+    uint32_t s_num_ndp_db_wr   = 0;
+
+    // ============ NDP CAS Instrumentation (per-segment BLP & RW Switch) ============
+    struct NdpCasSegStats {
+      int seg_id = -1;
+      int pch_id = -1;
+
+      // RD/WR switch tracking
+      uint32_t ndp_dram_rd_cnt = 0;
+      uint32_t ndp_dram_wr_cnt = 0;
+      uint32_t rw_switch_cnt = 0;
+      int last_cas_type = -1;            // 0=RD, 1=WR, -1=none
+
+      // Per-BG CAS count
+      std::array<uint32_t, 8> per_bg_cas_cnt = {};
+
+      // Consecutive same-BG tracking
+      uint32_t consec_same_bg_pairs = 0; // total count of back-to-back same-BG CAS
+      uint32_t max_consec_same_bg = 0;   // max streak of consecutive same-BG
+      uint32_t cur_consec_same_bg = 0;   // current streak (1 = no repeat yet)
+      int last_bg = -1;
+
+      // BLP tracking (how many BGs have pending NDP reqs at each CAS issue)
+      uint64_t blp_sum = 0;
+      uint32_t blp_sample_cnt = 0;
+      std::array<uint32_t, 9> blp_histogram = {};  // [0..8]
+
+      // PRE/ACT count tracking per segment
+      uint32_t pre_cnt = 0;   // PRE commands issued in this segment
+      uint32_t act_cnt = 0;   // ACT commands issued in this segment
+
+      // Bank occupancy tracking (banks with >= 1 NDP request at each CAS issue)
+      uint64_t occupied_bank_sum = 0;      // sum of occupied bank counts
+      uint32_t occupied_bank_sample_cnt = 0; // number of samples
+
+      void reset(int sid, int pid) {
+        *this = NdpCasSegStats{};
+        seg_id = sid;
+        pch_id = pid;
+      }
+    };
+
+    // Per-pCH live counters (reset at each segment boundary)
+    std::vector<NdpCasSegStats> m_cur_seg_stats;
+    // Completed segment stats
+    std::vector<std::vector<NdpCasSegStats>> m_completed_seg_stats;
+    // Per-pCH per-BG pending NDP request counter (for O(8) BLP measurement)
+    std::vector<std::array<int, 8>> m_ndp_pending_per_bg;  // [pch][bg]
+    // ============ End NDP CAS Instrumentation ============
 
     uint32_t m_prev_num_cmd = 0;
     uint32_t m_prev_num_rd = 0;
@@ -519,6 +567,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       
       num_ndp_wr_req_per_pch.resize(num_pseudochannel,0);
       num_ndp_rd_req_per_pch.resize(num_pseudochannel,0);
+
+      // NDP CAS Instrumentation init
+      m_cur_seg_stats.resize(num_pseudochannel);
+      m_completed_seg_stats.resize(num_pseudochannel);
+      m_ndp_pending_per_bg.resize(num_pseudochannel);
+      for (int i = 0; i < num_pseudochannel; i++) {
+        m_cur_seg_stats[i].reset(0, i);
+        m_ndp_pending_per_bg[i].fill(0);
+      }
 
       m_num_read_req.resize(num_pseudochannel,0);
       m_num_write_req.resize(num_pseudochannel,0);      
@@ -823,7 +880,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             num_ndp_wr_req++;
             num_ndp_wr_req_per_pch[req.addr_vec[psuedo_ch_idx]]++;
             num_ndp_total_wr_req++;
-          }          
+          }
+          // BLP counter: increment per-BG pending count on NDP DRAM request enqueue
+          if (!m_dram->is_ndp_access(req.addr_vec)) {
+            int pch = req.addr_vec[psuedo_ch_idx];
+            int bg  = req.addr_vec[bankgroup_idx];
+            m_ndp_pending_per_bg[pch][bg]++;
+          }
         }
 
         // int flat_bank_id = req.addr_vec[bank_idx] + req.addr_vec[bankgroup_idx] * num_bank + req.addr_vec[psuedo_ch_idx] * num_bankgroup*num_bank;
@@ -1442,7 +1505,57 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         if(req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA)                s_num_ndp_dram_rd++;
         if(req_it->command == m_cmds.NDP_DRAM_WR || req_it->command == m_cmds.NDP_DRAM_WRA)                s_num_ndp_dram_wr++;
         if(req_it->command == m_cmds.NDP_DB_RD)                                                            s_num_ndp_db_rd++;
-        if(req_it->command == m_cmds.NDP_DB_WR)                                                            s_num_ndp_db_wr++;              
+        if(req_it->command == m_cmds.NDP_DB_WR)                                                            s_num_ndp_db_wr++;
+
+        // ===== NDP CAS Instrumentation: record per-segment stats =====
+        if (req_it->command == m_cmds.NDP_DRAM_RD  || req_it->command == m_cmds.NDP_DRAM_RDA ||
+            req_it->command == m_cmds.NDP_DRAM_WR  || req_it->command == m_cmds.NDP_DRAM_WRA) {
+          int pch = req_it->addr_vec[psuedo_ch_idx];
+          int bg  = req_it->addr_vec[bankgroup_idx];
+          auto& ss = m_cur_seg_stats[pch];
+
+          // 1) RD/WR count + switch detection
+          bool is_rd = (req_it->command == m_cmds.NDP_DRAM_RD || req_it->command == m_cmds.NDP_DRAM_RDA);
+          int cas_type = is_rd ? 0 : 1;
+          if (is_rd) ss.ndp_dram_rd_cnt++;
+          else       ss.ndp_dram_wr_cnt++;
+          if (ss.last_cas_type != -1 && ss.last_cas_type != cas_type)
+            ss.rw_switch_cnt++;
+          ss.last_cas_type = cas_type;
+
+          // 2) Per-BG CAS count
+          if (bg >= 0 && bg < 8) ss.per_bg_cas_cnt[bg]++;
+
+          // 3) Consecutive same-BG tracking
+          if (ss.last_bg == bg) {
+            ss.cur_consec_same_bg++;
+            ss.consec_same_bg_pairs++;
+          } else {
+            if (ss.cur_consec_same_bg > ss.max_consec_same_bg)
+              ss.max_consec_same_bg = ss.cur_consec_same_bg;
+            ss.cur_consec_same_bg = 1;
+          }
+          ss.last_bg = bg;
+
+          // 4) BLP: count BGs with pending NDP DRAM requests (O(8) using counter)
+          int active_bgs = 0;
+          for (int g = 0; g < 8 && g < num_bankgroup; g++) {
+            if (m_ndp_pending_per_bg[pch][g] > 0) active_bgs++;
+          }
+          ss.blp_sum += active_bgs;
+          ss.blp_sample_cnt++;
+          if (active_bgs >= 0 && active_bgs <= 8) ss.blp_histogram[active_bgs]++;
+
+          // 5) Bank occupancy: count banks with >= 1 NDP request in this pCH
+          int occupied_banks = 0;
+          int pch_bank_base = pch * num_bankgroup * num_bank;
+          for (int b = 0; b < num_bankgroup * num_bank; b++) {
+            if (m_ndp_access_cnt_per_bank[pch_bank_base + b] > 0) occupied_banks++;
+          }
+          ss.occupied_bank_sum += occupied_banks;
+          ss.occupied_bank_sample_cnt++;
+        }
+        // ===== End NDP CAS Instrumentation =====              
 
         if(req_it->command == m_cmds.RD || req_it->command == m_cmds.RDA || req_it->command == m_cmds.POST_RD) s_num_issue_reads++;
         if(req_it->command == m_cmds.WR || req_it->command == m_cmds.WRA || req_it->command == m_cmds.PRE_WR)  s_num_issue_writes++;
@@ -1535,8 +1648,24 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           }
         }
 
+        // ===== NDP CAS Instrumentation: track PRE/ACT per segment =====
+        if (req_it->command == m_cmds.ACT) {
+          int pch = req_it->addr_vec[psuedo_ch_idx];
+          m_cur_seg_stats[pch].act_cnt++;
+        }
+        else if (req_it->command == m_cmds.PRE) {
+          int pch = req_it->addr_vec[psuedo_ch_idx];
+          m_cur_seg_stats[pch].pre_cnt++;
+        }
+        else if (req_it->command == m_cmds.PREA) {
+          int pch = req_it->addr_vec[psuedo_ch_idx];
+          int total_banks = num_bankgroup * num_bank;
+          m_cur_seg_stats[pch].pre_cnt += total_banks;
+        }
+        // ===== End PRE/ACT tracking =====
+
         // If we are issuing the last command, set depart clock cycle and move the request to the pending queue
-        if (req_it->command == req_it->final_command) {          
+        if (req_it->command == req_it->final_command) {
           if(req_it->is_ndp_req) {
             if(req_it->type_id == Request::Type::Read) {
               num_ndp_rd_req--;
@@ -1545,7 +1674,15 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             else {
               num_ndp_wr_req--;
               num_ndp_wr_req_per_pch[req_it->addr_vec[psuedo_ch_idx]]--;
-            }                                       
+            }
+            // BLP counter: decrement per-BG pending count on NDP DRAM final command issue
+            if (req_it->command == m_cmds.NDP_DRAM_RD  || req_it->command == m_cmds.NDP_DRAM_RDA ||
+                req_it->command == m_cmds.NDP_DRAM_WR  || req_it->command == m_cmds.NDP_DRAM_WRA) {
+              int pch = req_it->addr_vec[psuedo_ch_idx];
+              int bg  = req_it->addr_vec[bankgroup_idx];
+              if (m_ndp_pending_per_bg[pch][bg] > 0)
+                m_ndp_pending_per_bg[pch][bg]--;
+            }
           }
           if(req_it->is_host_req) {
           if(req_it->command == m_cmds.RD      || req_it->command == m_cmds.RDA || 
@@ -2473,10 +2610,104 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
         std::cout<<"Average NDP Queue Request "<<std::endl;
         for(int i=0;i<num_pseudochannel;i++) {
           std::cout<<"["<<i<<"] "<<((float)m_avg_rd_ndp_que_req[i]/(float)m_clk)<<" / "
-                                 <<((float)m_avg_wr_ndp_que_req[i]/(float)m_clk)<<std::endl;        
-        }        
+                                 <<((float)m_avg_wr_ndp_que_req[i]/(float)m_clk)<<std::endl;
+        }
 
-        
+        // ===== NDP CAS Instrumentation Report (per-segment BLP & RW Switch) =====
+        std::cout << "\n=== NDP CAS Instrumentation Report (Channel " << m_channel_id << ") ===" << std::endl;
+        for (int pch = 0; pch < num_pseudochannel; pch++) {
+          // Flush current segment if it has data
+          notify_segment_boundary(pch, -1);
+          auto& segs = m_completed_seg_stats[pch];
+          if (segs.empty()) continue;
+          std::cout << "\n--- PCH[" << pch << "] (" << segs.size() << " segments) ---" << std::endl;
+          std::cout << "  Seg | RD_CAS | WR_CAS | RW_sw | AvgBLP |"
+                    << " BG[0:7] CAS distribution          |"
+                    << " MaxSameBG | SameBGPairs |"
+                    << "   PRE |   ACT | AvgOccBk" << std::endl;
+          std::cout << "------+--------+--------+-------+--------+"
+                    << "-------------------------------------+"
+                    << "-----------+-------------+"
+                    << "-------+-------+---------" << std::endl;
+          for (auto& s : segs) {
+            float avg_blp = (s.blp_sample_cnt > 0) ? (float)s.blp_sum / s.blp_sample_cnt : 0;
+            float avg_occ_bk = (s.occupied_bank_sample_cnt > 0) ? (float)s.occupied_bank_sum / s.occupied_bank_sample_cnt : 0;
+            std::cout << std::setw(5) << s.seg_id << " |"
+                      << std::setw(7) << s.ndp_dram_rd_cnt << " |"
+                      << std::setw(7) << s.ndp_dram_wr_cnt << " |"
+                      << std::setw(6) << s.rw_switch_cnt << " |"
+                      << std::fixed << std::setprecision(2) << std::setw(7) << avg_blp << " |";
+            for (int g = 0; g < 8; g++)
+              std::cout << std::setw(4) << s.per_bg_cas_cnt[g];
+            std::cout << "   |"
+                      << std::setw(10) << s.max_consec_same_bg << " |"
+                      << std::setw(11) << s.consec_same_bg_pairs << " |"
+                      << std::setw(6) << s.pre_cnt << " |"
+                      << std::setw(6) << s.act_cnt << " |"
+                      << std::fixed << std::setprecision(2) << std::setw(8) << avg_occ_bk
+                      << std::endl;
+          }
+          // BLP histogram summary across all segments
+          std::cout << "  BLP histogram (all segs): ";
+          std::array<uint32_t, 9> total_blp_hist = {};
+          for (auto& s : segs)
+            for (int i = 0; i <= 8; i++) total_blp_hist[i] += s.blp_histogram[i];
+          for (int i = 0; i <= 8; i++) {
+            if (total_blp_hist[i] > 0)
+              std::cout << "[" << i << "]=" << total_blp_hist[i] << " ";
+          }
+          std::cout << std::endl;
+          // Summary: average across RD vs WR segments
+          uint32_t rd_segs = 0, wr_segs = 0;
+          float rd_avg_blp_sum = 0, wr_avg_blp_sum = 0;
+          uint32_t rd_same_bg = 0, wr_same_bg = 0;
+          uint32_t rd_total_cas = 0, wr_total_cas = 0;
+          uint32_t rd_total_pre = 0, wr_total_pre = 0;
+          uint32_t rd_total_act = 0, wr_total_act = 0;
+          float rd_avg_occ_bk_sum = 0, wr_avg_occ_bk_sum = 0;
+          for (auto& s : segs) {
+            if (s.ndp_dram_wr_cnt == 0 && s.ndp_dram_rd_cnt > 0) {
+              rd_segs++;
+              rd_avg_blp_sum += (s.blp_sample_cnt > 0) ? (float)s.blp_sum / s.blp_sample_cnt : 0;
+              rd_same_bg += s.consec_same_bg_pairs;
+              rd_total_cas += s.ndp_dram_rd_cnt;
+              rd_total_pre += s.pre_cnt;
+              rd_total_act += s.act_cnt;
+              rd_avg_occ_bk_sum += (s.occupied_bank_sample_cnt > 0) ? (float)s.occupied_bank_sum / s.occupied_bank_sample_cnt : 0;
+            } else if (s.ndp_dram_rd_cnt == 0 && s.ndp_dram_wr_cnt > 0) {
+              wr_segs++;
+              wr_avg_blp_sum += (s.blp_sample_cnt > 0) ? (float)s.blp_sum / s.blp_sample_cnt : 0;
+              wr_same_bg += s.consec_same_bg_pairs;
+              wr_total_cas += s.ndp_dram_wr_cnt;
+              wr_total_pre += s.pre_cnt;
+              wr_total_act += s.act_cnt;
+              wr_avg_occ_bk_sum += (s.occupied_bank_sample_cnt > 0) ? (float)s.occupied_bank_sum / s.occupied_bank_sample_cnt : 0;
+            }
+          }
+          std::cout << "  RD segs: " << rd_segs
+                    << ", avg BLP=" << std::fixed << std::setprecision(2)
+                    << (rd_segs > 0 ? rd_avg_blp_sum / rd_segs : 0)
+                    << ", total CAS=" << rd_total_cas
+                    << ", same-BG pairs=" << rd_same_bg
+                    << " (" << std::setprecision(1) << (rd_total_cas > 0 ? 100.0f * rd_same_bg / rd_total_cas : 0) << "%)"
+                    << ", total PRE=" << rd_total_pre
+                    << ", total ACT=" << rd_total_act
+                    << ", avg OccBk=" << std::setprecision(2) << (rd_segs > 0 ? rd_avg_occ_bk_sum / rd_segs : 0)
+                    << std::endl;
+          std::cout << "  WR segs: " << wr_segs
+                    << ", avg BLP=" << std::fixed << std::setprecision(2)
+                    << (wr_segs > 0 ? wr_avg_blp_sum / wr_segs : 0)
+                    << ", total CAS=" << wr_total_cas
+                    << ", same-BG pairs=" << wr_same_bg
+                    << " (" << std::setprecision(1) << (wr_total_cas > 0 ? 100.0f * wr_same_bg / wr_total_cas : 0) << "%)"
+                    << ", total PRE=" << wr_total_pre
+                    << ", total ACT=" << wr_total_act
+                    << ", avg OccBk=" << std::setprecision(2) << (wr_segs > 0 ? wr_avg_occ_bk_sum / wr_segs : 0)
+                    << std::endl;
+        }
+        std::cout << "=== End NDP CAS Instrumentation Report ===\n" << std::endl;
+        // ===== End NDP CAS Instrumentation Report =====
+
       return;
     }
 
@@ -2545,6 +2776,19 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       if(num_ndp_rd_req_per_pch[pch_idx] == 0 && num_ndp_wr_req_per_pch[pch_idx] == 0 && pending_ndp_req_empth) return true;
       else                                                                                                      return false;
     }    
+
+    void notify_segment_boundary(int pch_idx, int seg_id) override {
+      auto& ss = m_cur_seg_stats[pch_idx];
+      // Finalize current consecutive same-BG streak
+      if (ss.cur_consec_same_bg > ss.max_consec_same_bg)
+        ss.max_consec_same_bg = ss.cur_consec_same_bg;
+      // Save completed segment stats (only if any NDP CAS was issued)
+      if (ss.ndp_dram_rd_cnt > 0 || ss.ndp_dram_wr_cnt > 0) {
+        m_completed_seg_stats[pch_idx].push_back(ss);
+      }
+      // Reset for next segment
+      m_cur_seg_stats[pch_idx].reset(seg_id, pch_idx);
+    }
 
     int get_config_reg_resp(int pch_idx) override {
 
@@ -2649,13 +2893,13 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
             // Check total NDP read requests (NDP_DB_RD + NDP_DRAM_RD)
             size_t ndp_rd_req = m_num_db_rd_cnts[psuedo_ch_idx] +  m_num_dram_rd_cnts[psuedo_ch_idx];
             bool enable_bk_lvl = ((ndp_rd_req < abs_max_ndp_reqs)) &&
-                                 ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] == 0 < m_ndp_req_per_bank)); 
+                                 ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] < m_ndp_req_per_bank));
               return ndp_rd_req < m_max_ndp_read_reqs[psuedo_ch_idx] || enable_bk_lvl;
           } else if (req.type_id == Request::Type::Write) {
               // Check total NDP write requests (NDP_DB_WR + NDP_DRAM_WR)
               size_t ndp_wr_req = m_num_db_wr_cnts[psuedo_ch_idx] +  m_num_dram_wr_cnts[psuedo_ch_idx];
               bool enable_bk_lvl = ((ndp_wr_req < abs_max_ndp_reqs)) &&
-                                   ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] == 0 < m_ndp_req_per_bank));
+                                   ((m_host_access_cnt_per_bank[flat_bk_idx] == 0) && (m_ndp_access_cnt_per_bank[flat_bk_idx] < m_ndp_req_per_bank));
               return ndp_wr_req < m_max_ndp_write_reqs[psuedo_ch_idx] || enable_bk_lvl;
           }
         } 

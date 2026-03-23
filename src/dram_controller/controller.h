@@ -60,6 +60,9 @@ class IDRAMController : public Clocked<IDRAMController> {
     virtual uint64_t get_req_latency() = 0;
     virtual uint64_t get_iss_counter() { return 0; }
     virtual uint64_t get_rec_counter() { return 0; }
+
+    // Notify controller of HSNC segment boundary (for per-segment NDP CAS analysis)
+    virtual void notify_segment_boundary(int pch_idx, int seg_id) {}
 };
 
 }       // namespace Ramulator

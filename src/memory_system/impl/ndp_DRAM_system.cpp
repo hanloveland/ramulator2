@@ -6,6 +6,7 @@
 #include <filesystem>
 #include <iostream>
 #include <fstream>
+#include <iomanip>
 
 // #define NDP_DEBUG
 #define DIMM_LVL_BUF
@@ -132,10 +133,38 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     bool                                                  all_nl_req_buffer_empty;
 
 
+    // HSNC Segment Tracking (per DIMM × pCH)
+    // Tracks cycle counts for each RUN→BAR segment from the host-side NDP controller
+    enum class HsncSegType { RD, WR, WAIT, UNKNOWN };
+    struct HsncSegment {
+      int         seg_id;
+      HsncSegType type;
+      Clk_t       run_start;     // cycle when NDP_RUN entered (fetch phase begins)
+      Clk_t       drain_start;   // cycle when NDP_BAR/NDP_WAIT/NDP_DONE entered (drain/wait phase)
+      Clk_t       end;           // cycle when drain complete (BAR→RUN or DONE→IDLE)
+    };
+    // Completed segments: hsnc_segments[dimm_id][pch_id]
+    std::vector<std::vector<std::vector<HsncSegment>>>    hsnc_segments;
+    // Current segment being tracked: hsnc_cur_seg[dimm_id][pch_id]
+    std::vector<std::vector<HsncSegment>>                 hsnc_cur_seg;
+    // Whether tracking is active: hsnc_seg_tracking[dimm_id][pch_id]
+    std::vector<std::vector<bool>>                        hsnc_seg_tracking;
+    // Segment counter: hsnc_seg_cnt[dimm_id][pch_id]
+    std::vector<std::vector<int>>                         hsnc_seg_cnt;
+
+    static const char* hsnc_seg_type_str(HsncSegType t) {
+      switch(t) {
+        case HsncSegType::RD:      return "RD";
+        case HsncSegType::WR:      return "WR";
+        case HsncSegType::WAIT:    return "WAIT";
+        default:                   return "UNKNOWN";
+      }
+    }
+
     #ifdef PCH_DEBUG
     std::vector<std::vector<std::vector<AccInst_Slot>>>   pch_lvl_history;
     int                                                   pch_lvl_history_max;
-    #endif 
+    #endif
     /* Deprecated variable
     std::vector<AccInst_Slot>          ndp_access_infos;
     NDP_CTRL_STATUS                    ndp_ctrl_status;
@@ -424,8 +453,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       pch_lvl_hsnc_nl_addr_gen_wait_cycle.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,-1));    
       pch_lvl_hsnc_nl_addr_empty_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
       pch_lvl_hsnc_nl_addr_wait_cnt.resize(m_num_dimm,std::vector<int>(m_num_subch*num_pseudochannel,0));     
-      pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<size_t>>(m_num_subch*num_pseudochannel,std::vector<size_t>(8,0)));     
-          
+      pch_hsnc_status_cnt.resize(m_num_dimm,std::vector<std::vector<size_t>>(m_num_subch*num_pseudochannel,std::vector<size_t>(8,0)));
+
+      // HSNC Segment Tracking init
+      int total_pch_per_dimm = m_num_subch * num_pseudochannel;
+      hsnc_segments.resize(m_num_dimm, std::vector<std::vector<HsncSegment>>(total_pch_per_dimm));
+      hsnc_cur_seg.resize(m_num_dimm, std::vector<HsncSegment>(total_pch_per_dimm, {0, HsncSegType::UNKNOWN, 0, 0, 0}));
+      hsnc_seg_tracking.resize(m_num_dimm, std::vector<bool>(total_pch_per_dimm, false));
+      hsnc_seg_cnt.resize(m_num_dimm, std::vector<int>(total_pch_per_dimm, 0));
+
       #ifdef PCH_DEBUG      
       pch_lvl_history.resize(m_num_dimm,std::vector<std::vector<AccInst_Slot>>(m_num_subch*num_pseudochannel,std::vector<AccInst_Slot>(0,AccInst_Slot())));
       pch_lvl_history_max = 32;
@@ -715,6 +751,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             if(m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)) {
               pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_BEFORE_RUN to NDP_RUN");
+              // Segment tracking: start first segment
+              hsnc_cur_seg[dimm_id][pch_id] = {hsnc_seg_cnt[dimm_id][pch_id], HsncSegType::UNKNOWN, m_clk, 0, 0};
+              hsnc_seg_tracking[dimm_id][pch_id] = true;
             }
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BEFORE_RUN]++;
           } // NDP Status: NDP_BEFORE_RUN END
@@ -739,21 +778,33 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               pch_lvl_history[dimm_id][pch_id].push_back(nl_req);                 
               #endif
 
-              // NDP Status Transition 
+              // NDP Status Transition
               if(nl_req.opcode == m_ndp_access_inst_op.at("BAR")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_BAR;
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_BAR");
+                // Segment tracking: RUN → BAR (drain phase begins)
+                if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                  hsnc_cur_seg[dimm_id][pch_id].drain_start = m_clk;
+                }
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("WAIT_RES")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT_RES;
-                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT_RES");                
+                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT_RES");
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("WAIT")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT;
                 pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = 0;
-                pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = nl_req.etc;              
-                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT");                
+                pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = nl_req.etc;
+                DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_WAIT");
+                // Segment tracking: RUN → WAIT (end current RD/WR segment, start WAIT segment)
+                if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                  hsnc_cur_seg[dimm_id][pch_id].drain_start = m_clk;
+                }
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("DONE")) {
                 pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_DONE;
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_RUN to NDP_DONE");
+                // Segment tracking: RUN → DONE (final drain)
+                if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                  hsnc_cur_seg[dimm_id][pch_id].drain_start = m_clk;
+                }
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("LOOP_START")) {
                 throw std::runtime_error("LOOP_START Not Implemented!!");
               } else if(nl_req.opcode == m_ndp_access_inst_op.at("LOOP_END")) {
@@ -769,8 +820,13 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                   std::cout<<" nl_req.pch :"<<nl_req.pch<<std::endl;
                   std::cout<<std::hex<<pch_lvl_hsnc_nl_req_slot[dimm_id][pch_id][0]<<std::endl;
                   throw std::runtime_error("Miss pch_idx");
-                }                
-                pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].push_back(nl_req);                
+                }
+                pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].push_back(nl_req);
+                // Segment tracking: determine type from AccInst opcode
+                if (hsnc_seg_tracking[dimm_id][pch_id] && hsnc_cur_seg[dimm_id][pch_id].type == HsncSegType::UNKNOWN) {
+                  hsnc_cur_seg[dimm_id][pch_id].type =
+                    (nl_req.opcode == m_ndp_access_inst_op.at("WR")) ? HsncSegType::WR : HsncSegType::RD;
+                }
               } else {
                 throw std::runtime_error("Invalid NDP-Lanuch Request Opcode!!");                
               }           
@@ -786,8 +842,17 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() == 0 && m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)) {
               pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_BAR to NDP_RUN");
+              // Segment tracking: BAR → RUN (end segment, start new)
+              if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                hsnc_cur_seg[dimm_id][pch_id].end = m_clk;
+                hsnc_segments[dimm_id][pch_id].push_back(hsnc_cur_seg[dimm_id][pch_id]);
+                hsnc_seg_cnt[dimm_id][pch_id]++;
+                // Notify controller of segment boundary for NDP CAS instrumentation
+                m_controllers[ch_id]->notify_segment_boundary(pch_id_per_subch, hsnc_seg_cnt[dimm_id][pch_id]);
+                hsnc_cur_seg[dimm_id][pch_id] = {hsnc_seg_cnt[dimm_id][pch_id], HsncSegType::UNKNOWN, m_clk, 0, 0};
+              }
             }
-            
+
             // send NDP Request from NDP-lanuch Request and send to read/write queue of memory controller
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BAR]++;
@@ -822,6 +887,16 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                     pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id] = -1;
                     pch_lvl_hsnc_nl_addr_gen_wait_cycle[dimm_id][pch_id] = -1;
                     pch_lvl_polling[dimm_id][pch_id] = false;
+                    // Segment tracking: WAIT → RUN (end WAIT segment, start new)
+                    if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                      hsnc_cur_seg[dimm_id][pch_id].type = HsncSegType::WAIT;
+                      hsnc_cur_seg[dimm_id][pch_id].end = m_clk;
+                      hsnc_segments[dimm_id][pch_id].push_back(hsnc_cur_seg[dimm_id][pch_id]);
+                      hsnc_seg_cnt[dimm_id][pch_id]++;
+                      // Notify controller of segment boundary for NDP CAS instrumentation
+                      m_controllers[ch_id]->notify_segment_boundary(pch_id_per_subch, hsnc_seg_cnt[dimm_id][pch_id]);
+                      hsnc_cur_seg[dimm_id][pch_id] = {hsnc_seg_cnt[dimm_id][pch_id], HsncSegType::UNKNOWN, m_clk, 0, 0};
+                    }
                   } else {
                     // Need more time for NDP unit to issue new request and reset pch_lvl_polling to false
                     // std::cout<<"["<<m_clk<<"] HSNC NDP is not Ready (reissue NDP RD CONF REG)"<<dimm_id<<"/ "<<pch_id<<std::endl;
@@ -859,8 +934,17 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() == 0 && m_controllers[ch_id]->is_empty_ndp_req(pch_id_per_subch)) {
               pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_IDLE;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_DONE to NDP_IDLE");
+              // Segment tracking: DONE → IDLE (end final segment)
+              if (hsnc_seg_tracking[dimm_id][pch_id]) {
+                hsnc_cur_seg[dimm_id][pch_id].end = m_clk;
+                hsnc_segments[dimm_id][pch_id].push_back(hsnc_cur_seg[dimm_id][pch_id]);
+                hsnc_seg_cnt[dimm_id][pch_id]++;
+                // Notify controller of segment boundary for NDP CAS instrumentation
+                m_controllers[ch_id]->notify_segment_boundary(pch_id_per_subch, hsnc_seg_cnt[dimm_id][pch_id]);
+                hsnc_seg_tracking[dimm_id][pch_id] = false;
+              }
             }
-            
+
             // send NDP Request from NDP-lanuch Request and send to read/write queue of memory controller
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_DONE]++;
@@ -1206,25 +1290,30 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         }
       }          
       int tCK_ps = m_dram->m_timing_vals("tCK_ps");
-      // ---- Main window ----
+      // Separate main window = total - tcore (counters[0..5] include tcore)
+      std::vector<uint64_t> main_counters(6, 0);
+      for (int i = 0; i < 6; i++)
+        main_counters[i] = counters[i] - counters[i + 6];
+
+      // ---- Main window (non-tcore only) ----
       std::cout << "[Main window]\n";
       print_bw("Host<->DB",
-          calc_bw_gbs(counters[0]+counters[1]+counters[2], 1.0, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[0]+main_counters[1]+main_counters[2], 1.0, m_clk, tCK_ps));
       print_bw("Host<->DB HOST",
-          calc_bw_gbs(counters[0], 1.0, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[0], 1.0, m_clk, tCK_ps));
       print_bw("Host<->DB D2PA",
-          calc_bw_gbs(counters[1], 1.0, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[1], 1.0, m_clk, tCK_ps));
       print_bw("Host<->DB NDP",
-          calc_bw_gbs(counters[2], 1.0, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[2], 1.0, m_clk, tCK_ps));
 
       print_bw("DB<->DRAM",
-          calc_bw_gbs(counters[3]+counters[4]+counters[5], dq_scaling, m_clk, tCK_ps));          
+          calc_bw_gbs(main_counters[3]+main_counters[4]+main_counters[5], dq_scaling, m_clk, tCK_ps));
       print_bw("DB<->DRAM HOST",
-          calc_bw_gbs(counters[3], dq_scaling, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[3], dq_scaling, m_clk, tCK_ps));
       print_bw("DB<->DRAM D2PA",
-          calc_bw_gbs(counters[4], dq_scaling, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[4], dq_scaling, m_clk, tCK_ps));
       print_bw("DB<->DRAM NDP",
-          calc_bw_gbs(counters[5], dq_scaling, m_clk, tCK_ps));
+          calc_bw_gbs(main_counters[5], dq_scaling, m_clk, tCK_ps));
 
       // ---- tcore window ----
       std::cout << "\n[tcore window]\n";
@@ -1248,9 +1337,59 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       std::cout << std::endl;
 
-      report();    
+      // HSNC Segment Tracking Report
+      double tCK_ns = (double)tCK_ps / 1000.0;
+      std::cout<<"\n=== HSNC Segment Tracking Report (Host-side NDP Controller) ==="<<std::endl;
+      for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+        for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+          auto& segs = hsnc_segments[dimm_id][pch_id];
+          if (segs.empty()) continue;
+          std::cout<<"\n--- DIMM["<<dimm_id<<"] PCH["<<pch_id<<"] ("<<segs.size()<<" segments) ---"<<std::endl;
+          std::cout<<"  Seg | Type    |  RunStart  | DrainStart |    SegEnd  |  Total | Fetch | Drain"<<std::endl;
+          std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
 
-    }    
+          Clk_t total_rd_cycles = 0, total_wr_cycles = 0, total_wait_cycles = 0;
+          int rd_cnt = 0, wr_cnt = 0, wait_cnt = 0;
+
+          for (auto& s : segs) {
+            Clk_t total  = s.end - s.run_start;
+            Clk_t fetch  = (s.drain_start > 0) ? (s.drain_start - s.run_start) : total;
+            Clk_t drain  = (s.drain_start > 0) ? (s.end - s.drain_start) : 0;
+            std::cout<<"  "<<std::setw(3)<<s.seg_id<<" | "
+                     <<std::setw(7)<<std::left<<hsnc_seg_type_str(s.type)<<std::right<<" | "
+                     <<std::setw(10)<<s.run_start<<" | "
+                     <<std::setw(10)<<((s.drain_start > 0) ? std::to_string(s.drain_start) : "-")<<" | "
+                     <<std::setw(9)<<s.end<<" | "
+                     <<std::setw(6)<<total<<" | "
+                     <<std::setw(5)<<fetch<<" | "
+                     <<std::setw(5)<<drain
+                     <<std::endl;
+            switch(s.type) {
+              case HsncSegType::RD:   total_rd_cycles += total; rd_cnt++; break;
+              case HsncSegType::WR:   total_wr_cycles += total; wr_cnt++; break;
+              case HsncSegType::WAIT: total_wait_cycles += total; wait_cnt++; break;
+              default: break;
+            }
+          }
+          std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
+          Clk_t first_start = segs.front().run_start;
+          Clk_t last_end = segs.back().end;
+          Clk_t total_span = last_end - first_start;
+          std::cout<<"  Total NDP span: "<<total_span<<" cycles ("
+                   <<(double)total_span * tCK_ns<<" ns)"<<std::endl;
+          if (rd_cnt > 0)
+            std::cout<<"  RD segments:   "<<rd_cnt<<" segs, "<<total_rd_cycles<<" cycles (avg "<<(total_rd_cycles/rd_cnt)<<")"<<std::endl;
+          if (wr_cnt > 0)
+            std::cout<<"  WR segments:   "<<wr_cnt<<" segs, "<<total_wr_cycles<<" cycles (avg "<<(total_wr_cycles/wr_cnt)<<")"<<std::endl;
+          if (wait_cnt > 0)
+            std::cout<<"  WAIT segments: "<<wait_cnt<<" segs, "<<total_wait_cycles<<" cycles (avg "<<(total_wait_cycles/wait_cnt)<<")"<<std::endl;
+        }
+      }
+      std::cout<<"=== End HSNC Segment Tracking Report ===\n"<<std::endl;
+
+      report();
+
+    }
 
     // Copy Structure within loadstore_ncore_trace.cpp
     void load_trace(const std::string& file_path_str, std::vector<Trace>& trace_vec) {

@@ -3,12 +3,9 @@ Frontend:
   clock_ratio: 1
   num_cores: 1
   debug_mode: false
-  # max_inst: 500000000
-  max_inst: 5000
-  
+  max_inst: 5000000
 
-  core0_trace: "../spec_trace/401.bzip2"
-  # core0_trace: "./trace_single_bk/asyncdimm_nma/asyncdimm_nma_512K_DOT.txt"
+  core0_trace: "trace_asyncdimm/empty_trace.txt"
   core0_mshr_size: 32
   core0_is_ndp_trace: false
   core0_repeat: 1
@@ -20,19 +17,12 @@ Frontend:
 MemorySystem:
   impl: AsyncDIMM
   clock_ratio: 1
-  debug_fsm_sync: false  # Set true to verify NMA MC shadow FSM sync every cycle
+  debug_fsm_sync: false
   debug_mode: false
-  # NMA trace configuration (uncomment for NMA Mode testing)
-  concurrent_mode_enable: true
-  # H/N Arbiter fairness (concurrent mode only)
-  hn_cmd_service_interval: 16   # (A) REQ ticks before forced CMD switch (0=disabled)
-  hn_cmd_service_quota: 4       # (A) Minimum CMD ticks per forced switch
-  hn_req_continuous_cap: 8      # (C) REQ consecutive service cap (0=disabled)
   trace_core_enable: true
   trace_nma_type: true
-  trace_core_mshr_size: 32
-  trace_repeat: 0
-  trace_path: "./trace_single_bk/asyncdimm_nma/asyncdimm_nma_128K_GEMV.txt"
+  trace_core_mshr_size: 16
+  trace_path: "trace_asyncdimm/asyncdimm_nma_8M_COPY.txt"
 
   DRAM:
     impl: DDR5-AsyncDIMM
@@ -49,7 +39,7 @@ MemorySystem:
     voltage:
       preset: Default
     current:
-      preset: DDR5_4800x4    
+      preset: DDR5_4800x4
 
   Controller:
     impl: AsyncDIMMHost
