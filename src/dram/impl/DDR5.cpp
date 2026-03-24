@@ -1,7 +1,7 @@
 #include "dram/dram.h"
 #include "dram/lambdas.h"
 
-#define DEBUG_POWER
+// #define DEBUG_POWER
 
 namespace Ramulator {
 

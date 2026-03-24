@@ -3,7 +3,7 @@
 #include <iomanip>
 
 // #define PRINT_DEBUG
-#define DEBUG_POWER
+// #define DEBUG_POWER
 
 #ifdef PRINT_DEBUG
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] CH["<<ch<<"] PCH["<<pch<<"]"<<msg<<std::endl; } while(0)
@@ -11,7 +11,7 @@
 #define DEBUG_PRINT(clk, unit_str, ch, pch, msg) do {} while(0)
 #endif
 
-#define PCH_DEBUG
+// #define PCH_DEBUG
 
 namespace Ramulator {
 

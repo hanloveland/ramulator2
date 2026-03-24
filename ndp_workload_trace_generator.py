@@ -11,6 +11,13 @@ DRAM_SCALING=1
 NUM_DIMM = 1
 NUM_CHANNEL = int(2 * NUM_DIMM)
 NUM_PSEUDOCHANNEL = 4
+
+# Fixed total data size reference: 1 DIMM baseline
+# input_size labels (8K, 32K, ...) represent per-PCH data for 1 DIMM.
+# total_data = input_size_bytes × BASE_NUM_PCH_PER_DIMM
+# When NUM_DIMM > 1, per-PCH data shrinks proportionally.
+NUM_CH_PER_DIMM = 2
+BASE_NUM_PCH_PER_DIMM = NUM_CH_PER_DIMM * NUM_PSEUDOCHANNEL  # 2 CH × 4 PCH = 8
 NUM_RANK = 4 # Basline DRAM
 NUM_BANKGROUP = 8
 NUM_BANK = 4
@@ -320,7 +327,33 @@ def config_scale_factor(scaling_factor):
         NDP_DAT3_MEM_BG = 3 # BG0-BG3
     else:
         print("Error: Wrong DRAM Type")
-        exit(1)             
+        exit(1)
+
+
+def calc_per_pch_bytes(input_size_label):
+    """Calculate per-PCH byte size for fixed total data.
+
+    input_size labels (8K, 32K, ...) represent per-PCH data for the 1-DIMM baseline.
+    Total data is fixed: input_size_bytes × BASE_NUM_PCH_PER_DIMM (=8 for 1 DIMM).
+    When NUM_DIMM > 1, more PCHs share the same total → per-PCH shrinks.
+
+    Returns per_pch_bytes (int).
+
+    Examples (input_size="8K", per-PCH base = 8192):
+      1 DIMM (8 PCH):  8192 × 8 /  8 = 8192  (unchanged)
+      2 DIMM (16 PCH): 8192 × 8 / 16 = 4096
+      4 DIMM (32 PCH): 8192 × 8 / 32 = 2048
+    """
+    base_bytes = input_size_byte_list[input_size_label]
+    total_data = base_bytes * BASE_NUM_PCH_PER_DIMM
+    actual_num_pch = int(NUM_CHANNEL) * int(NUM_PSEUDOCHANNEL)
+    per_pch_bytes = total_data // actual_num_pch
+    if per_pch_bytes == 0:
+        print(f"Error: per_pch_bytes=0 (total={total_data}, pch={actual_num_pch}). "
+              f"Input size '{input_size_label}' too small for {NUM_DIMM} DIMMs.")
+        exit(1)
+    return per_pch_bytes
+
 
 def encode_address(channel, pseudo_channel, rank, bg, bank, row, col):
     """
@@ -550,6 +583,7 @@ def undirect_row(reg_idx, offset=0):
 
 
 def dump_ndp_acc_inst(f, inst_list):
+    # [UNUSED] Legacy 1D dump — replaced by dump_ndp_acc_inst_per_pch()
     # Generation Write Request for NDP Access Instruction
     num_inst = len(inst_list)
     it = int(num_inst/8)
@@ -567,6 +601,7 @@ def dump_ndp_acc_inst(f, inst_list):
         write_trace(f,'ST',encode_address(0, 0, 0, HSNU_CTR_BUF_BG, HSNU_CTR_BUF_BK, NDP_ROW, it),data_array)
 
 def dump_ndp_acc_inst_2d(f, inst_list, start_col):
+    # [UNUSED] Legacy 2D interleaved dump — replaced by dump_ndp_acc_inst_per_pch()
     # Generation Write Request for NDP Access Instruction
     all_acc_inst_empty = False
     col_addr = start_col
@@ -601,6 +636,7 @@ def dump_ndp_acc_inst_2d(f, inst_list, start_col):
 
 
 def dump_ndp_acc_inst_to_dram(f, acc_inst_list):
+    # [UNUSED] DRAM Spill mode dump — replaced by dump_ndp_acc_inst_per_pch() with desc_store
     """Write AccInst descriptors to DRAM for HSNC prefetch (DRAM Spill mode).
 
     When descriptor count exceeds PCH_DESC_BUFFER_SIZE (64), descriptors are
@@ -698,12 +734,24 @@ def write_ndp_start(f, desc_counts):
 
     Payload per PCH (64-bit): bit[16]=start_flag(1b), bits[15:0]=desc_count.
     Must be called AFTER all AccInst writes.
+
+    Multi-DIMM: issues one NDP Start write per DIMM.
+    C++ side: dimm_id = addr_vec[channel] / 2, so CH 0→DIMM 0, CH 2→DIMM 1, etc.
+    Each DIMM has NUM_CH_PER_DIMM(2) × NUM_PSEUDOCHANNEL(4) = 8 PCHs.
+    desc_counts is ordered as: [CH0_PCH0..3, CH1_PCH0..3, CH2_PCH0..3, ...].
     """
-    data_array = [0] * 8
-    for i, count in enumerate(desc_counts):
-        if count > 0:
-            data_array[i] = (1 << 16) | count   # bit[16]=start, [15:0]=count
-    write_trace(f, 'ST', encode_address(0, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0), data_array)
+    num_pch_per_dimm = int(NUM_CH_PER_DIMM) * int(NUM_PSEUDOCHANNEL)  # 8
+    for dimm_id in range(int(NUM_DIMM)):
+        data_array = [0] * 8
+        base_idx = dimm_id * num_pch_per_dimm
+        for i in range(num_pch_per_dimm):
+            if base_idx + i < len(desc_counts):
+                count = desc_counts[base_idx + i]
+                if count > 0:
+                    data_array[i] = (1 << 16) | count   # bit[16]=start, [15:0]=count
+        # Address with CH belonging to this DIMM (first CH of DIMM)
+        ch_for_dimm = dimm_id * int(NUM_CH_PER_DIMM)
+        write_trace(f, 'ST', encode_address(ch_for_dimm, 0, 0, HSNU_CTR_REG_BG, HSNU_CTR_REG_BK, NDP_ROW, 0), data_array)
 
 
 def dump_ndp_inst(f, inst_list, ch, pch):
@@ -1035,6 +1083,7 @@ def gen_normal_req_from_row_pch(f,start_row,num_req,req_type):
                         break       
                           
 def cal_it(input_size, scaling):
+    # [UNUSED] Legacy iteration calculator — replaced by cal_it_v2()
     if scaling == 4:
         row_size = 8192 * 2
     else:
@@ -1138,7 +1187,86 @@ def cal_it_v2(input_size, scaling):
             iteration = 1
             opsize    = int(opsize / ratio)        
 
-    return iteration, num_working_bg, (opsize - 1)    
+    return iteration, num_working_bg, (opsize - 1)
+
+
+def cal_it_v3(per_pch_bytes, scaling):
+    """Compute iteration, num_working_bg, opsize from per-PCH byte size.
+
+    Same logic as cal_it_v2 but accepts byte size directly instead of a label.
+    This enables fixed total data across different DIMM counts.
+
+    Args:
+        per_pch_bytes: data size in bytes per PCH (from calc_per_pch_bytes)
+        scaling: DRAM scaling factor (1=x4, 2=x8, 4=x16)
+
+    Returns:
+        (iteration, num_working_bg, opsize)
+        opsize is 0-indexed: opsize=N means N+1 column accesses.
+    """
+    if scaling == 4:
+        row_size = 8192 * 2   # x16: 16KB/row
+    else:
+        row_size = 8192        # x4/x8: 8KB/row
+
+    # Max opsize (columns per row)
+    if scaling == 1:
+        opsize = 128           # x4: 128 cols × 64B = 8KB
+    else:
+        opsize = 64            # x8: 64 cols × 128B = 8KB, x16: 64 cols × 256B = 16KB
+
+    vec_size = per_pch_bytes
+
+    # num_working_bg: max BG count for NDP data memory
+    if scaling == 1:
+        num_working_bg = 8
+    elif scaling == 2:
+        num_working_bg = 8
+    elif scaling == 4:
+        num_working_bg = 4
+
+    # Data memory capacity determines iteration vs opsize tradeoff
+    if scaling == 1:
+        # Data Memory 32KB = n_BG × ROW / 2
+        max_size = num_working_bg * row_size // 2
+        if vec_size > max_size:
+            ratio     = vec_size // max_size
+            iteration = ratio
+            opsize    = opsize // 2
+        else:
+            ratio     = max_size // vec_size
+            iteration = 1
+            opsize    = opsize // 2 // ratio
+    elif scaling == 2:
+        # Data Memory 64KB = n_BG × ROW
+        max_size = num_working_bg * row_size
+        if vec_size > max_size:
+            ratio     = vec_size // max_size
+            iteration = ratio
+            opsize    = opsize
+        else:
+            ratio     = max_size // vec_size
+            iteration = 1
+            opsize    = opsize // ratio
+    elif scaling == 4:
+        # Data Memory 64KB = n_BG × ROW (4 BG × 16KB)
+        max_size = num_working_bg * row_size
+        if vec_size > max_size:
+            ratio     = vec_size // max_size
+            iteration = ratio
+            opsize    = opsize
+        else:
+            ratio     = max_size // vec_size
+            iteration = 1
+            opsize    = opsize // ratio
+
+    # Clamp opsize minimum to 1 column access
+    if opsize < 1:
+        opsize = 1
+
+    return iteration, num_working_bg, (opsize - 1)
+
+
 '''
     AXPBY     : Z = aX + bY
     AXPBYPCZ  : W = aX + bB + zZ
@@ -1154,9 +1282,9 @@ def cal_it_v2(input_size, scaling):
 '''
 
 # Scaling Factor: 1 (x4), 2 (x8), 4 (x16)
-def axpby_pch(f, input_size, scaling):
+def axpby_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = aX + bY
         Scaling Factor 1 (x4)
         row size: 8K
@@ -1175,7 +1303,7 @@ def axpby_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
 
     ndp_bk_idx = NDP_TARGET_BK
 
@@ -1244,9 +1372,9 @@ def axpby_pch(f, input_size, scaling):
     return
 
 # AXPBYPCZ  : W = aX + bB + zZ
-def axpbypcz_pch(f, input_size, scaling):
+def axpbypcz_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = W = aX + bB + zZ
         x4  DRAM: data memory: 32KB  -> Max 4 Row
         x8  DRAM: data memory: 64KB  -> Max 8 Row
@@ -1271,7 +1399,7 @@ def axpbypcz_pch(f, input_size, scaling):
         
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
 
     ndp_bk_idx = NDP_TARGET_BK
 
@@ -1347,9 +1475,9 @@ def axpbypcz_pch(f, input_size, scaling):
     return
 
 # AXPY      : Y = aY + X
-def axpy_pch(f, input_size, scaling):
+def axpy_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = aX + Y
         Scaling Factor 1 (x4)
         row size: 8K
@@ -1368,7 +1496,7 @@ def axpy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
 
     ndp_bk_idx = NDP_TARGET_BK
 
@@ -1437,9 +1565,9 @@ def axpy_pch(f, input_size, scaling):
     return
 
 # COPY      : Y = X
-def copy_pch(f, input_size, scaling):
+def copy_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = X
         Scaling Factor 1 (x4)
         row size: 8K
@@ -1456,7 +1584,7 @@ def copy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
@@ -1520,9 +1648,9 @@ def copy_pch(f, input_size, scaling):
 
 
 # XMY       : Y = X ⨀ Y
-def xmy_pch(f, input_size, scaling):
+def xmy_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = X ⨀ Y
         Scaling Factor 1 (x4)
         row size: 8K
@@ -1543,7 +1671,7 @@ def xmy_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
@@ -1611,9 +1739,9 @@ def xmy_pch(f, input_size, scaling):
     return
 
 # DOT       : c = X·Y
-def dot_pch(f, input_size, scaling):
+def dot_pch(f, per_pch_bytes, scaling):
     '''
-        input_size: 8K, 32K, 128K, 512K, 2M, 8M        
+        per_pch_bytes: data size in bytes per PCH
         Z = X·Y
         Scaling Factor 1 (x4)
         row size: 8K
@@ -1632,7 +1760,7 @@ def dot_pch(f, input_size, scaling):
         COL:0-127 or 0-63                 
     '''
 
-    iteration, num_working_bg, opsize = cal_it_v2(input_size, scaling)
+    iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     ndp_bk_idx = NDP_TARGET_BK
 
     # Input_size x 8 pch 
@@ -2911,8 +3039,12 @@ def gemv_asyncdimm(f, input_size):
             asyncdimm_start_nma(f, ch, rk)
 
 
-def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, scaling_factor=-1):
+def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, scaling_factor=-1, num_dimm=1):
     global GEN_PCH_NORMAL_MODE
+    global NUM_DIMM
+    global NUM_CHANNEL
+    NUM_DIMM = num_dimm
+    NUM_CHANNEL = int(NUM_CH_PER_DIMM * NUM_DIMM)
     if pch:
         GEN_PCH_NORMAL_MODE = True
     else:
@@ -2938,26 +3070,29 @@ def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, sc
             print("Error: Wrong Input Size")
             exit(1)
 
+    # DIMM tag: only added when num_dimm > 1 (backward compatible)
+    dimm_tag = f"_d{num_dimm}" if num_dimm > 1 else ""
+
     if is_ndp_ops:
         if scaling_factor == 1:
-            file_name = "pch_ndp_x4_" +  file_name 
-        elif scaling_factor == 2: 
-            file_name = "pch_ndp_x8_" +  file_name 
-        elif scaling_factor == 4: 
-            file_name = "pch_ndp_x16_" +  file_name 
+            file_name = f"pch_ndp_x4{dimm_tag}_" + file_name
+        elif scaling_factor == 2:
+            file_name = f"pch_ndp_x8{dimm_tag}_" + file_name
+        elif scaling_factor == 4:
+            file_name = f"pch_ndp_x16{dimm_tag}_" + file_name
         else:
             print("Error: Wrong Input Size")
             exit(1)
-    else: 
+    else:
         if pch:
             if scaling_factor == 1:
-                file_name = "pch_non_ndp_x4_" +  file_name 
-            elif scaling_factor == 2: 
-                file_name = "pch_non_ndp_x8_" +  file_name 
-            elif scaling_factor == 4: 
-                file_name = "pch_non_ndp_x16_" +  file_name             
+                file_name = f"pch_non_ndp_x4{dimm_tag}_" + file_name
+            elif scaling_factor == 2:
+                file_name = f"pch_non_ndp_x8{dimm_tag}_" + file_name
+            elif scaling_factor == 4:
+                file_name = f"pch_non_ndp_x16{dimm_tag}_" + file_name
         else:
-            file_name = "baseline_" + file_name
+            file_name = f"baseline{dimm_tag}_" + file_name
     
     # Set Address Mapping Scheme 
     config_scale_factor(scaling_factor)
@@ -2965,20 +3100,23 @@ def generate_trace(workload, size, output_path='', pch=True, is_ndp_ops=True, sc
     file_name = output_path + "/" + file_name
     # Size: "8K","32K","128K","512K","2M","8M" (GEMV: 8K, 16K, 32K, 64K, 128K)
     # workload: "AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT", "SCAL", "GEMV"
-    with open(file_name, 'w') as f:      
+    # Compute per-PCH byte size for BLAS 1-level (fixed total data)
+    if workload != "GEMV":
+        per_pch = calc_per_pch_bytes(size)
+    with open(file_name, 'w') as f:
         if is_ndp_ops:
             if workload == "AXPBY":
-                axpby_pch(f,size,scaling_factor)
+                axpby_pch(f,per_pch,scaling_factor)
             elif workload == "AXPBYPCZ":
-                axpbypcz_pch(f,size,scaling_factor)
+                axpbypcz_pch(f,per_pch,scaling_factor)
             elif workload == "AXPY":
-                axpy_pch(f,size,scaling_factor)          
+                axpy_pch(f,per_pch,scaling_factor)
             elif workload == "COPY":
-                copy_pch(f,size,scaling_factor)          
+                copy_pch(f,per_pch,scaling_factor)
             elif workload == "XMY":
-                xmy_pch(f,size,scaling_factor)                                    
+                xmy_pch(f,per_pch,scaling_factor)
             elif workload == "DOT":
-                dot_pch(f,size,scaling_factor)  
+                dot_pch(f,per_pch,scaling_factor)
             elif workload == "GEMV":
                 gemv_pch(f,size,scaling_factor)                                            
             else:
@@ -3047,80 +3185,149 @@ def crete_folder(folder_path):
         os.mkdir(folder_path)
 
 if __name__ == '__main__':
-    print(" ========================================================================  ")
-    print(" Generate NDP Workload  ")    
-    print(" ========================================================================  ")
+    print("=" * 72)
+    print(" NDP Workload Trace Generator")
+    print("=" * 72)
 
-    # make generated trace output path 
-    # root_path = "multi_dimm/16dimm"
-    root_path = "trace_test"
-    pch_ndp_trace_path = root_path + "/pch_ndp"
-    pch_none_ndp_trace_path = root_path + "/pch_non_ndp"
-    baseline_trace_path = root_path + "/baseline"
+    BLAS_WORKLOADS = ["COPY", "AXPY", "AXPBY", "AXPBYPCZ", "XMY", "DOT"]
 
-    # shutil.rmtree("trace")
-    # crete_folder("trace")
-    directory_path = Path(root_path)
+    # =====================================================================
+    #  Experiment selector — set True/False to enable/disable each
+    # =====================================================================
+    GEN_EXP1_BASE_STANDALONE   = True   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
+    GEN_EXP2_SCALING_DRAM      = True   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
+    GEN_EXP3_SCALING_DIMM      = True   # x4: 1, 2, 4, 8, 16 DIMM DBX
 
-    if directory_path.exists() and directory_path.is_dir():
-        shutil.rmtree(root_path)
-        print(f"Directory '{directory_path}' has been removed.")
-    else:
-        print(f"Directory '{directory_path}' does not exist or is not a directory.")
+    root_path = "generated_traces"
 
-    crete_folder(root_path) 
-    crete_folder(pch_ndp_trace_path)
-    crete_folder(pch_none_ndp_trace_path)
-    crete_folder(baseline_trace_path)
+    def setup_dir(path):
+        """Create directory tree, removing existing if present."""
+        p = Path(path)
+        if p.exists() and p.is_dir():
+            shutil.rmtree(path)
+            print(f"  Removed existing: {path}")
+        os.makedirs(path, exist_ok=True)
 
-    asyncdimm_trace_path = root_path + "/asyncdimm_nma"
-    crete_folder(asyncdimm_trace_path)
+    # =================================================================
+    #  Experiment 1: Base Standalone
+    #    1 DIMM, x4 DRAM
+    #    - baseline (conventional DDR5)
+    #    - pch_non_ndp (DBX host-only, no NDP)
+    #    - pch_ndp (DBX with NDP = DBX-N)
+    #    - asyncdimm_nma (AsyncDIMM-N)
+    # =================================================================
+    if GEN_EXP1_BASE_STANDALONE:
+        exp1_root = root_path + "/exp1_base_standalone"
+        exp1_baseline     = exp1_root + "/baseline"
+        exp1_pch_non_ndp  = exp1_root + "/pch_non_ndp"
+        exp1_pch_ndp      = exp1_root + "/pch_ndp"
+        exp1_asyncdimm    = exp1_root + "/asyncdimm_nma"
 
-    print(" - PCH NDP Workload Path: ",pch_ndp_trace_path)
-    print(" - PCH Non-NDP Workload Path: ",pch_none_ndp_trace_path)
-    print(" - Baseline Workload Path: ",baseline_trace_path)
-    print(" - AsyncDIMM NMA Workload Path: ",asyncdimm_trace_path)
+        setup_dir(exp1_root)
+        for d in [exp1_baseline, exp1_pch_non_ndp, exp1_pch_ndp, exp1_asyncdimm]:
+            os.makedirs(d, exist_ok=True)
 
-    # AsyncDIMM NMA traces
-    '''
-    for size in input_size_list:
-        for bench in ["COPY", "AXPBY", "AXPBYPCZ", "AXPY", "XMY", "DOT"]:
-            generate_asyncdimm_trace(bench, size, asyncdimm_trace_path)
-    '''
-    # AsyncDIMM GEMV traces (uses mat_input_size_list)
-    '''
-    for size in mat_input_size_list:
-        generate_asyncdimm_trace("GEMV", size, asyncdimm_trace_path)
-    '''
+        print()
+        print("[Exp1] Base Standalone: 1 DIMM, x4")
+        print(f"  Output: {exp1_root}")
+        print()
 
-    # for size in input_size_list:
-    #     generate_trace("COPY", size ,pch_ndp_trace_path,pch=True, is_ndp_ops=True, scaling_factor=1)  
-    # # generate_trace("GEMV", mat_input_size_list[0],non_ndp_trace_path,is_ndp_ops=False, scaling_factor=1)
-    # '''
-    for size in input_size_list:
-        for bench in ["AXPBY", "AXPBYPCZ", "AXPY", "COPY", "XMY", "DOT"]:
-            generate_trace(bench, size,baseline_trace_path, pch=False,is_ndp_ops=False, scaling_factor=1)
+        # BLAS 1-level workloads
+        for bench in BLAS_WORKLOADS:
+            for size in input_size_list:
+                # Baseline (conventional DDR5, no pCH)
+                generate_trace(bench, size, exp1_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+                # DBX host-only (pCH, no NDP)
+                generate_trace(bench, size, exp1_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+                # DBX-N (pCH + NDP)
+                generate_trace(bench, size, exp1_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=1)
+                # AsyncDIMM-N
+                generate_asyncdimm_trace(bench, size, exp1_asyncdimm)
+
+        # GEMV
+        for size in mat_input_size_list:
+            generate_trace("GEMV", size, exp1_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+            generate_trace("GEMV", size, exp1_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+            generate_trace("GEMV", size, exp1_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=1)
+            generate_asyncdimm_trace("GEMV", size, exp1_asyncdimm)
+
+        print(f"[Exp1] Done.")
+
+    # =================================================================
+    #  Experiment 2: Scaling DRAM Device
+    #    1 DIMM, x4 / x8 / x16
+    #    - baseline (conventional DDR5, x4 only)
+    #    - pch_non_ndp per scaling
+    #    - pch_ndp per scaling (DBX_x4, DBX_x8, DBX_x16)
+    # =================================================================
+    if GEN_EXP2_SCALING_DRAM:
+        exp2_root = root_path + "/exp2_scaling_dram"
+        exp2_baseline    = exp2_root + "/baseline"
+        exp2_pch_non_ndp = exp2_root + "/pch_non_ndp"
+        exp2_pch_ndp     = exp2_root + "/pch_ndp"
+
+        setup_dir(exp2_root)
+        for d in [exp2_baseline, exp2_pch_non_ndp, exp2_pch_ndp]:
+            os.makedirs(d, exist_ok=True)
+
+        print()
+        print("[Exp2] Scaling DRAM Device: 1 DIMM, x4/x8/x16")
+        print(f"  Output: {exp2_root}")
+        print()
+
+        # BLAS 1-level
+        for bench in BLAS_WORKLOADS:
+            for size in input_size_list:
+                # Baseline (x4 only, conventional)
+                generate_trace(bench, size, exp2_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+                for scaling in [1, 2, 4]:
+                    generate_trace(bench, size, exp2_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=scaling, num_dimm=1)
+                    generate_trace(bench, size, exp2_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=scaling, num_dimm=1)
+
+        # GEMV
+        for size in mat_input_size_list:
+            generate_trace("GEMV", size, exp2_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
             for scaling in [1, 2, 4]:
-                generate_trace(bench, size,pch_none_ndp_trace_path, pch=True,is_ndp_ops=False, scaling_factor=scaling)
-                generate_trace(bench, size,pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
+                generate_trace("GEMV", size, exp2_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=scaling, num_dimm=1)
+                generate_trace("GEMV", size, exp2_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=scaling, num_dimm=1)
 
-    # '''
-    # '''
-    for size in mat_input_size_list:
-        generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
-        for scaling in [1, 2, 4]:
-            generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
-            generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
-    # '''
-    # '''
-    '''
-    # for size in mat_input_size_list:
-    for size in ["128K"]:        
-        generate_trace("GEMV", size, baseline_trace_path, pch=False, is_ndp_ops=False, scaling_factor=1)
-        for scaling in [1]:
-            generate_trace("GEMV", size, pch_none_ndp_trace_path, pch=True, is_ndp_ops=False, scaling_factor=scaling)
-            generate_trace("GEMV", size, pch_ndp_trace_path, pch=True, is_ndp_ops=True, scaling_factor=scaling)
-    '''
-    # for size in input_size_list:
-    #     generate_trace("AXPBY", size,non_ndp_trace_path,is_ndp_ops=False)    
-    #     generate_trace("AXPBYPCZ", size,non_ndp_trace_path,is_ndp_ops=False)        
+        print(f"[Exp2] Done.")
+
+    # =================================================================
+    #  Experiment 3: Scaling DIMMs
+    #    x4 DRAM, 1 / 2 / 4 / 8 / 16 DIMM
+    #    - pch_ndp per DIMM count (DBX-N)
+    #    Fixed total data: input_size × 8 PCH (1 DIMM baseline)
+    # =================================================================
+    if GEN_EXP3_SCALING_DIMM:
+        exp3_root    = root_path + "/exp3_scaling_dimm"
+        exp3_pch_ndp = exp3_root + "/pch_ndp"
+
+        setup_dir(exp3_root)
+        os.makedirs(exp3_pch_ndp, exist_ok=True)
+
+        print()
+        print("[Exp3] Scaling DIMMs: x4, 1/2/4/8/16 DIMM")
+        print(f"  Output: {exp3_root}")
+        print()
+
+        dimm_counts = [1, 2, 4, 8, 16]
+
+        # BLAS 1-level
+        for bench in BLAS_WORKLOADS:
+            for size in input_size_list:
+                for nd in dimm_counts:
+                    generate_trace(bench, size, exp3_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=nd)
+
+        # GEMV
+        for size in mat_input_size_list:
+            for nd in dimm_counts:
+                generate_trace("GEMV", size, exp3_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=nd)
+
+        print(f"[Exp3] Done.")
+
+    print()
+    print("=" * 72)
+    print(" All trace generation complete.")
+    print(f" Output root: {root_path}/")
+    print("=" * 72)

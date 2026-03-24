@@ -11,7 +11,7 @@
 #include <climits>
 
 // #define NDP_DEBUG
-#define PCH_DEBUG
+// #define PCH_DEBUG
 
 #ifdef NDP_DEBUG
 #define DEBUG_PRINT(clk, unit_str, dimm_id, pch, msg) do { std::cout <<"["<<clk<<"]["<<unit_str<<"] DIMM["<<dimm_id<<"] PCH["<<pch<<"] "<<msg<<std::endl; } while(0)
@@ -173,6 +173,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
     bool                                                  all_ndp_idle;
 
+    bool m_seg_tracking_enable = false;  // YAML: seg_tracking_enable (default off)
 
     // HSNC Segment Tracking (per DIMM × pCH)
     // Tracks cycle counts for each RUN→BAR segment from the host-side NDP controller
@@ -543,6 +544,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       pch_lvl_history_max = 32;
       #endif
 
+      // HSNC Segment Tracking option
+      m_seg_tracking_enable = param<bool>("seg_tracking_enable").desc("Enable NDP segment tracking and report").default_val(false);
+
       // NDP Trace Initialization
       m_trace_core_enable = param<bool>("trace_core_enable").desc("Enable Trace Simulation Core with Gem5").default_val(false);
       
@@ -774,8 +778,10 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               desc_cache_evict_cnt[dimm_id][pch_id] = 0;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_BEFORE_RUN to NDP_RUN");
               // Segment tracking: start first segment
-              hsnc_cur_seg[dimm_id][pch_id] = {hsnc_seg_cnt[dimm_id][pch_id], HsncSegType::UNKNOWN, m_clk, 0, 0};
-              hsnc_seg_tracking[dimm_id][pch_id] = true;
+              if (m_seg_tracking_enable) {
+                hsnc_cur_seg[dimm_id][pch_id] = {hsnc_seg_cnt[dimm_id][pch_id], HsncSegType::UNKNOWN, m_clk, 0, 0};
+                hsnc_seg_tracking[dimm_id][pch_id] = true;
+              }
             }
             pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BEFORE_RUN]++;
           } // NDP Status: NDP_BEFORE_RUN END
@@ -1508,55 +1514,57 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       std::cout << std::endl;
 
-      // HSNC Segment Tracking Report
-      double tCK_ns = (double)tCK_ps / 1000.0;
-      std::cout<<"\n=== HSNC Segment Tracking Report (Host-side NDP Controller) ==="<<std::endl;
-      for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-        for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-          auto& segs = hsnc_segments[dimm_id][pch_id];
-          if (segs.empty()) continue;
-          std::cout<<"\n--- DIMM["<<dimm_id<<"] PCH["<<pch_id<<"] ("<<segs.size()<<" segments) ---"<<std::endl;
-          std::cout<<"  Seg | Type    |  RunStart  | DrainStart |    SegEnd  |  Total | Fetch | Drain"<<std::endl;
-          std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
+      // HSNC Segment Tracking Report (only when enabled)
+      if (m_seg_tracking_enable) {
+        double tCK_ns = (double)tCK_ps / 1000.0;
+        std::cout<<"\n=== HSNC Segment Tracking Report (Host-side NDP Controller) ==="<<std::endl;
+        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+            auto& segs = hsnc_segments[dimm_id][pch_id];
+            if (segs.empty()) continue;
+            std::cout<<"\n--- DIMM["<<dimm_id<<"] PCH["<<pch_id<<"] ("<<segs.size()<<" segments) ---"<<std::endl;
+            std::cout<<"  Seg | Type    |  RunStart  | DrainStart |    SegEnd  |  Total | Fetch | Drain"<<std::endl;
+            std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
 
-          Clk_t total_rd_cycles = 0, total_wr_cycles = 0, total_wait_cycles = 0;
-          int rd_cnt = 0, wr_cnt = 0, wait_cnt = 0;
+            Clk_t total_rd_cycles = 0, total_wr_cycles = 0, total_wait_cycles = 0;
+            int rd_cnt = 0, wr_cnt = 0, wait_cnt = 0;
 
-          for (auto& s : segs) {
-            Clk_t total  = s.end - s.run_start;
-            Clk_t fetch  = (s.drain_start > 0) ? (s.drain_start - s.run_start) : total;
-            Clk_t drain  = (s.drain_start > 0) ? (s.end - s.drain_start) : 0;
-            std::cout<<"  "<<std::setw(3)<<s.seg_id<<" | "
-                     <<std::setw(7)<<std::left<<hsnc_seg_type_str(s.type)<<std::right<<" | "
-                     <<std::setw(10)<<s.run_start<<" | "
-                     <<std::setw(10)<<((s.drain_start > 0) ? std::to_string(s.drain_start) : "-")<<" | "
-                     <<std::setw(9)<<s.end<<" | "
-                     <<std::setw(6)<<total<<" | "
-                     <<std::setw(5)<<fetch<<" | "
-                     <<std::setw(5)<<drain
-                     <<std::endl;
-            switch(s.type) {
-              case HsncSegType::RD:   total_rd_cycles += total; rd_cnt++; break;
-              case HsncSegType::WR:   total_wr_cycles += total; wr_cnt++; break;
-              case HsncSegType::WAIT: total_wait_cycles += total; wait_cnt++; break;
-              default: break;
+            for (auto& s : segs) {
+              Clk_t total  = s.end - s.run_start;
+              Clk_t fetch  = (s.drain_start > 0) ? (s.drain_start - s.run_start) : total;
+              Clk_t drain  = (s.drain_start > 0) ? (s.end - s.drain_start) : 0;
+              std::cout<<"  "<<std::setw(3)<<s.seg_id<<" | "
+                       <<std::setw(7)<<std::left<<hsnc_seg_type_str(s.type)<<std::right<<" | "
+                       <<std::setw(10)<<s.run_start<<" | "
+                       <<std::setw(10)<<((s.drain_start > 0) ? std::to_string(s.drain_start) : "-")<<" | "
+                       <<std::setw(9)<<s.end<<" | "
+                       <<std::setw(6)<<total<<" | "
+                       <<std::setw(5)<<fetch<<" | "
+                       <<std::setw(5)<<drain
+                       <<std::endl;
+              switch(s.type) {
+                case HsncSegType::RD:   total_rd_cycles += total; rd_cnt++; break;
+                case HsncSegType::WR:   total_wr_cycles += total; wr_cnt++; break;
+                case HsncSegType::WAIT: total_wait_cycles += total; wait_cnt++; break;
+                default: break;
+              }
             }
+            std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
+            Clk_t first_start = segs.front().run_start;
+            Clk_t last_end = segs.back().end;
+            Clk_t total_span = last_end - first_start;
+            std::cout<<"  Total NDP span: "<<total_span<<" cycles ("
+                     <<(double)total_span * tCK_ns<<" ns)"<<std::endl;
+            if (rd_cnt > 0)
+              std::cout<<"  RD segments:   "<<rd_cnt<<" segs, "<<total_rd_cycles<<" cycles (avg "<<(total_rd_cycles/rd_cnt)<<")"<<std::endl;
+            if (wr_cnt > 0)
+              std::cout<<"  WR segments:   "<<wr_cnt<<" segs, "<<total_wr_cycles<<" cycles (avg "<<(total_wr_cycles/wr_cnt)<<")"<<std::endl;
+            if (wait_cnt > 0)
+              std::cout<<"  WAIT segments: "<<wait_cnt<<" segs, "<<total_wait_cycles<<" cycles (avg "<<(total_wait_cycles/wait_cnt)<<")"<<std::endl;
           }
-          std::cout<<"------+---------+------------+------------+-----------+--------+-------+------"<<std::endl;
-          Clk_t first_start = segs.front().run_start;
-          Clk_t last_end = segs.back().end;
-          Clk_t total_span = last_end - first_start;
-          std::cout<<"  Total NDP span: "<<total_span<<" cycles ("
-                   <<(double)total_span * tCK_ns<<" ns)"<<std::endl;
-          if (rd_cnt > 0)
-            std::cout<<"  RD segments:   "<<rd_cnt<<" segs, "<<total_rd_cycles<<" cycles (avg "<<(total_rd_cycles/rd_cnt)<<")"<<std::endl;
-          if (wr_cnt > 0)
-            std::cout<<"  WR segments:   "<<wr_cnt<<" segs, "<<total_wr_cycles<<" cycles (avg "<<(total_wr_cycles/wr_cnt)<<")"<<std::endl;
-          if (wait_cnt > 0)
-            std::cout<<"  WAIT segments: "<<wait_cnt<<" segs, "<<total_wait_cycles<<" cycles (avg "<<(total_wait_cycles/wait_cnt)<<")"<<std::endl;
         }
+        std::cout<<"=== End HSNC Segment Tracking Report ===\n"<<std::endl;
       }
-      std::cout<<"=== End HSNC Segment Tracking Report ===\n"<<std::endl;
 
       // Descriptor Cache Summary
       std::cout<<"\n=== Descriptor Cache Summary ==="<<std::endl;
