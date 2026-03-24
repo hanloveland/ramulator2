@@ -933,7 +933,6 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
 
       m_clk++;
 
-
       for(int pch_id=0;pch_id<(num_pseudochannel);pch_id++) {
         m_avg_rd_ndp_que_req[pch_id] += (m_num_db_rd_cnts[pch_id] + m_num_dram_rd_cnts[pch_id]);
         m_avg_wr_ndp_que_req[pch_id] += (m_num_db_wr_cnts[pch_id] + m_num_dram_wr_cnts[pch_id]);

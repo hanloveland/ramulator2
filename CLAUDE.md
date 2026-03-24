@@ -556,3 +556,665 @@ init(): if (concurrent_mode_enable)
 ### Future Tasks
 
 - [ ] **Concurrent Mode host access 성능 저하 분석**: Host + NMA 동시 실행 시 host read latency 및 throughput 저하 원인 분석. OT backpressure, CMD/REQ FIFO 경합, row-hit low cap, arbiter switching 빈도, refresh 간섭 등 병목 요소 식별 및 최적화.
+
+---
+
+## DBX-DIMM NDP Launch Descriptor Optimization
+
+### Problem Statement
+
+현재 DBX-DIMM의 Host-Side NDP Controller (HSNC)는 NDP Launch Descriptor에 **full address (38-bit)를 매 descriptor마다** 인코딩하여 두 가지 근본적 문제가 발생한다:
+
+1. **Descriptor 수 폭발**: 순차 접근 워크로드(COPY 1MB = 128 rows)에서 256+ descriptors 필요
+2. **HOL Blocking**: 공유 DIMM-level buffer(`dimm_lvl_req_buffer`)에서 head의 target PCH slot이 full이면 모든 PCH가 stall
+
+#### 현재 HSNC Pipeline (문제 구조)
+
+```
+dimm_lvl_req_buffer[dimm] (1024, 공유, FIFO 순차)
+    → pch_lvl_hsnc_nl_req_slot[dimm][pch] (16, head-of-queue만 pop 가능)
+        → pch_lvl_hsnc_nl_addr_gen_slot[dimm][pch] (8, decoded AccInst_Slot)
+            → send_ndp_req_to_mc() → MC read/write buffer
+```
+
+- `dimm_lvl_req_buffer`: PCH 구분 없이 순차 저장, head의 target PCH만 서비스 가능
+- PCH A의 NL-REQ slot이 full → DIMM buffer 전체 stall → PCH B/C/D도 blocked
+
+#### 재정의된 AccInst_Slot (64-bit) — Direct/Undirect Mode 통합
+
+**RD/WR Descriptor (데이터 접근 명령)**:
+```
+[63:60] opcode  4b    ← RD, WR, BARRIER, WAIT, SET_BASE, INC_BASE, SET_LOOP, LOOP, DONE
+[59]    mode    1b    ← 0=Direct, 1=Undirect (opcode 바로 다음)
+[58:52] opsize  7b    ← column 접근 횟수
+[51:46] ch      6b    ┐
+[45:44] pch     2b    │ 주소 필드 (38b)
+[43:41] bg      3b    │
+[40:39] bk      2b    │
+[38:21] row    18b    │ ← Direct: 절대 row
+                      │    Undirect: [17:15]=base_reg_idx(3b), [14:0]=offset(15b)
+[20:14] col     7b    ┘
+[13:11] id      3b    ← DBX 내부 Thread ID (base_reg_idx와 별개)
+[10:0]  etc    11b    ← 제어
+```
+
+**기존 대비 변경점**:
+- `mode` 1b를 bit[59] (opcode 바로 다음)로 이동 (기존 opsize [59:53] → [58:52]로 1b 하향)
+- `id`(3b)는 DBX 내부 Thread ID로 유지 (base_reg_idx 용도가 아님)
+- Undirect mode의 base_reg_idx는 row 필드 상위 3b [17:15]에 위치
+- `etc` 12b → 11b (mode 1b 추가분)
+
+**Mode에 따른 row 해석**:
+- **Direct (mode=0)**: `row[17:0]` = 절대 row address (기존과 동일)
+- **Undirect (mode=1)**: `row[17:15]` = base_reg index (0~7), `row[14:0]` = offset (15b)
+  - `effective_row = base_reg[row[17:15]] + row[14:0]`
+- ch, pch, bg, bk, col은 mode와 무관하게 항상 descriptor에서 직접 사용
+
+**SET_BASE Descriptor** (제어 명령, 주소 필드 불필요):
+```
+[63:60] opcode = SET_BASE   4b
+[59]    mode   (don't care) 1b
+[58:56] reg_idx             3b  ← target base_reg index (0~7)
+[55:38] base_value         18b  ← base_reg에 저장할 row 값
+[37:0]  don't care         38b
+```
+- `base_reg[reg_idx] = base_value`
+
+**INC_BASE Descriptor** (제어 명령, 주소 필드 불필요):
+```
+[63:60] opcode = INC_BASE   4b
+[59]    mode   (don't care) 1b
+[58:56] reg_idx             3b  ← target base_reg index (0~7)
+[55:38] inc_value          18b  ← stride increment 값
+[37:0]  don't care         38b
+```
+- `base_reg[reg_idx] += inc_value`
+
+**SET_LOOP Descriptor** (제어 명령, Loop Counter Register 초기화):
+```
+[63:60] opcode = SET_LOOP   4b
+[59]    mode   (don't care) 1b
+[58:56] cnt_reg_idx         3b  ← target Loop Counter Register (0~7)
+[55:40] loop_count         16b  ← 초기 iteration count (max 65535)
+[39:0]  don't care         24b
+```
+- `loop_cnt_reg[cnt_reg_idx] = loop_count`
+
+**LOOP Descriptor** (제어 명령, Loop Counter Register 참조):
+```
+[63:60] opcode = LOOP       4b
+[59]    mode   (don't care) 1b
+[58:56] cnt_reg_idx         3b  ← Loop Counter Register index (0~7)
+[55:40] jump_pc            16b  ← target PC (max 65535)
+[39:0]  don't care         24b
+```
+- `if loop_cnt_reg[cnt_reg_idx] > 0: loop_cnt_reg[cnt_reg_idx]--, PC = jump_pc`
+- `else: PC++ (fall through)`
+
+**WAIT Descriptor** (대기 명령):
+```
+[63:60] opcode = WAIT       4b
+[59:11] don't care          49b
+[10:0]  wait_cycle          11b  ← 대기 cycle 수 (max 2047)
+```
+- NDP_WAIT 상태 전환, wait_cycle 만큼 대기 후 NDP_RUN 복귀
+
+**Loop Counter Register 설계 배경**:
+- 기존 FIFO 방식에서는 소비된 descriptor로 "jump back" 불가 → PC 기반 접근으로 해결
+- 제한된 SRAM 크기 — loop_cnt를 descriptor 내 inline 저장 불가능
+- 해결: HSNC에 **Loop Counter Register [8] × 16b** (3b 인덱스) 하드웨어 추가
+- HSNC에 PC (program counter) 추가, desc_store + pch_lvl_inst_buf (Descriptor Cache) 구조
+- SRAM 비용: 8 × 16b = 16B per PCH (무시 가능)
+
+**HSNC Register File 요약**:
+| Register | 개수 | Width | 인덱스 | 용도 |
+|----------|------|-------|--------|------|
+| `base_reg[]` | 8 | 18b | 3b (row[17:15] 또는 SET_BASE/INC_BASE [58:56]) | Row base address |
+| `loop_cnt_reg[]` | 8 | 16b | 3b (SET_LOOP/LOOP [58:56]) | Loop iteration counter |
+| `PC` | 1 | 10b | — | Program counter (desc_store 내 위치, [9:3]=col, [2:0]=idx) |
+
+**Opcode 요약**:
+
+| Opcode | Value | Name | mode 적용 | 필드 해석 | 동작 |
+|--------|-------|------|-----------|-----------|------|
+| 기존 | 0 | RD | O | 표준 레이아웃 | Direct: 절대 주소 RD, Undirect: base_reg[row[17:15]]+row[14:0] |
+| 기존 | 1 | WR | O | 표준 레이아웃 | Direct: 절대 주소 WR, Undirect: base_reg[row[17:15]]+row[14:0] |
+| 기존 | 2 | BARRIER | X | (don't care) | 모든 outstanding request 완료 대기 |
+| 기존 | 6 | WAIT | X | [10:0]=wait_cycle (11b) | etc 필드 cycle 수 만큼 대기 |
+| 기존 | 15 | DONE | X | (don't care) | NDP 실행 종료 |
+| NEW | 8 | SET_BASE | X | [58:56]=reg_idx, [55:38]=value | `base_reg[reg_idx] = base_value` |
+| NEW | 9 | INC_BASE | X | [58:56]=reg_idx, [55:38]=value | `base_reg[reg_idx] += inc_value` |
+| NEW | 10 | SET_LOOP | X | [58:56]=cnt_reg, [55:40]=count | `loop_cnt_reg[cnt_reg] = count` |
+| NEW | 11 | LOOP | X | [58:56]=cnt_reg, [55:40]=jump_pc | cnt > 0 → cnt--, PC=jump_pc |
+
+주요 코드: `ndp_DRAM_system.cpp` — `decode_acc_inst()` (L1175-1191), `send_ndp_req_to_mc()` (L1198-1261), `send_ndp_ctrl()` (L967-1043), DIMM-level buffer dispatch (L652-691)
+
+### Optimization Design
+
+#### Phase 1: Per-PCH Descriptor Buffer + desc_store (HOL Blocking 해소)
+
+**현재 → 제안 구조**:
+```
+현재: dimm_lvl_req_buffer[dimm] (1024, 공유 FIFO)
+       → pch_lvl_hsnc_nl_req_slot[dimm][pch] (16)
+          → decode_acc_inst() → pch_lvl_hsnc_nl_addr_gen_slot[dimm][pch] (8)
+             → send_ndp_req_to_mc()
+
+제안: desc_store[dimm][pch][128][8]         (HSNC 내부 backing array, 전체 프로그램 저장)
+       → pch_lvl_inst_buf[dimm][pch][8][8]  (Descriptor Cache: 8 entry groups × 8 = 64, PC 기반 접근)
+          → decode_acc_inst() → pch_lvl_hsnc_nl_addr_gen_slot[dimm][pch] (8)
+             → send_ndp_req_to_mc()
+```
+
+- **desc_store[dimm][pch][128][8]**: HSNC 내부 배열, 최대 1024 descriptors (128 cols × 8 entries/col) 전량 보관
+- **pch_lvl_inst_buf[8][8]**: Descriptor Cache로 운용 (8 entry groups × 8 entries = 64 entries)
+  - 각 Entry Group Tag = Column Address (7b), fully-associative
+  - PC가 가리키는 descriptor를 pch_lvl_inst_buf에서 fetch → decode_acc_inst()로 직접 전달
+- **nl_req_slot 삭제**: pch_lvl_inst_buf가 nl_req_slot 역할 흡수, decode에 직접 공급
+- **Write Intercept**: Host AccInst write → DRAM timing check만 수행, 실제 데이터는 desc_store에 저장
+  - Col 0~7 write 시 pch_lvl_inst_buf에도 동시 적재 (초기 64 entries)
+  - DRAM에는 data 저장 안 함 (timing 모델로만 활용)
+- **NDP Start**: per-PCH start flag(1b) + desc_count(16b), AccInst 전량 write 후 마지막에 발행
+  - Payload: `bit[16]=start_flag, bits[15:0]=desc_count`
+- Per-PCH 순차 AccInst stream (interleaved dispatch 제거)
+- HOL blocking 완전 해소: 한 PCH가 stall되어도 다른 PCH 독립 동작
+- SRAM 비용: desc_store (1024 × 64b × num_PCH) + buffer (64 × 64b × num_PCH)
+  = 4 PCH 기준: 32KB (desc_store) + 2KB (buffer) = 34KB
+
+변경 대상:
+- `ndp_DRAM_system.cpp`: `dimm_lvl_req_buffer` + `nl_req_slot` → `desc_store[dimm][pch]` + `pch_lvl_inst_buf[dimm][pch][8][8]`
+- `send_ndp_ctrl()`: Write Intercept (모든 AccInst → desc_store, Col 0~7 → pch_lvl_inst_buf 동시 적재)
+- `tick()`: PC 기반 fetch (pch_lvl_inst_buf → decode_acc_inst() → addr_gen_slot), nl_req_slot 경로 제거
+- `request.h`: NDP Start payload에 desc_count 필드 추가
+
+#### Phase 2: Direct / Undirect Access Mode
+
+AccInst_Slot bit[59] (opcode 바로 다음)에 mode flag를 추가하여 두 가지 row 주소 지정 방식을 지원한다.
+제어 명령 (SET_BASE, INC_BASE, LOOP)은 주소 필드가 불필요하므로 **opcode별 독립 필드 해석**을 사용한다.
+
+**Direct Access Mode** (mode=0, 기존과 동일):
+- 모든 주소 필드 (ch, pch, bg, bk, row, col)가 절대 주소
+- 임의 접근 패턴, cross-bank/cross-PCH 접근에 사용
+
+**Undirect Access Mode** (mode=1, 신규):
+- HSNC에 `base_reg[8]` (per PCH) 유지, SET_BASE 명령으로 설정
+- row[17:15] = base_reg index (3b), row[14:0] = offset (15b)
+- `effective_row = base_reg[row[17:15]] + row[14:0]`
+- ch, pch, bg, bk, col은 descriptor에서 직접 사용 (Direct와 동일)
+- `id`(3b)는 Thread ID로 유지 (base_reg_idx와 별개)
+- 순차/stride 접근 패턴에 최적: INC_BASE + LOOP 조합
+
+**PC 구조 (10-bit, desc_store 연동)**:
+- PC[9:3] = Column Address (7b, 0~127), PC[2:0] = Entry Index (3b, 0~7)
+- 총 PC 범위: 0 ~ 1023, desc_store 공간 전체를 주소 지정
+- PC가 가리키는 descriptor를 pch_lvl_inst_buf에서 fetch → decode_acc_inst()로 직접 전달
+- decode → addr_gen_slot → send_ndp_req_to_mc() (nl_req_slot 삭제)
+- **순차 실행**: PC 증가 시 다음 Entry Group Column이 buffer에 없으면 Cache Miss → DRAM RD (timing) + desc_store에서 buffer 적재
+- **LOOP jump**: jump_pc의 Column Address가 buffer Tag에 없으면 Cache Miss → DRAM RD + oldest group evict
+- **Cache Hit**: buffer에서 직접 fetch (DRAM 접근 없음)
+
+**`decode_acc_inst()` 확장** (L1175-1191):
+```cpp
+AccInst_Slot decode_acc_inst(uint64_t inst) {
+  uint64_t opcode = (inst >> 60) & 0xf;
+  uint64_t mode   = (inst >> 59) & 0x1;     // bit[59], opcode 바로 다음
+
+  if (opcode == SET_BASE) {
+    uint64_t reg_idx    = (inst >> 56) & 0x7;   // [58:56]
+    uint64_t base_value = (inst >> 38) & 0x3FFFF; // [55:38] 18b
+    base_reg[reg_idx] = base_value;
+    return;  // 제어 명령
+  }
+  if (opcode == INC_BASE) {
+    uint64_t reg_idx   = (inst >> 56) & 0x7;   // [58:56]
+    uint64_t inc_value = (inst >> 38) & 0x3FFFF; // [55:38] 18b
+    base_reg[reg_idx] += inc_value;
+    return;  // 제어 명령
+  }
+  if (opcode == SET_LOOP) {
+    uint64_t cnt_reg_idx = (inst >> 56) & 0x7;    // [58:56]
+    uint64_t loop_count  = (inst >> 40) & 0xFFFF;  // [55:40] 16b
+    loop_cnt_reg[cnt_reg_idx] = loop_count;
+    return;  // 제어 명령
+  }
+  if (opcode == LOOP) {
+    uint64_t cnt_reg_idx = (inst >> 56) & 0x7;    // [58:56]
+    uint64_t jump_pc     = (inst >> 40) & 0xFFFF;  // [55:40] 16b
+    if (loop_cnt_reg[cnt_reg_idx] > 0) {
+      loop_cnt_reg[cnt_reg_idx]--;
+      PC = jump_pc;  // jump back to loop body start
+    } else {
+      PC++;  // fall through to next descriptor
+    }
+    return;
+  }
+
+  // RD/WR — 표준 레이아웃
+  uint64_t opsize = (inst >> 52) & 0x7f;   // [58:52]
+  uint64_t ch     = (inst >> 46) & 0x3f;   // [51:46]
+  uint64_t pch    = (inst >> 44) & 0x3;    // [45:44]
+  uint64_t bg     = (inst >> 41) & 0x7;    // [43:41]
+  uint64_t bk     = (inst >> 39) & 0x3;    // [40:39]
+  uint64_t row    = (inst >> 21) & 0x3FFFF; // [38:21]
+  uint64_t col    = (inst >> 14) & 0x7F;   // [20:14]
+  uint64_t id     = (inst >> 11) & 0x7;    // [13:11] Thread ID
+  uint64_t etc    = (inst      ) & 0x7FF;  // [10:0] 11b
+
+  if (mode == 1) {  // Undirect
+    uint64_t reg_idx = (row >> 15) & 0x7;   // row[17:15]
+    uint64_t offset  = row & 0x7FFF;        // row[14:0]
+    row = base_reg[reg_idx] + offset;        // effective_row
+  }
+  return AccInst_Slot(true, opcode, opsize, ch, pch, bg, bk, row, col, id, mode, etc);
+}
+```
+
+참조 구현: AsyncDIMM `m_base_reg[8]`, `SET_BASE`/`INC_BASE` in `asyncdimm_nma_controller.cpp` (L124-127, L1862-1876)
+
+#### Phase 3: DRAM Spill (Descriptor Cache)
+
+GEMV 등 복잡한 워크로드는 Undirect + LOOP 최적화 후에도 descriptor ~600개 (내부 Matrix MAC 루프 unroll). 64-entry on-chip buffer에 수용 불가 → DRAM을 backing store로 활용.
+
+**개요**: pch_lvl_inst_buf를 8-entry fully-associative **Descriptor Cache**로 운용. 각 cache line = 1 DRAM column = 8 descriptors (64B). DRAM에 전체 프로그램 저장, on-chip buffer는 working set만 캐싱.
+
+**DRAM Descriptor 저장 영역**:
+```
+Address: (ch, pch, ndp_ctrl_buf_bg, ndp_ctrl_buf_bk, ndp_ctrl_row, col)
+Col 0..127 → PC 0..1023 (최대 1024 descriptors)
+각 Column = 8 descriptors (64B cache line)
+```
+
+**PC 구조 (10-bit)**:
+```
+PC[9:3] = Column Address (7b, 0~127)
+PC[2:0] = Entry Index within Column (3b, 0~7)
+총 PC 범위: 0 ~ 1023
+```
+
+**pch_lvl_inst_buf 구조 (Descriptor Cache)**:
+```
+8 Entry Groups × 8 entries/group = 64 entries
+각 Entry Group = 1 DRAM Column 크기 (64B)
+각 Entry Group에 Tag 저장 = 해당 Column Address (7b)
+```
+
+| 구성요소 | 크기 | 설명 |
+|----------|------|------|
+| Entry Group | 8개 | 각 64B (8 descriptors) |
+| Tag per Group | 7b | Column Address (PC[9:3]) |
+| 총 용량 | 64 entries (512B) | 8 groups × 8 entries |
+
+**시뮬레이터 구현 모델 (DRAM Timing 활용)**:
+
+AccInst는 실제 DRAM에 저장되지 않고, HSNC 내부 별도 array(`desc_store[]`)에 전량 보관.
+DRAM은 **timing 모델로만** 활용 — write/read 타이밍 제약을 정확히 반영하되, 실제 데이터는 `desc_store`에서 관리.
+
+```
+Host ST (AccInst Write)
+  │
+  ├─→ DRAM: timing check (tRCD, tWR, tCCD 등) — 실제 data 저장 안 함
+  │
+  └─→ HSNC: 모든 AccInst를 intercept → desc_store[pch][col][idx]에 저장
+       └─ Col 0~7은 추가로 pch_lvl_inst_buf (Descriptor Cache)에도 적재
+
+HSNC Prefetch (Cache Miss 시)
+  │
+  ├─→ DRAM: RD 명령 발행 (MC read buffer 경유, timing 체크)
+  │
+  └─→ RD 응답 도착 시점에 desc_store[pch][target_col]에서 데이터 읽어 buffer에 적재
+       (DRAM 응답을 timing trigger로 사용, 실제 data는 desc_store에서 공급)
+```
+
+| 동작 | DRAM 역할 | 실제 데이터 소스 |
+|------|-----------|------------------|
+| AccInst Write | timing check (WR latency) | HSNC `desc_store[]` 에 저장 |
+| AccInst Prefetch | timing check (RD latency) | RD 응답 시점에 `desc_store[]` 에서 읽기 |
+| pch_lvl_inst_buf Hit | (없음) | buffer에서 직접 실행 |
+
+**초기 적재 (Write Intercept)**:
+1. Host가 AccInst를 DRAM magic-path 주소로 ST write (기존과 동일 경로)
+2. HSNC는 **모든 AccInst write**를 intercept → `desc_store[pch][col][idx]`에 저장
+3. 추가로 **Col 0~7** (PC 0~63)은 pch_lvl_inst_buf에도 직접 적재
+4. DRAM에는 timing check만 수행 (실제 data write 없음)
+5. 결과: 실행 시작 시 buffer에 처음 64개 descriptor 적재 + 전체 프로그램이 `desc_store`에 보관
+
+**순차 실행 (PC 증가)**:
+1. PC 0부터 순차 실행, 현재 PC의 Column Address와 buffer 내 Entry Group Tag 비교
+2. **Cache Hit**: Tag 일치 → buffer에서 직접 실행 (DRAM 접근 없음)
+3. **Cache Miss** (column address mismatch): PC가 buffer에 없는 Column으로 진입
+   - HSNC가 해당 Column에 대해 DRAM RD 발행 (MC 경유, timing 체크)
+   - RD 응답 도착 시 `desc_store[pch][target_col]`에서 8 entries 읽어 buffer에 적재
+   - 가장 오래된 Entry Group을 evict → 새 Column 데이터로 교체
+4. 순차 실행에서는 마지막 Entry Group 실행 완료 시 **다음 Column 자동 prefetch**
+
+**LOOP/Jump 실행**:
+1. LOOP 명령 → jump_pc의 Column Address와 buffer Tag 비교
+2. **Hit**: jump target이 buffer 내 → 즉시 PC 이동 (DRAM 접근 없음)
+3. **Miss**: jump target이 buffer 밖 → DRAM RD 발행 → 응답 시 `desc_store`에서 적재 후 PC 이동
+
+**LOOP 최적화 시나리오**:
+- Loop body ≤ 64 entries (8 columns): 첫 iteration 이후 buffer에 완전 캐싱 → DRAM 접근 0회
+- Loop body > 64 entries (예: GEMV ~600): 매 iteration마다 (body_cols - 8)회 DRAM RD 필요
+  - 그러나 Host가 매 iteration descriptor를 재전송하는 것 대비 대폭 효율적
+  - DRAM RD는 64B 단위, MC read buffer 경유 → host request와 경합 가능
+
+**GEMV 예시** (x4, 128K, body ~596 entries):
+```
+Total columns used: ⌈596/8⌉ = 75 columns
+Buffer: 8 entry groups
+Per iteration DRAM reads: 75 - 8 = 67 reads (64B each)
+iteration_tile_block = 64 iterations
+Total DRAM reads: 67 × 64 = 4,288 reads (각 64B)
+vs Direct mode: 149,185 descriptors를 Host에서 전송
+```
+
+### AccInst → NDP DRAM Request 생성 Flow
+
+Phase 1-3의 설계를 통합한 전체 NDP 실행 파이프라인.
+
+#### 전체 파이프라인 구조
+
+```
+[Host AccInst Write]
+  │ ST to (ch, pch, ndp_ctrl_buf_bg/bk, ndp_ctrl_row, col)
+  │
+  ▼
+[HSNC Write Intercept]  ── send_ndp_ctrl()
+  │
+  ├─→ desc_store[dimm][pch][col][idx]   (전량 저장, 최대 128 col × 8 entry = 1024)
+  │
+  └─→ pch_lvl_inst_buf[dimm][pch][8][8] (Col 0~7만 동시 적재, 초기 64 entries)
+      DRAM: timing check만 (data 저장 안 함)
+
+[NDP Start Write]  ── send_ndp_ctrl() (AccInst 전량 write 후 마지막)
+  │ Payload: bit[16]=start_flag, bits[15:0]=desc_count per PCH
+  │
+  ▼
+[NDP Execution]  ── tick() per PCH
+  │
+  ▼
+[PC Fetch]  ── PC(10b) → pch_lvl_inst_buf cache lookup
+  │
+  ├─ Cache Hit:  buffer에서 descriptor fetch (DRAM 접근 없음)
+  │
+  └─ Cache Miss: DRAM RD 발행 (timing) → 응답 시 desc_store[col]에서 8 entries 적재
+                 oldest entry group evict, fetch stall
+  │
+  ▼
+[decode_acc_inst()]  ── opcode별 분기
+  │
+  ├─ RD/WR ──→ [pch_lvl_hsnc_nl_addr_gen_slot] (max 8, decoded AccInst_Slot)
+  │              │
+  │              ▼
+  │            [send_ndp_req_to_mc()]  ── round-robin, 1 DRAM req/cycle
+  │              │
+  │              ├─ cnt < opsize: col++, cnt++ (다음 cycle 계속)
+  │              └─ cnt == opsize: slot에서 제거
+  │
+  ├─ BAR ────→ NDP_BAR state (모든 in-flight request 완료 대기 → NDP_RUN)
+  │
+  ├─ WAIT ───→ NDP_WAIT state (etc 필드 cycle 수 대기 → NDP_RUN)
+  │
+  ├─ SET_BASE → base_reg[reg_idx] = value, PC++ (제어 명령, no DRAM req)
+  ├─ INC_BASE → base_reg[reg_idx] += value, PC++ (제어 명령, no DRAM req)
+  ├─ SET_LOOP → loop_cnt_reg[cnt_reg] = count, PC++ (제어 명령, no DRAM req)
+  ├─ LOOP ───→ cnt > 0: cnt--, PC = jump_pc (buffer miss 가능)
+  │             cnt == 0: PC++ (fall through)
+  │
+  └─ DONE ───→ NDP_DONE state (in-flight drain → NDP_IDLE)
+```
+
+#### Stage 1: Host AccInst Write → desc_store + pch_lvl_inst_buf
+
+```cpp
+// send_ndp_ctrl() 내 Write Intercept
+// req.addr_vec에서 dimm_id, pch_id, col 추출
+int col = req.addr_vec[m_dram->m_levels("column")];
+
+// 1. desc_store에 전량 저장 (8 entries per write = 1 DRAM column)
+for (int i = 0; i < 8; i++)
+    desc_store[dimm_id][pch_id][col][i] = req.m_payload[i];
+
+// 2. Col 0~7이면 pch_lvl_inst_buf에도 동시 적재
+if (col < 8)
+    pch_lvl_inst_buf[dimm_id][pch_id][col] = desc_store[dimm_id][pch_id][col];
+    // entry_group_tag[col] = col  (tag 설정)
+
+// 3. DRAM: timing check만 수행 (기존 MC 경유 WR timing)
+```
+
+- Host trace에서 PCH별 순차 stream으로 write (interleave 없음)
+- AccInst 전량 write 완료 후 NDP Start 발행
+
+#### Stage 2: NDP Start → NDP_RUN 전환
+
+```cpp
+// send_ndp_ctrl() 내 NDP Start 처리
+// NDP Control Register write (ndp_ctrl_bg/bk)
+for (int i = 0; i < num_pch; i++) {
+    if (req.m_payload[i] != 0) {
+        int desc_count = req.m_payload[i] & 0xFFFF;      // bits[15:0]
+        bool start_flag = (req.m_payload[i] >> 16) & 0x1; // bit[16]
+        pch_desc_count[dimm_id][i] = desc_count;
+        pch_lvl_hsnc_status[dimm_id][i] = NDP_ISSUE_START;
+        PC[dimm_id][i] = 0;  // PC 초기화
+    }
+}
+```
+
+| 현재 상태 | 조건 | 다음 상태 | 동작 |
+|-----------|------|-----------|------|
+| NDP_IDLE | NDP Start 수신 | NDP_ISSUE_START | desc_count 기록, PC=0 |
+| NDP_ISSUE_START | AccInst write DRAM timing 완료 | NDP_RUN | 실행 시작 |
+
+- 현재 구현: NDP_ISSUE_START에서 DRAM write가 MC queue에서 완료 대기 후 NDP_BEFORE_RUN → NDP_RUN
+- 제안: desc_store에 이미 데이터 있으므로, DRAM write timing 완료 확인 후 바로 NDP_RUN 전환 가능
+
+#### Stage 3: PC Fetch → decode_acc_inst()
+
+```cpp
+// tick() 내 NDP_RUN 처리
+// 조건: addr_gen_slot에 빈 자리 있을 때
+if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() < addr_gen_slot_max) {
+    int col_addr = PC[dimm_id][pch_id] >> 3;   // PC[9:3]
+    int idx      = PC[dimm_id][pch_id] & 0x7;  // PC[2:0]
+
+    // Cache Hit 체크: pch_lvl_inst_buf entry group tag 비교
+    int group_idx = find_entry_group(dimm_id, pch_id, col_addr);
+
+    if (group_idx < 0) {
+        // Cache Miss → DRAM RD 발행, stall until response
+        issue_desc_fetch(dimm_id, pch_id, col_addr);  // DRAM RD (timing)
+        // RD 응답 시: desc_store[pch_id][col_addr] → buffer, oldest evict
+        return;  // 이번 cycle은 fetch 불가
+    }
+
+    // Cache Hit → descriptor fetch
+    uint64_t inst = pch_lvl_inst_buf[dimm_id][pch_id][group_idx][idx];
+    AccInst_Slot decoded = decode_acc_inst(inst);
+
+    // Opcode별 분기
+    switch (decoded.opcode) {
+        case RD: case WR:
+            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].push_back(decoded);
+            PC[dimm_id][pch_id]++;
+            break;
+        case BAR:
+            pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_BAR;
+            PC[dimm_id][pch_id]++;
+            break;
+        case WAIT:
+            pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_WAIT;
+            wait_cycle = decoded.etc;
+            PC[dimm_id][pch_id]++;
+            break;
+        case SET_BASE: case INC_BASE: case SET_LOOP:
+            // 제어 명령: register 업데이트, PC++ (decode 내부에서 처리)
+            PC[dimm_id][pch_id]++;
+            break;
+        case LOOP:
+            // decode_acc_inst() 내부에서 처리 완료:
+            //   cnt > 0: cnt--, PC = jump_pc (다음 cycle에 target col cache hit/miss 체크)
+            //   cnt == 0: PC++ (fall through)
+            break;
+        case DONE:
+            pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_DONE;
+            break;
+    }
+}
+```
+
+**PC 증가 규칙**:
+
+| Opcode | PC 동작 | DRAM 요청 |
+|--------|---------|-----------|
+| RD/WR | PC++ | addr_gen_slot에 enqueue |
+| BAR | PC++ | (없음, drain 대기) |
+| WAIT | PC++ | (없음, cycle 대기) |
+| SET_BASE | PC++ | (없음) |
+| INC_BASE | PC++ | (없음) |
+| SET_LOOP | PC++ | (없음) |
+| LOOP (cnt>0) | PC = jump_pc | (없음, buffer miss 가능) |
+| LOOP (cnt==0) | PC++ | (없음) |
+| DONE | (정지) | (없음, drain 대기) |
+
+**Fetch Rate**: 최대 1 descriptor/cycle
+
+**Fetch 조건**: addr_gen_slot에 빈 자리가 있거나, 제어 명령(SET_BASE, INC_BASE, SET_LOOP, LOOP)인 경우.
+제어 명령은 addr_gen_slot을 사용하지 않으므로 addr_gen_slot full 상태에서도 fetch 가능.
+단, opcode를 알려면 먼저 fetch해야 하므로 구현 시 1-entry latch 또는 peek 필요.
+
+#### Stage 4: addr_gen_slot → send_ndp_req_to_mc()
+
+기존 `send_ndp_req_to_mc()` 로직 유지 (변경 없음).
+
+```cpp
+// Round-robin across addr_gen_slot entries (max 8)
+for (int i = 0; i < addr_gen_slot.size(); i++) {
+    int slot_idx = (i + rr_idx) % addr_gen_slot.size();
+    AccInst_Slot& slot = addr_gen_slot[slot_idx];
+
+    Request req(0, slot.opcode == RD ? Request::Type::Read : Request::Type::Write);
+    // addr_vec에 ch, pch, bg, bk, row, col 매핑 (Undirect mode 시 row는 이미 resolve됨)
+    req.addr_vec = {slot.ch, slot.pch, slot.bg, slot.bk, slot.row, slot.col};
+    req.is_ndp_req = true;
+
+    if (m_controllers[ch_id]->send(req)) {
+        if (slot.cnt == slot.opsize) {
+            addr_gen_slot.erase(slot_idx);  // 완료 → 제거
+        } else {
+            slot.cnt++;
+            slot.col++;   // 다음 column
+            rr_idx++;
+        }
+        break;  // 1 DRAM request per cycle
+    }
+}
+```
+
+| 속성 | 값 |
+|------|-----|
+| Issue Rate | 1 DRAM request / cycle |
+| Scheduling | Round-robin across addr_gen_slot entries |
+| Column Iteration | cnt++, col++ per cycle until cnt == opsize |
+| Slot 제거 | cnt == opsize 시 addr_gen_slot에서 erase |
+
+#### NDP State Machine (제안)
+
+```
+┌──────────┐
+│ NDP_IDLE │◄──────────────────────────────────────┐
+└────┬─────┘                                       │
+     │ NDP Start (desc_count, PC=0)                │
+     ▼                                             │
+┌──────────────────┐                               │
+│ NDP_ISSUE_START  │  AccInst write DRAM timing 완료 대기
+└────┬─────────────┘                               │
+     │ DRAM WR timing settled                      │
+     ▼                                             │
+╔═══════════╗  PC fetch → decode → addr_gen_slot   │
+║  NDP_RUN  ║◄──────────────────────┐              │
+╚═══╤═══╤═══╝                       │              │
+    │   │                           │              │
+    │   ├─ RD/WR: stay (enqueue)    │              │
+    │   ├─ SET_BASE/INC_BASE: stay  │              │
+    │   ├─ SET_LOOP: stay           │              │
+    │   ├─ LOOP: stay (PC jump/++)  │              │
+    │   │                           │              │
+    │   ├─ BAR ──→ NDP_BAR ─────────┘ (drain)      │
+    │   ├─ WAIT ─→ NDP_WAIT ────────┘ (cycle wait) │
+    │   └─ DONE ─→ NDP_DONE ──────────────────────┘ (drain → IDLE)
+    │
+    └─ Cache Miss → NDP_FETCH_STALL ─→ NDP_RUN (DRAM RD 응답 후)
+```
+
+| 상태 | 진입 조건 | 동작 | 전환 조건 | 다음 상태 |
+|------|-----------|------|-----------|-----------|
+| NDP_IDLE | 초기 / DONE 완료 | 대기 | NDP Start 수신 | NDP_ISSUE_START |
+| NDP_ISSUE_START | NDP Start | desc_count, PC=0 설정 | DRAM WR timing 완료 | NDP_RUN |
+| NDP_RUN | 실행 중 | PC fetch + decode + issue | opcode별 분기 | BAR/WAIT/DONE/FETCH_STALL |
+| NDP_BAR | BAR 명령 | addr_gen_slot drain + in-flight 완료 | all drained | NDP_RUN |
+| NDP_WAIT | WAIT 명령 | etc cycle 대기 | wait_cnt == wait_cycle | NDP_RUN |
+| NDP_FETCH_STALL | Cache Miss | DRAM RD 발행, 응답 대기 | RD 응답 도착 + buffer 적재 | NDP_RUN |
+| NDP_DONE | DONE 명령 | addr_gen_slot drain + in-flight 완료 | all drained | NDP_IDLE |
+
+**기존 대비 변경점**:
+- NDP_BEFORE_RUN 제거 → NDP_ISSUE_START에서 DRAM WR timing 후 직접 NDP_RUN
+- **NDP_FETCH_STALL 추가**: Descriptor Cache miss 시 DRAM RD 응답 대기
+- NDP_RUN에서 제어 명령 (SET_BASE, INC_BASE, SET_LOOP, LOOP) 처리 추가
+- NDP_WAIT_RES 제거 (미구현 상태, 불필요)
+
+### Descriptor 절약 효과 예측
+
+COPY 1MB 예시 (DDR5 x4, row=8KB, opsize=128 cols):
+
+| 방식 | Descriptor 수 | 비고 |
+|------|---------------|------|
+| 현재 (Direct Only) | ~258 | 128 RD + 128 WR + BAR + DONE |
+| Undirect + LOOP | ~8 | SET_BASE×2 + RD(mode=1) + INC_BASE + WR(mode=1) + INC_BASE + LOOP + DONE |
+| 절감률 | **96.5%** | 64-entry buffer에 완전 수용 가능, DRAM spill 불필요 |
+
+### Implementation Plan
+
+```
+Phase 1: Per-PCH Buffer + desc_store
+  ├── dimm_lvl_req_buffer + nl_req_slot → desc_store[dimm][pch][128][8] + pch_lvl_inst_buf[dimm][pch][8][8]
+  ├── send_ndp_ctrl(): Write Intercept (모든 AccInst → desc_store, Col 0~7 → pch_lvl_inst_buf)
+  ├── NDP Start: per-PCH start flag(1b) + desc_count(16b)
+  ├── tick(): PC 기반 fetch (pch_lvl_inst_buf → decode → addr_gen_slot), nl_req_slot 삭제
+  ├── DRAM timing-only 모델 (AccInst data는 desc_store에만 저장)
+  └── 검증: 기존 Direct trace로 기능 동등성 확인
+
+Phase 2: Direct/Undirect Access Mode + PC 실행
+  ├── AccInst_Slot bit[59] mode 추가 (opcode 바로 다음), 전체 필드 1b 하향 시프트
+  ├── AccInst_Slot struct에 mode 필드 추가 (request.h)
+  ├── base_reg[8], loop_cnt_reg[8] per PCH in HSNC (ndp_DRAM_system.cpp)
+  ├── SET_BASE/INC_BASE: [58:56]=reg_idx, [55:38]=value
+  ├── SET_LOOP: [58:56]=cnt_reg(3b), [55:40]=loop_count(16b)
+  ├── LOOP: [58:56]=cnt_reg(3b), [55:40]=jump_pc(16b)
+  ├── decode_acc_inst(): opcode별 필드 해석 분기 + Undirect row[17:15]=reg, row[14:0]=offset
+  ├── PC (10-bit): PC[9:3]=col_addr, PC[2:0]=idx → desc_store/buffer 연동
+  ├── 순차 Miss / LOOP Miss → DRAM RD (timing) + desc_store에서 buffer 적재
+  ├── Trace generator (ndp_workload_trace_generator.py) 수정: Undirect trace 생성
+  └── 검증: 동일 워크로드 Direct vs Undirect 결과 비교
+
+Phase 3: DRAM Spill (Descriptor Cache)
+  ├── pch_lvl_inst_buf를 8-entry-group fully-associative Descriptor Cache로 운용
+  ├── DRAM 저장: (ch, pch, ndp_ctrl_buf_bg/bk, ndp_ctrl_row, col0~127) → PC 0~1023
+  ├── Write Intercept: Col 0~7 write → buffer 직접 적재 (초기 64 entries)
+  ├── PC = col_addr[9:3] + idx[2:0], Entry Group Tag = col_addr (7b)
+  ├── Sequential Miss: 다음 column DRAM RD (64B) + oldest group evict
+  ├── LOOP Miss: jump target column이 buffer에 없으면 DRAM RD + evict
+  └── 검증: GEMV (>64 desc) 워크로드 descriptor cache hit/miss 통계
+```
+
+### Key Files
+
+| File | Role |
+|------|------|
+| `src/base/request.h` | `AccInst_Slot` 구조체, 새 opcode 정의 |
+| `src/memory_system/impl/ndp_DRAM_system.cpp` | HSNC 전체: buffer, decode, addr gen, state machine |
+| `src/dram_controller/impl/ndp_dram_controller.cpp` | DBX MC (변경 최소: request 형태 동일) |
+| Config YAML | `pch_lvl_inst_buf_size`, `undirect_mode` 등 |
+| `ndp_workload_trace_generator.py` | 재정의된 AccInst 기반 trace 생성 (Undirect + SET_LOOP + LOOP) |
+| `gen_trace.py` | 기존 Direct-only trace 생성 (원본 유지) |

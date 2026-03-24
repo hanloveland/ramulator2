@@ -5,9 +5,9 @@ Frontend:
   debug_mode: false
   max_inst: 500000000
 
-  core0_trace: "./trace/pch_ndp/pch_ndp_x4_8M_COPY.txt"
+  core0_trace: "./trace_test/pch_ndp/pch_ndp_x4_128K_GEMV.txt"
   core0_mshr_size: 32
-  core0_is_ndp_trace: false
+  core0_is_ndp_trace: true
   core0_repeat: 1
 
   Translation:
@@ -17,7 +17,7 @@ Frontend:
 MemorySystem:
   impl: ndpDRAM
   clock_ratio: 1
-  trace_core_enable: true
+  trace_core_enable: false
   trace_ndp_type: true
   trace_path: "./trace/pch_ndp/pch_ndp_x4_8M_COPY.txt"
   trace_core_mshr_size: 32
