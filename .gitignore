@@ -12,3 +12,9 @@ trace/*
 multi_dimm/*
 *_trace
 trace_single_bk/*
+__pycache__/
+*.csv
+simple_run_log/
+generated_traces/
+log_comp/
+perf_comparison/

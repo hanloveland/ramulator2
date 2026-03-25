@@ -79,6 +79,12 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     bool m_trace_core_enable = false;
     bool m_nma_trace = false;
 
+    // Host stall detection (tcore mode only)
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    uint64_t m_last_host_send_clk = 0;
+    bool m_host_send_ever = false;
+    bool m_host_stall_terminated = false;
+
     struct Trace {
       uint64_t timestamp;
       bool is_write;
@@ -221,6 +227,12 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
           host_mc->set_nma_addresses(m_nma_ctrl_row, m_nma_ctrl_bg, m_nma_ctrl_bk,
                                      m_nma_buf_bg, m_nma_buf_bk);
           m_logger->info("   - Wired bypass + NMA addresses: Host MC Ch {} -> NMA MCs", ch);
+
+          // Wire NMA idle query callback (Host MC polls NMA MC state for C2H transition)
+          host_mc->set_nma_query_callback([this, ch](int rk) {
+            return m_nma_controllers[ch][rk]->is_nma_idle();
+          });
+          m_logger->info("   - Wired NMA idle query: Host MC Ch {} -> NMA MCs", ch);
         } else {
           m_logger->warn("   - Host MC Ch {} is not AsyncDIMMHostController, bypass not wired!", ch);
         }
@@ -290,7 +302,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         m_max_outstanding = m_trace_core_mshr_size;
 
         std::string trace_path = param<std::string>("trace_path").desc("NMA trace file path").required();
-        m_trace_repeat = param<int>("trace_repeat").desc("Number of times to repeat trace").default_val(1);
+        m_trace_repeat = param<int>("trace_repeat").desc("Number of times to repeat trace (0=infinite)").default_val(0);
         m_logger->info("  -- NMA Trace Path: {}", trace_path);
         m_logger->info("  -- Trace Repeat: {}", m_trace_repeat);
         load_trace(trace_path, m_trace);
@@ -329,11 +341,23 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         }
       }
 
+      if (is_success && !req.is_trace_core_req) {
+        m_last_host_send_clk = m_clk;
+        m_host_send_ever = true;
+      }
       return is_success;
     };
 
     void tick() override {
       m_clk++;
+
+      // Host stall detection: tcore backpressure → host can't send
+      if (m_trace_core_enable && m_host_send_ever && !m_host_stall_terminated &&
+          (m_clk - m_last_host_send_clk > HOST_STALL_THRESHOLD)) {
+        m_logger->warn("Host stalled for {} cycles (tcore backpressure) — terminating simulation.",
+                       m_clk - m_last_host_send_clk);
+        m_host_stall_terminated = true;
+      }
 
       m_dram->tick();
 
@@ -606,6 +630,8 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     }
 
     bool is_finished() override {
+      if (m_host_stall_terminated) return true;
+
       // Trace-core NMA mode
       if (m_trace_core_enable && m_nma_trace) {
         // Infinite repeat (trace_repeat <= 0): never block termination
@@ -630,6 +656,10 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
         for (int rk = 0; rk < m_num_ranks; rk++)
           if (!m_nma_controllers[ch][rk]->is_nma_idle()) return false;
       return true;
+    }
+
+    bool is_host_stall_terminated() override {
+      return m_host_stall_terminated;
     }
 
     virtual void mem_sys_finalize() override {
@@ -795,7 +825,9 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
               break;
 
             case SystemNMAState::TRANSITIONING_C2H:
-              tick_transition_c2h(ch, rk);
+              // C2H is now Host MC driven — this state should not be reached.
+              // Fallback: treat as HOST_MODE.
+              m_rank_state[ch][rk] = SystemNMAState::HOST_MODE;
               break;
           }
         }
@@ -870,50 +902,39 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
      * AND Host MC has no pending offloads (RU empty + RT pending empty) for this rank.
      */
     void tick_concurrent_mode(int ch, int rk) {
-      auto* nma_mc = m_nma_controllers[ch][rk];
-      if (!nma_mc->is_concurrent_complete()) {
-        if (m_debug_mode && m_clk % 100000 == 0)
-          m_logger->info("[{}] Ch{} Rk{}: CONCURRENT not complete — NMA state={}, idle={}, cmd_fifo={}, ret_buf={}, pend_rd={}, pend_int={}, req_fifo={}",
-            m_clk, ch, rk, (int)nma_mc->get_nma_state(), nma_mc->is_nma_idle(),
-            nma_mc->get_cmd_fifo_outstanding(),
-            nma_mc->get_return_buffer_size(),
-            nma_mc->get_pending_reads_size(),
-            nma_mc->get_pending_interrupts_size(),
-            nma_mc->get_nma_outstanding());
-        return;
+      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+      if (!host_mc) return;
+
+      // Host MC drives C2H: polls NMA idle → stops offload → drains RU/RT → sets mode=HOST
+      if (host_mc->get_mode(rk) == AsyncDIMMMode::HOST) {
+        // Host MC has set mode=HOST. Wait for NMA MC to finish draining CMD FIFO.
+        auto* nma_mc = m_nma_controllers[ch][rk];
+        if (!nma_mc->is_concurrent_complete()) return;  // CMD FIFO still draining
+        nma_mc->exit_concurrent_mode();
+
+        m_rank_state[ch][rk] = SystemNMAState::HOST_MODE;
+        m_logger->info("[{}] Ch{} Rk{}: C2H complete (Host MC driven), returning to HOST_MODE", m_clk, ch, rk);
+
+        // Check if ALL ranks across ALL channels are now HOST_MODE
+        bool all_host = true;
+        for (int c = 0; c < m_num_channels && all_host; c++)
+          for (int r = 0; r < m_num_ranks && all_host; r++)
+            if (m_rank_state[c][r] != SystemNMAState::HOST_MODE) all_host = false;
+
+        if (all_host) {
+          m_logger->info("[{}] === All ranks returned to HOST_MODE ===", m_clk);
+          for (int c = 0; c < m_num_channels; c++) {
+            auto* hmc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[c]->m_impl);
+            if (!hmc) continue;
+            for (int r = 0; r < m_num_ranks; r++) {
+              auto s = hmc->get_debug_state(r);
+              m_logger->info("[{}]   Ch{} Rk{}: RU={}, RT_pending={}, OT_sum={}, rd_buf={}, wr_buf={}, active={}, pending={}",
+                m_clk, c, r, s.ru_size, s.rt_pending, s.ot_sum,
+                s.rd_buf, s.wr_buf, s.active_buf, s.pending_depart);
+            }
+          }
+        }
       }
-
-      // NMA idle → drain remaining offloaded commands before C2H
-      // Deliver any pending interrupts first
-      nma_mc->flush_pending_interrupts();
-
-      // Remove all RU entries for this rank from Host MC
-      // (offloaded commands that haven't completed via interrupt)
-      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
-      if (host_mc)
-        host_mc->drain_offloads_for_rank(rk);
-
-      m_rank_state[ch][rk] = SystemNMAState::TRANSITIONING_C2H;
-      m_logger->info("[{}] Ch{} Rk{}: Concurrent complete, C2H transition", m_clk, ch, rk);
-    }
-
-    /**
-     * CONCURRENT → HOST (C2H, Implicit Sync):
-     * NMA MC has already closed banks (PREA in DONE state).
-     * Exit concurrent mode; restore Host MC to HOST mode.
-     */
-    void tick_transition_c2h(int ch, int rk) {
-      auto* nma_mc = m_nma_controllers[ch][rk];
-      if (!nma_mc->is_nma_idle()) return;
-
-      nma_mc->exit_concurrent_mode();
-
-      auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
-      if (host_mc)
-        host_mc->set_mode(rk, AsyncDIMMMode::HOST);
-
-      m_rank_state[ch][rk] = SystemNMAState::HOST_MODE;
-      m_logger->info("[{}] Ch{} Rk{}: C2H complete, returning to HOST_MODE", m_clk, ch, rk);
     }
 
     // ===== NMA Trace Workload Driver =====

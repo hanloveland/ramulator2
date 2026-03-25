@@ -490,6 +490,8 @@ class DDR5PCH : public IDRAM, public Implementation {
     std::vector<bool>                     ndp_seg_tracking_per_pch;
     // Segment counter per pCH
     std::vector<int>                      ndp_seg_cnt_per_pch;
+    // YAML option: enable NDP segment tracking (default false)
+    bool m_ndp_seg_tracking_enable = false;
 
     static const char* ndp_seg_type_str(NdpSegType t) {
       switch(t) {
@@ -501,10 +503,10 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
     }
 
-    #ifdef PCH_DEBUG
     bool is_pch_error = false;
     int error_pch = -1;
 
+    #ifdef PCH_DEBUG
     std::vector<std::vector<Inst_Slot>> ndp_inst_hist_per_pch; // Running NDP Instruction Slot
     int max_ndp_inst_hist = 32;
 
@@ -629,7 +631,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     is_pch_error = true;     
                     error_pch = pch_idx;
                     std::cout<<"["<<pch_idx<<"] Invalid NDP Command during self exec mode!" << std::endl;
-                  #elif 
+                  #else
                     throw std::runtime_error("Invalid NDP Command during self exec mode!");
                   #endif 
 
@@ -787,7 +789,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                   is_pch_error = true;     
                   error_pch = pch_idx;
                   std::cout<<"["<<pch_idx<<"] Not Allowed during self_exec" << std::endl;
-                  #elif                   
+                  #else                  
                   throw std::runtime_error("Not Allowed during self_exec");
                   #endif                      
                 } 
@@ -870,7 +872,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     is_pch_error = true;     
                     error_pch = pch_idx;
                     std::cout<<"["<<pch_idx<<"] Invalid Address ("<<ndp_addr_per_pch[pch_idx][m_levels["row"]]<<") to access NDP!" << std::endl;
-                  #elif                   
+                  #else                  
                     throw std::runtime_error("Invalid Address to access NDP!");
                   #endif                          
                 } else {
@@ -892,15 +894,17 @@ class DDR5PCH : public IDRAM, public Implementation {
                               is_pch_error = true;     
                               error_pch = pch_idx;
                               std::cout<<"["<<pch_idx<<"] NDP Unit start when is not idle" << std::endl;
-                              #elif                   
+                              #else                  
                                 throw std::runtime_error("NDP Unit start when is not idle");                                
                               #endif  
                             } else {
                               DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," Status -> run");
                               ndp_status_per_pch[pch_idx] = m_ndp_status("run");
                               // Segment tracking: start first segment
-                              ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::UNKNOWN, m_clk, 0, 0};
-                              ndp_seg_tracking_per_pch[pch_idx] = true;
+                              if (m_ndp_seg_tracking_enable) {
+                                ndp_cur_segment_per_pch[pch_idx] = {ndp_seg_cnt_per_pch[pch_idx], NdpSegType::UNKNOWN, m_clk, 0, 0};
+                                ndp_seg_tracking_per_pch[pch_idx] = true;
+                              }
                             }
                           }                        
                         }
@@ -924,7 +928,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                         is_pch_error = true;     
                         error_pch = pch_idx;
                         std::cout<<"["<<pch_idx<<"] " << msg << std::endl;
-                        #elif                                             
+                        #else                                            
                           throw std::runtime_error(msg);
                         #endif                          
                       }
@@ -956,7 +960,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     is_pch_error = true;     
                     error_pch = pch_idx;
                     std::cout<<"["<<pch_idx<<"] Invalid Not Mapped NDP Address!"<< std::endl;
-                    #elif                                             
+                    #else                                            
                       throw std::runtime_error("Invalid Not Mapped NDP Address!");
                     #endif                         
                   }
@@ -974,7 +978,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                   std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                   std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                   std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                  #elif                                             
+                  #else                                            
                       throw std::runtime_error("NDP DRAM RD when NDP is idle!!");
                   #endif                                           
                 } else {
@@ -988,7 +992,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                     std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                     std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                    #elif                                             
+                    #else                                            
                         throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
                     #endif                     
                   } else {
@@ -1025,7 +1029,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                       std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                       std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                       std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                      #elif                                             
+                      #else                                            
                           throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM RD!!");
                       #endif                        
                     } else {
@@ -1062,7 +1066,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                   std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                   std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                   std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                  #elif                                             
+                  #else                                            
                       throw std::runtime_error("NDP DRAM WR when NDP is idle!!");
                   #endif                     
                 } else {
@@ -1077,7 +1081,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                     std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                     std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                     std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                    #elif                                             
+                    #else                                            
                         throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
                     #endif     
                   } else {
@@ -1112,7 +1116,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                       std::cout<<"  - NDP ID : "<<ndp_id_per_pch[pch_idx] <<std::endl;
                       std::cout<<"  - BG ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] <<std::endl;
                       std::cout<<"  - BK ADDR : "<<ndp_addr_per_pch[pch_idx][m_levels["bank"]] <<std::endl;
-                      #elif                                                                       
+                      #else                                                                      
                           throw std::runtime_error("Cannot Find Matched Instruction with NDP DRAM WR!!");
                       #endif                                               
                     } else {
@@ -1870,6 +1874,11 @@ class DDR5PCH : public IDRAM, public Implementation {
       ndp_cur_segment_per_pch.resize(total_pch, {0, NdpSegType::UNKNOWN, 0, 0, 0});
       ndp_seg_tracking_per_pch.resize(total_pch, false);
       ndp_seg_cnt_per_pch.resize(total_pch, 0);
+
+      // NDP Segment Tracking enable option (default: false)
+      if (auto node = m_config["ndp_seg_tracking_enable"]) {
+        m_ndp_seg_tracking_enable = node.as<bool>();
+      }
     };
 
     void set_timing_vals() {
@@ -2611,7 +2620,8 @@ class DDR5PCH : public IDRAM, public Implementation {
       }
       std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
 
-      // NDP Segment Tracking Report
+      // NDP Segment Tracking Report (only when enabled)
+      if (m_ndp_seg_tracking_enable) {
       double tCK_ns = (double)m_timing_vals("tCK_ps") / 1000.0;
       std::cout<<"\n=== NDP Segment Tracking Report ==="<<std::endl;
       for(int ch=0;ch<m_num_channels;ch++) {
@@ -2665,6 +2675,7 @@ class DDR5PCH : public IDRAM, public Implementation {
         }
       }
       std::cout<<"=== End NDP Segment Tracking Report ===\n"<<std::endl;
+      } // end m_ndp_seg_tracking_enable
     }
     void process_rank_energy(PowerStats& rank_stats, Node* rank_node) {
       
@@ -2818,8 +2829,9 @@ class DDR5PCH : public IDRAM, public Implementation {
     }
     std::cout << "========================================" << std::endl;
 
+    #ifdef PCH_DEBUG
     std::cout << " Print All NDP Unit Issued History (32)" << std::endl;
-    
+
     for (int p = 0 ; p < m_num_channels * m_num_pseudochannel; p++ ) {
         std::cout<< " NDP Unit ["<<p<<"]"<<std::endl;
         std::cout << std::left
@@ -2831,7 +2843,7 @@ class DDR5PCH : public IDRAM, public Implementation {
                   << std::setw(6)  << "BK"
                   << std::setw(6)  << "CNT"
                   << std::endl;
-        std::cout << std::string(54, '-') << std::endl;        
+        std::cout << std::string(54, '-') << std::endl;
         for (int i = 0; i < (int)ndp_inst_hist_per_pch[p].size(); i++) {
 
             auto it = ndp_opcode_str.find(ndp_inst_hist_per_pch[p][i].opcode);
@@ -2846,8 +2858,9 @@ class DDR5PCH : public IDRAM, public Implementation {
                       << std::setw(6)  << ndp_inst_hist_per_pch[p][i].bk
                       << std::setw(6)  << ndp_inst_hist_per_pch[p][i].cnt
                       << std::endl;
-        }        
+        }
     }
+    #endif
 
     std::cout << "========================================" << std::endl;
 
@@ -2882,14 +2895,16 @@ class DDR5PCH : public IDRAM, public Implementation {
         }        
     }
 
+    #ifdef PCH_DEBUG
     std::cout << " Print All Access History " << std::endl;
-    
+
     std::cout << "CH/PCH/Rank/BankGroup/Bank/Row: AccessCount" << std::endl;
 
     for (const auto& [key, count] : m_row_access_counts) {
       auto [ch, pch, rank, bg, ba, ro] = key;
       std::cout << fmt::format("{},{},{},{},{},{},{}", ch, pch, rank, bg, ba, ro, count) << std::endl;
     }
+    #endif
 
     }    
 };

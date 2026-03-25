@@ -210,6 +210,7 @@ class AsyncDIMMNMAController {
     // ===== Phase 3: Concurrent Mode =====
 
     bool m_concurrent_mode = false;
+    bool m_accept_offload = true;   // false after NMA_IDLE in concurrent mode (reject new offloads)
 
     // CMD FIFO (per-bank): receives decoded host offload commands (ACTO→ACT, RDO→RD, etc.)
     struct CmdFifoEntry {
@@ -981,10 +982,17 @@ class AsyncDIMMNMAController {
      */
     bool is_concurrent_complete() const {
       if (!m_concurrent_mode) return false;
-      // NMA work done = sufficient for concurrent completion.
-      // Remaining CMD FIFO entries (host offloaded commands) will be
-      // drained during C2H transition or handled by Host MC after mode change.
-      return is_nma_idle();
+      return is_nma_idle()
+          && all_cmd_fifos_empty()
+          && m_return_buffer.empty()
+          && m_pending_reads.empty()
+          && m_pending_interrupts.empty();
+    }
+
+    bool all_cmd_fifos_empty() const {
+      for (const auto& fifo : m_cmd_fifo)
+        if (!fifo.empty()) return false;
+      return true;
     }
 
     /**

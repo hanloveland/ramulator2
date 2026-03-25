@@ -6,12 +6,14 @@
 #   Exp1: Base Standalone  — 1 DIMM, x4 (Baseline / AsyncDIMM-N / DBX-N)
 #   Exp2: Scaling DRAM     — 1 DIMM (Baseline / DBX x4 / x8 / x16)
 #   Exp3: Scaling DIMMs    — x4 (1 / 2 / 4 / 8 / 16 DIMM DBX-N)
+#   Exp4: Concurrent       — Host SPEC + tcore GEMV concurrent execution
 #
 # Usage:
-#   ./run_all_experiments.sh              # run all 3 experiments
+#   ./run_all_experiments.sh              # run all experiments
 #   ./run_all_experiments.sh -e 1         # Exp1 only
 #   ./run_all_experiments.sh -e 2         # Exp2 only
 #   ./run_all_experiments.sh -e 3         # Exp3 only
+#   ./run_all_experiments.sh -e 4         # Exp4 only
 #   ./run_all_experiments.sh -j 16        # 16 parallel jobs
 #   ./run_all_experiments.sh -s           # skip simulation, parse only
 # ============================================================================
@@ -40,6 +42,12 @@ BLAS_WL=("COPY" "AXPY" "AXPBY" "AXPBYPCZ" "XMY" "DOT")
 BLAS_SZ=("8K" "32K" "128K" "512K" "2M" "8M")
 GEMV_SZ=("8K" "16K" "32K" "64K" "128K")
 
+# Exp4: Concurrent mode — SPEC host + tcore GEMV
+SPEC_TRACE_ROOT="../spec_trace"
+SPEC_BENCHMARKS=("429.mcf" "470.lbm" "462.libquantum" "401.bzip2" "433.milc")
+E4_GEMV_SZ=("128K")
+E4_CONFIGS=("base" "baseT" "dbx" "dbxT" "dbxN" "asyncN")
+
 # ---------- argument parsing ----------
 while [[ $# -gt 0 ]]; do
     case "$1" in
@@ -49,7 +57,7 @@ while [[ $# -gt 0 ]]; do
         -h|--help)
             echo "Usage: $0 [-j JOBS] [-e EXP_NUM] [-s]"
             echo "  -j JOBS     Parallel jobs (default: 8)"
-            echo "  -e 1|2|3    Run specific experiment only"
+            echo "  -e 1|2|3|4  Run specific experiment only"
             echo "  -s          Skip simulation, parse existing logs"
             exit 0 ;;
         *) echo "Unknown option: $1"; exit 1 ;;
@@ -113,10 +121,7 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_${wl}.txt"
                 run_one "E1_base_${wl}_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
-                    -p "Frontend.max_inst=500000000" \
-                    -p "MemorySystem.trace_core_enable=true" \
-                    -p "MemorySystem.trace_ndp_type=false" \
-                    -p "MemorySystem.trace_path=$trace" &
+                    -p "Frontend.max_inst=500000000" &
                 job_throttle
 
                 # DBX host-only (pCH, no NDP)
@@ -124,9 +129,6 @@ if [ "$SKIP_SIM" = false ]; then
                 run_one "E1_dbx_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "MemorySystem.trace_core_enable=true" \
-                    -p "MemorySystem.trace_ndp_type=false" \
-                    -p "MemorySystem.trace_path=$trace" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
@@ -152,19 +154,13 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_GEMV.txt"
             run_one "E1_base_GEMV_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
-                -p "Frontend.max_inst=500000000" \
-                -p "MemorySystem.trace_core_enable=true" \
-                -p "MemorySystem.trace_ndp_type=false" \
-                -p "MemorySystem.trace_path=$trace" &
+                -p "Frontend.max_inst=500000000" &
             job_throttle
 
             trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${sz}_GEMV.txt"
             run_one "E1_dbx_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
                 -p "Frontend.core0_is_ndp_trace=false" \
-                -p "MemorySystem.trace_core_enable=true" \
-                -p "MemorySystem.trace_ndp_type=false" \
-                -p "MemorySystem.trace_path=$trace" \
                 -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                 -p "MemorySystem.DRAM.org.real_dq=4" &
             job_throttle
@@ -279,6 +275,104 @@ if [ "$SKIP_SIM" = false ]; then
         wait
         echo "Exp3: all simulations complete."
     fi
+
+    # ----------------------------------------------------------------
+    # Exp4: Concurrent — Host SPEC + tcore GEMV
+    # Configs: base, base-T, dbx, dbx-T, dbx-N, async-N
+    # ----------------------------------------------------------------
+    if [ -z "$RUN_EXP" ] || [ "$RUN_EXP" = "4" ]; then
+        EXP4_LOG="$LOG_ROOT/exp4"
+        mkdir -p "$EXP4_LOG"
+        echo ""
+        echo "========================================"
+        echo " Exp4: Concurrent (SPEC Host + GEMV)"
+        echo "========================================"
+
+        for bench in "${SPEC_BENCHMARKS[@]}"; do
+            spec_trace="${SPEC_TRACE_ROOT}/${bench}"
+            if [ ! -f "$spec_trace" ]; then
+                echo "[SKIP] SPEC trace not found: $spec_trace"
+                continue
+            fi
+            btag="${bench//./}"   # 429mcf
+
+            for gsz in "${E4_GEMV_SZ[@]}"; do
+
+                # --- base: Host only (baseline DDR5, no tcore) ---
+                run_one "E4_base_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
+                    "$EXP4_LOG/base_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.max_inst=500000000" &
+                job_throttle
+
+                # --- base-T: Host + tcore GEMV (baseline DDR5, non-NDP LD/ST) ---
+                tcore_trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${gsz}_GEMV.txt"
+                run_one "E4_baseT_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
+                    "$EXP4_LOG/baseT_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.max_inst=500000000" \
+                    -p "MemorySystem.trace_core_enable=true" \
+                    -p "MemorySystem.trace_ndp_type=false" \
+                    -p "MemorySystem.trace_path=$tcore_trace" &
+                job_throttle
+
+                # --- dbx: Host only (DBX-DIMM pCH, no tcore) ---
+                run_one "E4_dbx_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
+                    "$EXP4_LOG/dbx_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.core0_is_ndp_trace=false" \
+                    -p "Frontend.max_inst=500000000" \
+                    -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
+                    -p "MemorySystem.DRAM.org.real_dq=4" &
+                job_throttle
+
+                # --- dbx-T: Host + tcore GEMV non-NDP (DBX host-side LD/ST) ---
+                tcore_trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${gsz}_GEMV.txt"
+                run_one "E4_dbxT_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
+                    "$EXP4_LOG/dbxT_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.core0_is_ndp_trace=false" \
+                    -p "Frontend.max_inst=500000000" \
+                    -p "MemorySystem.trace_core_enable=true" \
+                    -p "MemorySystem.trace_ndp_type=false" \
+                    -p "MemorySystem.trace_path=$tcore_trace" \
+                    -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
+                    -p "MemorySystem.DRAM.org.real_dq=4" &
+                job_throttle
+
+                # --- dbx-N: Host + tcore GEMV NDP (DBX NDP concurrent) ---
+                tcore_trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${gsz}_GEMV.txt"
+                run_one "E4_dbxN_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
+                    "$EXP4_LOG/dbxN_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.core0_is_ndp_trace=false" \
+                    -p "Frontend.max_inst=500000000" \
+                    -p "MemorySystem.trace_core_enable=true" \
+                    -p "MemorySystem.trace_ndp_type=true" \
+                    -p "MemorySystem.trace_path=$tcore_trace" \
+                    -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
+                    -p "MemorySystem.DRAM.org.real_dq=4" &
+                job_throttle
+
+                # --- async-N: Host + tcore GEMV NDP (AsyncDIMM Concurrent Mode) ---
+                tcore_trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${gsz}_GEMV.txt"
+                run_one "E4_asyncN_${btag}_G${gsz}" "$CFG_ASYNCDIMM" "$spec_trace" \
+                    "$EXP4_LOG/asyncN_${btag}_G${gsz}.log" \
+                    -p "Frontend.core0_trace=$spec_trace" \
+                    -p "Frontend.max_inst=500000000" \
+                    -p "MemorySystem.trace_core_enable=true" \
+                    -p "MemorySystem.trace_nma_type=true" \
+                    -p "MemorySystem.trace_path=$tcore_trace" \
+                    -p "MemorySystem.concurrent_mode_enable=true" &
+                job_throttle
+
+            done
+        done
+
+        echo "Exp4: waiting for jobs..."
+        wait
+        echo "Exp4: all simulations complete."
+    fi
 fi
 
 # ============================================================================
@@ -293,7 +387,7 @@ echo "========================================================================"
 if [ -z "$RUN_EXP" ] || [ "$RUN_EXP" = "1" ]; then
     EXP1_LOG="$LOG_ROOT/exp1"
     echo ""
-    echo "--- Exp1: Base Standalone (1D, x4) ---"
+    echo "--- Exp1: Base Standalone (1D, x4) — Cycles ---"
     echo ""
     printf "%-10s %6s | %12s %12s %12s %12s\n" \
         "Workload" "Size" "Baseline" "DBX" "DBX-N" "AsyncDIMM-N"
@@ -311,6 +405,24 @@ if [ -z "$RUN_EXP" ] || [ "$RUN_EXP" = "1" ]; then
             for v in "$cyc_base" "$cyc_dbx" "$cyc_dbxn" "$cyc_async"; do
                 [ "$v" = "N/A" ] && e1_err=$((e1_err + 1))
             done
+        done
+    done
+    echo ""
+
+    echo "--- Exp1: Base Standalone (1D, x4) — Bandwidth (GB/s) ---"
+    echo ""
+    printf "%-10s %6s | %12s %12s %12s %12s\n" \
+        "Workload" "Size" "Baseline" "DBX" "DBX-N" "AsyncDIMM-N"
+    printf "%s\n" "$(printf '%.0s-' {1..75})"
+
+    for wl in "${BLAS_WL[@]}" "GEMV"; do
+        if [ "$wl" = "GEMV" ]; then sizes=("${GEMV_SZ[@]}"); else sizes=("${BLAS_SZ[@]}"); fi
+        for sz in "${sizes[@]}"; do
+            bw_base=$(extract_val "$EXP1_LOG/base_${wl}_${sz}.log" 'Host<->DB/DRAM\s+:\s+\K[0-9.]+')
+            bw_dbx=$(extract_val "$EXP1_LOG/dbx_${wl}_${sz}.log" 'Host<->DB\s+:\s+\K[0-9.]+')
+            bw_dbxn=$(extract_val "$EXP1_LOG/dbxn_${wl}_${sz}.log" 'DB<->DRAM\s+:\s+\K[0-9.]+')
+            bw_async=$(extract_val "$EXP1_LOG/async_${wl}_${sz}.log" 'Total Bandwidth\s+:\s+\K[0-9.]+')
+            printf "%-10s %6s | %12s %12s %12s %12s\n" "$wl" "$sz" "$bw_base" "$bw_dbx" "$bw_dbxn" "$bw_async"
         done
     done
     echo ""
@@ -428,6 +540,91 @@ if [ -z "$RUN_EXP" ] || [ "$RUN_EXP" = "3" ]; then
     done
     echo ""
     [ $e3_err -gt 0 ] && echo "Exp3: $e3_err issue(s)" || echo "Exp3: ALL OK"
+fi
+
+# ---------- Exp4 Results ----------
+if [ -z "$RUN_EXP" ] || [ "$RUN_EXP" = "4" ]; then
+    EXP4_LOG="$LOG_ROOT/exp4"
+    echo ""
+    echo "--- Exp4: Concurrent (SPEC Host + GEMV) — Simulation Cycles ---"
+    echo ""
+
+    e4_err=0
+    E4_CFG_LABELS=("base" "base-T" "dbx" "dbx-T" "dbx-N" "async-N")
+    E4_CFG_TAGS=("base" "baseT" "dbx" "dbxT" "dbxN" "asyncN")
+
+    for bench in "${SPEC_BENCHMARKS[@]}"; do
+        btag="${bench//./}"
+        echo ""
+        echo "  [$bench]"
+        printf "  %-6s | %12s %12s %12s %12s %12s %12s\n" \
+            "GEMV" "${E4_CFG_LABELS[@]}"
+        printf "  %s\n" "$(printf '%.0s-' {1..90})"
+
+        for gsz in "${E4_GEMV_SZ[@]}"; do
+            vals=()
+            for ctag in "${E4_CFG_TAGS[@]}"; do
+                logf="$EXP4_LOG/${ctag}_${btag}_G${gsz}.log"
+                v=$(grep -oP 'memory_system_cycles: \K\d+' "$logf" 2>/dev/null | head -1) || v=""
+                [ -z "$v" ] && v="N/A" && e4_err=$((e4_err + 1))
+                vals+=("$v")
+            done
+            printf "  %-6s | %12s %12s %12s %12s %12s %12s\n" "$gsz" "${vals[@]}"
+        done
+    done
+
+    # Slowdown table
+    echo ""
+    echo "--- Exp4: Host Slowdown (cycles / base cycles) ---"
+    echo ""
+    for bench in "${SPEC_BENCHMARKS[@]}"; do
+        btag="${bench//./}"
+        echo ""
+        echo "  [$bench]"
+        printf "  %-6s | %10s %10s %10s %10s %10s\n" \
+            "GEMV" "base-T" "dbx" "dbx-T" "dbx-N" "async-N"
+        printf "  %s\n" "$(printf '%.0s-' {1..72})"
+
+        for gsz in "${E4_GEMV_SZ[@]}"; do
+            base_log="$EXP4_LOG/base_${btag}_G${gsz}.log"
+            base_cyc=$(grep -oP 'memory_system_cycles: \K\d+' "$base_log" 2>/dev/null | head -1) || base_cyc=""
+
+            vals=()
+            for ctag in "baseT" "dbx" "dbxT" "dbxN" "asyncN"; do
+                logf="$EXP4_LOG/${ctag}_${btag}_G${gsz}.log"
+                cyc=$(grep -oP 'memory_system_cycles: \K\d+' "$logf" 2>/dev/null | head -1) || cyc=""
+                if [ -n "$base_cyc" ] && [ -n "$cyc" ] && [ "$base_cyc" -gt 0 ] 2>/dev/null; then
+                    ratio=$(python3 -c "print(f'{${cyc}/${base_cyc}:.3f}x')")
+                    vals+=("$ratio")
+                else
+                    vals+=("N/A")
+                fi
+            done
+            printf "  %-6s | %10s %10s %10s %10s %10s\n" "$gsz" "${vals[@]}"
+        done
+    done
+
+    # Host stall detection
+    echo ""
+    echo "--- Exp4: Host Stall Terminations ---"
+    stall_count=0
+    for bench in "${SPEC_BENCHMARKS[@]}"; do
+        btag="${bench//./}"
+        for gsz in "${E4_GEMV_SZ[@]}"; do
+            for ctag in "${E4_CFG_TAGS[@]}"; do
+                logf="$EXP4_LOG/${ctag}_${btag}_G${gsz}.log"
+                if grep -q "Host stalled" "$logf" 2>/dev/null; then
+                    cyc=$(grep -oP 'memory_system_cycles: \K\d+' "$logf" 2>/dev/null | head -1) || cyc="?"
+                    echo "  [STALL] ${ctag} ${bench} G${gsz} — terminated at cycle $cyc"
+                    stall_count=$((stall_count + 1))
+                fi
+            done
+        done
+    done
+    [ $stall_count -eq 0 ] && echo "  (none)"
+
+    echo ""
+    [ $e4_err -gt 0 ] && echo "Exp4: $e4_err N/A entries (check logs)" || echo "Exp4: ALL OK"
 fi
 
 echo ""

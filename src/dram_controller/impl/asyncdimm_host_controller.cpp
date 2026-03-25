@@ -128,6 +128,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     };
     std::vector<OffloadCmdLogEntry> s_offload_cmd_log;
 
+    // NMA idle polling for C2H transition (Host MC driven)
+    static constexpr int NMA_POLL_INTERVAL = 256;  // polling period (DRAM cycles)
+    std::vector<bool> m_offload_stopped;             // [rank] offload stopped after NMA IDLE detected
+    using NMAIdleQueryCallback = std::function<bool(int rank_id)>;
+    NMAIdleQueryCallback m_query_nma_idle = nullptr;
+
     // RT issue frequency tracking (per 256-cycle window)
     static constexpr int RT_TRACK_WINDOW = 256;
     int m_rt_track_window_issues = 0;      // RT issues in current window
@@ -358,6 +364,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
       // Initialize per-rank mode register (Host Mode only in Phase 1)
       m_mode_per_rank.resize(m_num_rank, AsyncDIMMMode::HOST);
+      m_offload_stopped.resize(m_num_rank, false);
 
       // NMA write tracking
       m_nma_wr_send_cnt.resize(num_ranks, 0);
@@ -395,6 +402,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
     void set_concurrent_mode_enable(bool enable) { m_concurrent_mode_enable = enable; }
 
+    void set_nma_query_callback(NMAIdleQueryCallback cb) { m_query_nma_idle = cb; }
+
+    bool is_offload_stopped(int rank_id) const {
+      return (rank_id >= 0 && rank_id < m_num_rank) ? m_offload_stopped[rank_id] : false;
+    }
+
     /**
      * Reset NMA write tracking counters for all ranks.
      * Called by system on trace repeat to prevent counter accumulation mismatch.
@@ -412,13 +425,19 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
      * Check if any RU entries or RT-pending reads exist for a rank.
      * Used by System for C2H transition: must drain all offloaded accesses first.
      */
-    bool has_pending_offloads_for_rank(int rank_id) const {
+    bool has_pending_offloads_for_rank(int rank_id) {
+      // Check RU entries
       for (const auto& entry : m_return_unit) {
         if (entry.req.addr_vec[m_rank_addr_idx] == rank_id) return true;
       }
+      // Check RT-pending reads
       if (rank_id >= 0 && rank_id < m_num_rank) {
         if (!m_rt_read_pending[rank_id].empty()) return true;
         if (m_rt_pending_count[rank_id] > 0) return true;
+      }
+      // Check active_buffer (post-ACTO entries waiting for RDO/WRO)
+      for (const auto& entry : m_active_buffer) {
+        if (entry.addr_vec[m_rank_addr_idx] == rank_id) return true;
       }
       return false;
     }
@@ -547,6 +566,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Set mode for a rank (used by memory system for mode transitions)
     void set_mode(int rank_id, AsyncDIMMMode mode) {
       m_mode_per_rank[rank_id] = mode;
+      if (mode != AsyncDIMMMode::CONCURRENT && rank_id >= 0 && rank_id < m_num_rank)
+        m_offload_stopped[rank_id] = false;
     }
 
     bool send(Request& req) override {
@@ -742,6 +763,24 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       //     m_rt_track_window_start = m_clk;
       //   }
       // }
+
+      // 1.7. NMA idle polling + C2H offload drain (Host MC driven)
+      if (m_query_nma_idle && m_clk % NMA_POLL_INTERVAL == 0) {
+        for (int rk = 0; rk < m_num_rank; rk++) {
+          if (m_mode_per_rank[rk] == AsyncDIMMMode::CONCURRENT && !m_offload_stopped[rk]) {
+            if (m_query_nma_idle(rk)) {
+              m_offload_stopped[rk] = true;
+            }
+          }
+        }
+      }
+      // Check drain completion: RU empty + RT empty → transition to HOST
+      for (int rk = 0; rk < m_num_rank; rk++) {
+        if (m_offload_stopped[rk] && !has_pending_offloads_for_rank(rk)) {
+          m_mode_per_rank[rk] = AsyncDIMMMode::HOST;
+          m_offload_stopped[rk] = false;
+        }
+      }
 
       // 2. Tick refresh manager (sends REF via priority_send)
       m_refresh->tick();
@@ -1201,6 +1240,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           int ab_rk = it->addr_vec[m_rank_addr_idx];
           if (ab_rk < 0 || ab_rk >= m_num_rank) continue;
           if (m_mode_per_rank[ab_rk] == AsyncDIMMMode::HOST) continue;
+          // Note: do NOT skip offload_stopped ranks here — active_buffer entries
+          // already have ACTO issued (row opened), must complete RDO/WRO to drain.
           // OT backpressure: prevent CMD FIFO overflow on NMA side
           int ab_flat = it->addr_vec[bank_idx]
                       + it->addr_vec[bankgroup_idx] * num_banks
@@ -1245,6 +1286,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (ab_rk >= 0 && ab_rk < m_num_rank &&
               m_mode_per_rank[ab_rk] != AsyncDIMMMode::HOST) {
             // CONCURRENT/NMA entry picked by FRFCFS (1a didn't serve it — RU full, CA timing, or OT)
+            // Note: active_buffer entries must complete RDO/WRO even if offload_stopped
             if ((int)m_return_unit.size() < RU_MAX_ENTRIES) {
               // OT backpressure
               int fc_flat = req_it->addr_vec[bank_idx]
@@ -1283,6 +1325,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (m_priority_buffers[rk_idx].size() == 0) continue;
 
           if (m_mode_per_rank[rk_idx] != AsyncDIMMMode::HOST) {
+            if (m_offload_stopped[rk_idx]) continue;  // REFO offload stopped — hold in priority_buffer
             // CONCURRENT/NMA: convert REFab → REFO
             req_it = m_priority_buffers[rk_idx].begin();
             int refo_cmd = m_dram->m_commands("REFO");
@@ -1310,6 +1353,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::NMA) continue;
 
           if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::CONCURRENT) {
+            if (m_offload_stopped[rk_idx]) continue;  // offload stopped — scheduling 보류
             // Offload: use m_open_row[] for prerequisite, check OT
             if (schedule_offload_for_rank(rk_idx, req_it, req_buffer)) {
               request_found = true;

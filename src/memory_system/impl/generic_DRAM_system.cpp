@@ -36,8 +36,16 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     */
 
     bool m_host_access = false;
-    bool m_trace_core_enable = false;    
+    bool m_trace_core_enable = false;
     bool m_ndp_trace = true;
+
+    // Host stall detection (tcore mode only)
+    // When tcore is active and host send() hasn't been called for STALL_THRESHOLD cycles,
+    // the host is stalled due to tcore backpressure → terminate simulation.
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    uint64_t m_last_host_send_clk = 0;
+    bool m_host_send_ever = false;
+    bool m_host_stall_terminated = false;
     // Copy Structure within loadstore_ncore_trace.cpp
     struct Trace {
       uint64_t timestamp;  // When this request should be issued (in cycles)
@@ -204,14 +212,26 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
         }
       #endif 
       m_host_access = true;
+      if (!req.is_trace_core_req) {
+        m_last_host_send_clk = m_clk;
+        m_host_send_ever = true;
+      }
       return is_success;
     };
-    
+
     void tick() override {
       m_clk++;
       // Trace Mode :  Send Trace-based Request to DRAM System
-      if(m_trace_core_enable && !m_host_access) try_issue_requests(); 
+      if(m_trace_core_enable && !m_host_access) try_issue_requests();
       m_host_access = false;
+
+      // Host stall detection: tcore backpressure → host can't send
+      if (m_trace_core_enable && m_host_send_ever && !m_host_stall_terminated &&
+          (m_clk - m_last_host_send_clk > HOST_STALL_THRESHOLD)) {
+        m_logger->warn("Host stalled for {} cycles (tcore backpressure) — terminating simulation.",
+                       m_clk - m_last_host_send_clk);
+        m_host_stall_terminated = true;
+      }
 
       m_dram->tick();
       for (auto controller : m_controllers) {
@@ -250,14 +270,17 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
       }
 
 
-      return (is_dram_ctrl_finished);
-    }    
+      return (is_dram_ctrl_finished || m_host_stall_terminated);
+    }
 
     // Always Done
     bool is_ndp_finished() override {
       return true;
-    }     
-    
+    }
+
+    bool is_host_stall_terminated() override {
+      return m_host_stall_terminated;
+    }
 
     virtual void mem_sys_finalize() override {
       size_t total_latency = 0;

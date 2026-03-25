@@ -1,4 +1,5 @@
 #include <iostream>
+#include <chrono>
 
 #include <argparse/argparse.hpp>
 #include <spdlog/spdlog.h>
@@ -97,13 +98,15 @@ int main(int argc, char* argv[]) {
 
   int tick_mult = frontend_tick * mem_tick;
 
-  std::cout<<"Ramulator tick start!!"<<std::endl; 
+  std::cout<<"Ramulator tick start!!"<<std::endl;
+  auto sim_start = std::chrono::high_resolution_clock::now();
+
   for (uint64_t i = 0;; i++) {
     if (((i % tick_mult) % mem_tick) == 0) {
       frontend->tick();
     }
 
-    if (frontend->is_finished()) {
+    if (frontend->is_finished() || memory_system->is_host_stall_terminated()) {
       break;
     }
 
@@ -111,6 +114,12 @@ int main(int argc, char* argv[]) {
       memory_system->tick();
     }
   }
+
+  auto sim_end = std::chrono::high_resolution_clock::now();
+  auto sim_duration = std::chrono::duration_cast<std::chrono::milliseconds>(sim_end - sim_start);
+  double sim_seconds = sim_duration.count() / 1000.0;
+  std::cout << "\n=== Simulation Tick Loop Time ===" << std::endl;
+  std::cout << "  Wall-clock time: " << sim_seconds << " sec (" << sim_duration.count() << " ms)" << std::endl;
 
   // Finalize the simulation. Recursively print all statistics from all components
   frontend->finalize();

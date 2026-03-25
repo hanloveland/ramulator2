@@ -170,6 +170,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
     static constexpr int NUM_NDP_STATES = 8;  // NDP_IDLE ~ NDP_DONE (includes NDP_BEFORE_RUN)
     std::vector<std::vector<std::vector<size_t>>>         pch_hsnc_status_cnt;
+    bool                                                  m_enable_hsnc_stats = false;  // YAML: enable_hsnc_stats
 
     bool                                                  all_ndp_idle;
 
@@ -233,6 +234,18 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     int bg_addr_idx = 0;
     int col_addr_idx = 0;
     int ch_addr_idx = 0;
+
+    // Cached m_dram->m_levels() results (initialized in init(), avoids per-tick string hash lookup)
+    int lvl_channel_ = 0;
+    int lvl_pseudochannel_ = 0;
+    int lvl_bankgroup_ = 0;
+    int lvl_bank_ = 0;
+    int lvl_row_ = 0;
+    int lvl_column_ = 0;
+
+    // Cached opcode constants (avoids per-tick std::map<string,int> tree lookup)
+    int OP_RD_ = 0;
+    int OP_WR_ = 1;
     /*
     bool ndp_on = false;
     bool wait_ndp_on = false;
@@ -247,8 +260,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       Gem5 Simulation with Trace Core (Virtual Core)
     */
     bool m_host_access = false;
-    bool m_trace_core_enable = false;    
+    bool m_trace_core_enable = false;
     bool m_ndp_trace = true;
+
+    // Host stall detection (tcore mode only)
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    uint64_t m_last_host_send_clk = 0;
+    bool m_host_send_ever = false;
+    bool m_host_stall_terminated = false;
     // Copy Structure within loadstore_ncore_trace.cpp
     struct Trace {
       uint64_t timestamp;  // When this request should be issued (in cycles)
@@ -289,7 +308,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     uint64_t max_lat_     = 0;
     uint64_t overflow_    = 0;
 
-    uint64_t read_latency;    
+    uint64_t read_latency;
 
   public:
     void init() override { 
@@ -393,6 +412,19 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       bk_addr_idx   = m_dram->m_levels("bank");
       col_addr_idx  = m_dram->m_levels("column");
       ch_addr_idx   = m_dram->m_levels("channel");
+
+      // Cache m_levels() results to avoid per-tick string hash lookups
+      lvl_channel_       = m_dram->m_levels("channel");
+      lvl_pseudochannel_ = m_dram->m_levels("pseudochannel");
+      lvl_bankgroup_     = m_dram->m_levels("bankgroup");
+      lvl_bank_          = m_dram->m_levels("bank");
+      lvl_row_           = m_dram->m_levels("row");
+      lvl_column_        = m_dram->m_levels("column");
+
+      // Cache opcode constants to avoid per-tick std::map tree lookups
+      OP_RD_ = m_ndp_access_inst_op.at("RD");
+      OP_WR_ = m_ndp_access_inst_op.at("WR");
+
       // deprecated code
       /*
       issue_ndp_start.resize(num_channels*num_pseudochannel,false);
@@ -547,6 +579,9 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       // HSNC Segment Tracking option
       m_seg_tracking_enable = param<bool>("seg_tracking_enable").desc("Enable NDP segment tracking and report").default_val(false);
 
+      // HSNC per-state cycle counter option
+      m_enable_hsnc_stats = param<bool>("enable_hsnc_stats").desc("Enable per-tick HSNC status cycle counting and report").default_val(false);
+
       // NDP Trace Initialization
       m_trace_core_enable = param<bool>("trace_core_enable").desc("Enable Trace Simulation Core with Gem5").default_val(false);
       
@@ -604,7 +639,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             req.is_ndp_req = true;
             req.is_trace_core_req = true;
             int dimm_id = req.addr_vec[0]/2;
-            int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];
+            int pch_id = ((req.addr_vec[0]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[lvl_pseudochannel_];
             DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "Host send NDP Request to NDP Unit");            
           } 
 
@@ -634,15 +669,28 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       }
       
       m_host_access = true;
+      if (!req.is_trace_core_req) {
+        m_last_host_send_clk = m_clk;
+        m_host_send_ever = true;
+      }
       return is_success;
     };
-    
+
     void tick() override {
       m_clk++;
       // Trace Mode :  Send Trace-based Request to DRAM System
-      if(m_trace_core_enable && !m_host_access) try_issue_requests(); 
+      if(m_trace_core_enable && !m_host_access) try_issue_requests();
       m_host_access = false;
+
+      // Host stall detection: tcore backpressure → host can't send
+      if (m_trace_core_enable && m_host_send_ever && !m_host_stall_terminated &&
+          (m_clk - m_last_host_send_clk > HOST_STALL_THRESHOLD)) {
+        m_logger->warn("Host stalled for {} cycles (tcore backpressure) — terminating simulation.",
+                       m_clk - m_last_host_send_clk);
+        m_host_stall_terminated = true;
+      }
       m_dram->tick();
+
       for (auto controller : m_controllers) {
         controller->tick();
         while(1) {
@@ -652,7 +700,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           } else {
             record_latency(read_latency);
           }
-        }        
+        }
       }
 
       #ifdef PCH_DEBUG
@@ -734,7 +782,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
             // NDP Status: NDP IDLE 
 
             // Do Nothing!!
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_IDLE]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_IDLE]++;
           } // NDP Status: NDP IDLE End
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_ISSUE_START) {
             // NDP Status: NDP_ISSUE_START
@@ -745,11 +793,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               // Generate NDP Start Write-Request to DSNC (db_ndp_ctrl_access_bg/bk)
               Request req = Request(0,Request::Type::Write);
               m_addr_mapper->apply(req);
-              req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
-              req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
-              req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
-              req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
-              req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
+              req.addr_vec[lvl_channel_]       = ch_id;
+              req.addr_vec[lvl_pseudochannel_] = pch_id_per_subch;
+              req.addr_vec[lvl_bankgroup_]     = db_ndp_ctrl_access_bg;
+              req.addr_vec[lvl_bank_]          = db_ndp_ctrl_access_bk;
+              req.addr_vec[lvl_row_]           = ndp_ctrl_row;
               req.is_ndp_req = true;
               req.is_trace_core_req = true;
               for(int i=0;i<8;i++) {
@@ -761,7 +809,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "transit from NDP_ISSUE_START to NDP_BEFORE_RUN");
               }
             }
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_ISSUE_START]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_ISSUE_START]++;
           } // NDP Status: NDP_ISSUE_START END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_BEFORE_RUN) {
             // NDP Status: NDP_BEFORE_RUN
@@ -783,7 +831,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 hsnc_seg_tracking[dimm_id][pch_id] = true;
               }
             }
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BEFORE_RUN]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BEFORE_RUN]++;
           } // NDP Status: NDP_BEFORE_RUN END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_RUN) {
             // NDP Status: NDP_RUN — PC 기반 fetch + decode + addr_gen_slot
@@ -907,7 +955,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 }
               }
             }
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_RUN]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_RUN]++;
           } // NDP Status: NDP_RUN END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_BAR) {
             // NDP Status: NDP_BAR — drain all outstanding requests
@@ -926,7 +974,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               }
             }
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BAR]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_BAR]++;
           } // NDP Status: NDP_BAR END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_WAIT) {
             // NDP Status: NDP_WAIT — cycle 기반 대기
@@ -963,11 +1011,11 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 } else {
                   Request req = Request(0,Request::Type::Read);
                   m_addr_mapper->apply(req);
-                  req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
-                  req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
-                  req.addr_vec[m_dram->m_levels("bankgroup")]     = db_ndp_ctrl_access_bg;
-                  req.addr_vec[m_dram->m_levels("bank")]          = db_ndp_ctrl_access_bk;
-                  req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
+                  req.addr_vec[lvl_channel_]       = ch_id;
+                  req.addr_vec[lvl_pseudochannel_] = pch_id_per_subch;
+                  req.addr_vec[lvl_bankgroup_]     = db_ndp_ctrl_access_bg;
+                  req.addr_vec[lvl_bank_]          = db_ndp_ctrl_access_bk;
+                  req.addr_vec[lvl_row_]           = ndp_ctrl_row;
                   req.is_ndp_req = true;
                   if(m_controllers[ch_id]->send(req)) {
                     pch_lvl_polling[dimm_id][pch_id] = true;
@@ -977,7 +1025,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
                 pch_lvl_hsnc_nl_addr_gen_wait_cnt[dimm_id][pch_id]++;
               }
             }
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_WAIT]++;
           } // NDP Status: NDP_WAIT END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_FETCH_STALL) {
             // NDP Status: NDP_FETCH_STALL — Descriptor Cache miss 대기
@@ -999,7 +1047,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               pch_lvl_hsnc_status[dimm_id][pch_id] = NDP_RUN;
               DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, "FETCH_STALL resolved col=" + std::to_string(target_col) + " → NDP_RUN");
             }
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_FETCH_STALL]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_FETCH_STALL]++;
           } // NDP Status: NDP_FETCH_STALL END
           else if(pch_lvl_hsnc_status[dimm_id][pch_id] == NDP_DONE) {
             // NDP Status: NDP_DONE — drain all then IDLE
@@ -1018,14 +1066,15 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
               }
             }
             if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size() != 0) send_ndp_req_to_mc(dimm_id,pch_id);
-            pch_hsnc_status_cnt[dimm_id][pch_id][NDP_DONE]++;
+            if(m_enable_hsnc_stats) pch_hsnc_status_cnt[dimm_id][pch_id][NDP_DONE]++;
           } // NDP Status: NDP_DONE END
         } // LOOP-PCH END
       } // LOOP-DIMM END
       if(!all_ndp_idle && pch_lvl_ndp_idle) {
         DEBUG_PRINT(m_clk,"HSNC", -1, -1, "=================== All Pseudo Channel NDP DONE ============== ");
-      }        
-      all_ndp_idle = pch_lvl_ndp_idle;     
+      }
+      all_ndp_idle = pch_lvl_ndp_idle;
+
     };
 
     float get_tCK() override {
@@ -1066,7 +1115,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         // NDP Launch Request Buffer — Write Intercept
         if(req.type_id == Request::Type::Write) {
           int dimm_id = req.addr_vec[ch_addr_idx]/2;
-          int pch_id = ((req.addr_vec[ch_addr_idx]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[m_dram->m_levels("pseudochannel")];
+          int pch_id = ((req.addr_vec[ch_addr_idx]%2 == 1) ? num_pseudochannel : 0) + req.addr_vec[lvl_pseudochannel_];
           int col = req.addr_vec[col_addr_idx];
           int ch_id = req.addr_vec[ch_addr_idx];
 
@@ -1121,91 +1170,98 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
         int num_pseudochannel = m_dram->get_level_size("pseudochannel");
         std::cout<<"["<<m_clk<<"] [NDP_DRAM_System] All Request Done!!! (+NDP Ops)"<<std::endl;
 
-        std::cout<<"NDP Addr Gen Slot Full Count ([DIMM][PCH])"<<std::endl;
-        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-              std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_empty_cnt[dimm_id][pch_id]<<std::endl;
-          }
-        }
-
-        std::cout<<"NDP Request Address Generation Block Count"<<std::endl;
-        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-              std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]<<std::endl;
-          }
-        }
-
-        // Status name table for printing
-        const char* ndp_stat_names[] = {
-          "[NDP_IDLE]            | ",
-          "[NDP_ISSUE_START]     | ",
-          "[NDP_BEFORE_RUN]      | ",
-          "[NDP_RUN]             | ",
-          "[NDP_BAR]             | ",
-          "[NDP_WAIT]            | ",
-          "[NDP_FETCH_STALL]     | ",
-          "[NDP_DONE]            | "
-        };
-
-        std::cout<<"Host-NDP Ctrl Status Stats (total cycle: "<<m_clk<<")"<<std::endl;
-        std::cout<<"   - Each PCH per DIMM"<<std::endl;
-        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
-        for(int ndp_stat=0;ndp_stat<NUM_NDP_STATES;ndp_stat++) {
-          std::cout<<ndp_stat_names[ndp_stat];
+        if(m_enable_hsnc_stats) {
+          std::cout<<"NDP Addr Gen Slot Full Count ([DIMM][PCH])"<<std::endl;
           for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
             for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-                std::cout<<pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat];
-                if(pch_id != (m_num_subch*num_pseudochannel - 1))
-                  std::cout<<" | ";
+                std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_empty_cnt[dimm_id][pch_id]<<std::endl;
             }
           }
-          std::cout<<std::endl;
-        }
-        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
-        for(int ndp_stat=0;ndp_stat<NUM_NDP_STATES;ndp_stat++) {
-          std::cout<<ndp_stat_names[ndp_stat];
+
+          std::cout<<"NDP Request Address Generation Block Count"<<std::endl;
           for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
             for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-                float val = (float)pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat] / (float)m_clk;
-                std::cout<<val;
-                if(pch_id != (m_num_subch*num_pseudochannel - 1))
-                  std::cout<<" | ";
+                std::cout<<" - ["<<dimm_id<<"]["<<pch_id<<"] : "<<pch_lvl_hsnc_nl_addr_wait_cnt[dimm_id][pch_id]<<std::endl;
             }
           }
-          std::cout<<std::endl;
-        }
-        std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
 
-        // Descriptor Cache Statistics
-        std::cout<<"\nDescriptor Cache Statistics ([DIMM][PCH])"<<std::endl;
-        std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
-        std::cout<<"  PCH |       Hit |      Miss |     Evict |  Hit Rate"<<std::endl;
-        std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
-        for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
-          for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
-            uint64_t hit   = desc_cache_hit_cnt[dimm_id][pch_id];
-            uint64_t miss  = desc_cache_miss_cnt[dimm_id][pch_id];
-            uint64_t evict = desc_cache_evict_cnt[dimm_id][pch_id];
-            float hit_rate = (hit + miss > 0) ? (float)hit / (float)(hit + miss) * 100.0f : 0.0f;
-            std::cout<<" ["<<dimm_id<<"]["<<pch_id<<"] | "
-                     <<std::setw(9)<<hit<<" | "
-                     <<std::setw(9)<<miss<<" | "
-                     <<std::setw(9)<<evict<<" | "
-                     <<std::fixed<<std::setprecision(2)<<std::setw(8)<<hit_rate<<"%"
-                     <<std::endl;
+          // Status name table for printing
+          const char* ndp_stat_names[] = {
+            "[NDP_IDLE]            | ",
+            "[NDP_ISSUE_START]     | ",
+            "[NDP_BEFORE_RUN]      | ",
+            "[NDP_RUN]             | ",
+            "[NDP_BAR]             | ",
+            "[NDP_WAIT]            | ",
+            "[NDP_FETCH_STALL]     | ",
+            "[NDP_DONE]            | "
+          };
+
+          std::cout<<"Host-NDP Ctrl Status Stats (total cycle: "<<m_clk<<")"<<std::endl;
+          std::cout<<"   - Each PCH per DIMM"<<std::endl;
+          std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+          for(int ndp_stat=0;ndp_stat<NUM_NDP_STATES;ndp_stat++) {
+            std::cout<<ndp_stat_names[ndp_stat];
+            for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+              for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                  std::cout<<pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat];
+                  if(pch_id != (m_num_subch*num_pseudochannel - 1))
+                    std::cout<<" | ";
+              }
+            }
+            std::cout<<std::endl;
           }
-        }
-        std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
+          std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+          for(int ndp_stat=0;ndp_stat<NUM_NDP_STATES;ndp_stat++) {
+            std::cout<<ndp_stat_names[ndp_stat];
+            for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+              for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+                  float val = (float)pch_hsnc_status_cnt[dimm_id][pch_id][ndp_stat] / (float)m_clk;
+                  std::cout<<val;
+                  if(pch_id != (m_num_subch*num_pseudochannel - 1))
+                    std::cout<<" | ";
+              }
+            }
+            std::cout<<std::endl;
+          }
+          std::cout<<"--------------------------------------------------------------------------------------------"<<std::endl;
+
+          // Descriptor Cache Statistics
+          std::cout<<"\nDescriptor Cache Statistics ([DIMM][PCH])"<<std::endl;
+          std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
+          std::cout<<"  PCH |       Hit |      Miss |     Evict |  Hit Rate"<<std::endl;
+          std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
+          for(int dimm_id=0;dimm_id<m_num_dimm;dimm_id++) {
+            for(int pch_id=0;pch_id<(m_num_subch*num_pseudochannel);pch_id++) {
+              uint64_t hit   = desc_cache_hit_cnt[dimm_id][pch_id];
+              uint64_t miss  = desc_cache_miss_cnt[dimm_id][pch_id];
+              uint64_t evict = desc_cache_evict_cnt[dimm_id][pch_id];
+              float hit_rate = (hit + miss > 0) ? (float)hit / (float)(hit + miss) * 100.0f : 0.0f;
+              std::cout<<" ["<<dimm_id<<"]["<<pch_id<<"] | "
+                       <<std::setw(9)<<hit<<" | "
+                       <<std::setw(9)<<miss<<" | "
+                       <<std::setw(9)<<evict<<" | "
+                       <<std::fixed<<std::setprecision(2)<<std::setw(8)<<hit_rate<<"%"
+                       <<std::endl;
+            }
+          }
+          std::cout<<"------+-----------+-----------+-----------+-----------"<<std::endl;
+        } // end m_enable_hsnc_stats
 
       }
+      if(m_host_stall_terminated) return true;
       if(m_trace_core_enable) return true;
       else                    return (all_ndp_idle && is_dram_ctrl_finished);
     }
 
     bool is_ndp_finished() override {
-      if(m_trace_core_enable) 
+      if(m_trace_core_enable)
         return true;
       else return all_ndp_idle;
+    }
+
+    bool is_host_stall_terminated() override {
+      return m_host_stall_terminated;
     }     
     
     
@@ -1263,12 +1319,12 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
 
       Request req = Request(0, Request::Type::Read);
       m_addr_mapper->apply(req);
-      req.addr_vec[m_dram->m_levels("channel")]       = ch_id;
-      req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_id_per_subch;
-      req.addr_vec[m_dram->m_levels("bankgroup")]     = ndp_ctrl_buf_bg;
-      req.addr_vec[m_dram->m_levels("bank")]          = ndp_ctrl_buf_bk;
-      req.addr_vec[m_dram->m_levels("row")]           = ndp_ctrl_row;
-      req.addr_vec[m_dram->m_levels("column")]        = col_addr;
+      req.addr_vec[lvl_channel_]       = ch_id;
+      req.addr_vec[lvl_pseudochannel_] = pch_id_per_subch;
+      req.addr_vec[lvl_bankgroup_]     = ndp_ctrl_buf_bg;
+      req.addr_vec[lvl_bank_]          = ndp_ctrl_buf_bk;
+      req.addr_vec[lvl_row_]           = ndp_ctrl_row;
+      req.addr_vec[lvl_column_]        = col_addr;
       req.is_ndp_req = false;
       req.is_trace_core_req = true;
 
@@ -1372,27 +1428,28 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
       if(pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id] >= pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size())
         pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id] = 0;
 
-      int start_slot_idx = pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id];        
-      for(int i = 0; i < pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size(); i++) {
-        int slot_idx = (i + start_slot_idx) % pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size();
+      int start_slot_idx = pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id];
+      auto& slots = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id];
+      for(int i = 0; i < (int)slots.size(); i++) {
+        int slot_idx = (i + start_slot_idx) % (int)slots.size();
         bool is_read;
-        if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("RD")) 
+        if (slots[slot_idx].opcode == OP_RD_)
           is_read = true;
-        else if (pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opcode == m_ndp_access_inst_op.at("WR")) 
+        else if (slots[slot_idx].opcode == OP_WR_)
           is_read = false;
-        else 
-          throw std::runtime_error("Invalid NDP-launch Request Opcode!");      
+        else
+          throw std::runtime_error("Invalid NDP-launch Request Opcode!");
 
         // Generate Request
         Request req = Request(0,is_read ? Request::Type::Read : Request::Type::Write);
         m_addr_mapper->apply(req);
-        req.addr_vec[m_dram->m_levels("channel")]       = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].ch;
-        req.addr_vec[m_dram->m_levels("pseudochannel")] = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].pch;
-        req.addr_vec[m_dram->m_levels("bankgroup")]     = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bg;
-        req.addr_vec[m_dram->m_levels("bank")]          = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].bk;
-        req.addr_vec[m_dram->m_levels("row")]           = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].row;
-        req.addr_vec[m_dram->m_levels("column")]        = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col;
-        req.ndp_id                                      = pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].id;
+        req.addr_vec[lvl_channel_]       = slots[slot_idx].ch;
+        req.addr_vec[lvl_pseudochannel_] = slots[slot_idx].pch;
+        req.addr_vec[lvl_bankgroup_]     = slots[slot_idx].bg;
+        req.addr_vec[lvl_bank_]          = slots[slot_idx].bk;
+        req.addr_vec[lvl_row_]           = slots[slot_idx].row;
+        req.addr_vec[lvl_column_]        = slots[slot_idx].col;
+        req.ndp_id                       = slots[slot_idx].id;
         req.is_ndp_req                                  = true;
         req.arrive                                      = m_clk;
         req.is_trace_core_req                           = true;
@@ -1406,14 +1463,14 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
           m_dram->print_req(req);
           #endif         
 
-          if(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt == pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].opsize) {
+          if(slots[slot_idx].cnt == slots[slot_idx].opsize) {
             // Remove Done Request
-            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].erase(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].begin() + slot_idx);
-            std::string msg = std::string(" One NL-Req Done! Remove from addresss Generator Slot (Remained ") + std::to_string(pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id].size()) + std::string(" inst)");
-            DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id, msg);
+            slots.erase(slots.begin() + slot_idx);
+            DEBUG_PRINT(m_clk,"HSNC", dimm_id, pch_id,
+              std::string(" One NL-Req Done! Remove from addresss Generator Slot (Remained ") + std::to_string(slots.size()) + std::string(" inst)"));
           } else {
-            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].cnt++;
-            pch_lvl_hsnc_nl_addr_gen_slot[dimm_id][pch_id][slot_idx].col++;
+            slots[slot_idx].cnt++;
+            slots[slot_idx].col++;
             // Round-Robin
             pch_lvl_hsnc_nl_addr_gen_slot_rr_idx[dimm_id][pch_id]++;
           }
@@ -1430,6 +1487,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     }
 
     virtual void mem_sys_finalize() override {
+
       size_t total_latency = 0;
       for (int i = 0; i < num_channels; i++) {
         total_latency+=m_controllers[i]->get_host_acces_latency();

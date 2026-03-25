@@ -100,11 +100,14 @@ class IMemorySystem : public TopLevel<IMemorySystem> {
       else return 0;
     }
 
-    // Check All Buffers are Empty to finish simulation 
+    // Check All Buffers are Empty to finish simulation
     virtual bool is_finished() = 0;
 
     // Check DIMM-side NDP Controller status (It is done or not)
     virtual bool is_ndp_finished() = 0;
+
+    // Check if host stall was detected (tcore backpressure termination)
+    virtual bool is_host_stall_terminated() { return false; }
 
     // finalize memory system itself 
     virtual void mem_sys_finalize() = 0;
