@@ -99,6 +99,40 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Cumulative OT increment/decrement counters
     size_t s_ot_total_inc = 0;
     size_t s_ot_total_dec = 0;
+
+    // Debug: Ch0 Rk0 BG7 BK1 offload event tracking
+    int m_debug_track_bank_flat = -1;  // set in setup() to flat_id of Rk0 BG7 BK1
+    struct OffloadEvent {
+      long clk;
+      int cmd_type;   // 0=ACTO, 1=PREO, 2=RDO, 3=WRO, 4=OT_DEC(interrupt), 5=RU_PUSH, 6=RU_POP
+      int ot_after;
+      int row;
+    };
+    std::vector<OffloadEvent> m_debug_track_events;
+
+    // Host MC side: RU entry log for target bank (Ch0 Rk0 BG7 BK1)
+    struct HostRULog {
+      long clk;
+      int row;
+      int cmd_count;  // 1=RDO only, 2=ACTO+RDO, 3=PREO+ACTO+RDO (must be 1-3)
+      bool is_read;
+      int ot_after;
+    };
+    std::vector<HostRULog> m_debug_host_ru_log;
+
+    // Per-bank last 3 offload commands ring buffer for RDO/WRO missing detection
+    struct BankCmdRing {
+      int cmds[3] = {-1, -1, -1};  // cmd_type: 0=ACTO, 1=PREO, 2=RDO, 3=WRO
+      long clks[3] = {0, 0, 0};
+      int rows[3] = {-1, -1, -1};
+      int idx = 0;                  // next write position
+      int count = 0;                // total offloads to this bank
+      int no_rdo_wro_seq = 0;       // consecutive offloads without RDO/WRO (current streak)
+      int no_rdo_wro_max = 0;       // max streak
+      int no_rdo_wro_violations = 0; // times streak reached 3 (3 consecutive ACTO/PREO without RDO/WRO)
+    };
+    std::vector<BankCmdRing> m_bank_cmd_rings;  // [total_banks_flat]
+
     // RU entry cmd_count histogram (index 0=unused, 1/2/3 = cmd_count)
     size_t s_ru_cmd_count_hist[4] = {};
     // Per-rank interrupt count
@@ -133,6 +167,10 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     std::vector<bool> m_offload_stopped;             // [rank] offload stopped after NMA IDLE detected
     using NMAIdleQueryCallback = std::function<bool(int rank_id)>;
     NMAIdleQueryCallback m_query_nma_idle = nullptr;
+
+    // NMA MC debug callback: returns per-bank debug string for a rank
+    using NMADebugCallback = std::function<std::string(int rank_id)>;
+    NMADebugCallback m_nma_debug_cb = nullptr;
 
     // RT issue frequency tracking (per 256-cycle window)
     static constexpr int RT_TRACK_WINDOW = 256;
@@ -217,6 +255,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
     // Phase 3 concurrent mode flag (set by system via set_concurrent_mode_enable())
     bool m_concurrent_mode_enable = false;
+    bool m_debug_nma_offload = false;   // Debug: log NMAInst write / start flag events
 
     // RT command IDs: RT_N occupies N × nBL on DQ bus (DRAM model enforced)
     int m_rt_cmds[9] = {};  // m_rt_cmds[1]=RT1, ..., m_rt_cmds[8]=RT8
@@ -244,6 +283,35 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       s.ru_size = (int)m_return_unit.size();
       s.pending_depart = (int)pending.size();
       return s;
+    }
+
+    // Debug: return comprehensive state string for a rank
+    std::string get_debug_state_str(int rank_id) {
+      auto s = get_debug_state(rank_id);
+      // Find bank with max OT
+      int ot_max = 0, ot_max_bank = -1;
+      int base = rank_id * num_bankgroups * num_banks;
+      for (int i = 0; i < num_bankgroups * num_banks; i++) {
+        if (m_ot_counter[base + i] > ot_max) {
+          ot_max = m_ot_counter[base + i];
+          ot_max_bank = i;
+        }
+      }
+      // Count RU entries for this rank
+      int ru_for_rank = 0;
+      for (auto& e : m_return_unit)
+        if (e.req.addr_vec[m_dram->m_levels("rank")] == rank_id) ru_for_rank++;
+
+      char buf[256];
+      snprintf(buf, sizeof(buf),
+        "mode=%s stopped=%d | rd=%d wr=%d act=%d pend=%d | "
+        "RU=%d(rk=%d) RT=%d OT=%d(max=%d@bk%d)",
+        m_mode_per_rank[rank_id] == AsyncDIMMMode::CONCURRENT ? "CONC" :
+        m_mode_per_rank[rank_id] == AsyncDIMMMode::NMA ? "NMA" : "HOST",
+        m_offload_stopped[rank_id] ? 1 : 0,
+        s.rd_buf, s.wr_buf, s.active_buf, s.pending_depart,
+        ru_for_rank, s.ru_size, s.rt_pending, s.ot_sum, ot_max, ot_max_bank);
+      return std::string(buf);
     }
 
     int get_total_banks_flat() const { return m_total_banks_flat; }
@@ -379,6 +447,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       m_total_banks_flat = num_ranks * num_bankgroups * num_banks;
       m_ot_counter.resize(m_total_banks_flat, 0);
       s_offload_per_bank.resize(m_total_banks_flat);
+      // Debug track: Ch0 Rk0 BG7 BK1 = flat_id = BK1 + BG7*num_banks + Rk0*num_bankgroups*num_banks
+      if (m_channel_id == 0 && num_bankgroups > 7 && num_banks > 1) {
+        m_debug_track_bank_flat = 1 + 7 * num_banks + 0 * num_bankgroups * num_banks;
+        m_debug_track_events.reserve(4096);
+      }
+      m_bank_cmd_rings.resize(m_total_banks_flat);
       s_interrupt_count.resize(num_ranks, 0);
       s_ot_dec_hist.resize(m_total_banks_flat);
       m_rt_pending_count.resize(num_ranks, 0);
@@ -401,8 +475,13 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     }
 
     void set_concurrent_mode_enable(bool enable) { m_concurrent_mode_enable = enable; }
+    void set_debug_nma_offload(bool enable) { m_debug_nma_offload = enable; }
 
     void set_nma_query_callback(NMAIdleQueryCallback cb) { m_query_nma_idle = cb; }
+    void set_nma_debug_callback(NMADebugCallback cb) { m_nma_debug_cb = cb; }
+
+    const std::vector<HostRULog>& get_debug_host_ru_log() const { return m_debug_host_ru_log; }
+    int get_debug_track_bank_flat() const { return m_debug_track_bank_flat; }
 
     bool is_offload_stopped(int rank_id) const {
       return (rank_id >= 0 && rank_id < m_num_rank) ? m_offload_stopped[rank_id] : false;
@@ -525,18 +604,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         if (it->bank_flat_id >= 0 && it->bank_flat_id < m_total_banks_flat) {
           int cc = it->cmd_count;
           m_ot_counter[it->bank_flat_id] -= cc;
-          // [DEBUG]
-          // s_ot_total_dec += cc;
           s_offload_per_bank[it->bank_flat_id].ot_dec += cc;
-          // [DEBUG]
-          // if (cc >= 1 && cc <= 3) s_ot_dec_hist[it->bank_flat_id].hist[cc]++;
+          if (it->bank_flat_id == m_debug_track_bank_flat) {
+            m_debug_track_events.push_back({(long)m_clk, 4/*OT_DEC*/, m_ot_counter[it->bank_flat_id],
+              it->req.addr_vec[m_dram->m_levels("row")]});
+          }
         }
-
-        // Log RU pop event
-        // [DEBUG]
-        // s_ru_pop_log.push_back({rank_id,
-        //   it->req.addr_vec[bankgroup_idx], it->req.addr_vec[bank_idx],
-        //   it->cmd_count, it->is_read, (long)m_clk});
 
         if (it->is_read) {
           m_rt_read_pending[rank_id].push_back(it->req);
@@ -594,6 +667,14 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             // NMAInst write → track send count
             m_nma_wr_send_cnt[req_rank_id]++;
             req.is_ndp_req = true;  // Flag for issue-time tracking
+            #ifdef ASYNC_DEBUG
+            {
+              const char* mode_str = (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::CONCURRENT) ? "CONC" :
+                                     (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::NMA) ? "NMA" : "HOST";
+              fprintf(stderr, "[%ld][NMA_WR] Ch%d Rk%d: NMAInst write #%d (mode=%s)\n",
+                (long)m_clk, m_channel_id, req_rank_id, m_nma_wr_send_cnt[req_rank_id], mode_str);
+            }
+            #endif
           }
           else if (req_bg == m_nma_ctrl_bg && req_bk == m_nma_ctrl_bk) {
             // Ctrl-reg (start) write → hold in separate unit, NOT in write buffer
@@ -606,6 +687,15 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             if (req.is_host_req) {
               m_host_acceess_rec_counter++;
             }
+            #ifdef ASYNC_DEBUG
+            {
+              const char* mode_str = (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::CONCURRENT) ? "CONC" :
+                                     (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::NMA) ? "NMA" : "HOST";
+              fprintf(stderr, "[%ld][NMA_START] Ch%d Rk%d: Start flag received (mode=%s, inst_sent=%d, inst_issued=%d)\n",
+                (long)m_clk, m_channel_id, req_rank_id, mode_str,
+                m_nma_wr_send_cnt[req_rank_id], m_nma_wr_issue_cnt[req_rank_id]);
+            }
+            #endif
             return true;  // Accepted but held — skip normal enqueue
           }
         }
@@ -774,13 +864,15 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           }
         }
       }
-      // Check drain completion: RU empty + RT empty → transition to HOST
+      // Check drain completion: RU empty + RT empty + active_buffer empty → transition to HOST
       for (int rk = 0; rk < m_num_rank; rk++) {
         if (m_offload_stopped[rk] && !has_pending_offloads_for_rank(rk)) {
           m_mode_per_rank[rk] = AsyncDIMMMode::HOST;
           m_offload_stopped[rk] = false;
         }
       }
+      // Debug: periodic status — disabled
+      // (enable by uncommenting when debugging OT/scheduling issues)
 
       // 2. Tick refresh manager (sends REF via priority_send)
       m_refresh->tick();
@@ -848,6 +940,11 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             m_mode_per_rank[cmd_rank_id] = m_concurrent_mode_enable
               ? AsyncDIMMMode::CONCURRENT : AsyncDIMMMode::NMA;
             m_nma_start_requested[cmd_rank_id] = false;
+            #ifdef ASYNC_DEBUG
+            fprintf(stderr, "[%ld][NMA_START_ISSUED] Ch%d Rk%d: Start flag issued → mode=%s (inst_issued=%d)\n",
+              (long)m_clk, m_channel_id, cmd_rank_id,
+              m_concurrent_mode_enable ? "CONC" : "NMA", m_nma_wr_issue_cnt[cmd_rank_id]);
+            #endif
           }
         }
 
@@ -913,6 +1010,25 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           }
           // Per-request cmd_count tracking via scratchpad[0]
           req_it->scratchpad[0]++;
+          // Debug: print every offload issue for target bank (Ch0 Rk0 BG7 BK1)
+          // Commented out for performance — enable when debugging OT issues
+          /*
+          if (flat_bank_id == m_debug_track_bank_flat) {
+            const char* cn[] = {"ACTO","PREO","RDO","WRO","REFO"};
+            int ci = -1;
+            if      (cmd == m_dram->m_commands("ACTO")) ci = 0;
+            else if (cmd == m_dram->m_commands("PREO")) ci = 1;
+            else if (cmd == m_dram->m_commands("RDO"))  ci = 2;
+            else if (cmd == m_dram->m_commands("WRO"))  ci = 3;
+            else if (cmd == m_dram->m_commands("REFO")) ci = 4;
+            fprintf(stderr, "[%ld][OFFLOAD] %s row=%d col=%d %s sp=%d OT=%d\n",
+              (long)m_clk, (ci >= 0 && ci <= 4) ? cn[ci] : "???",
+              req_it->addr_vec[m_dram->m_levels("row")],
+              req_it->addr_vec[m_dram->m_levels("column")],
+              (req_it->type_id == Request::Type::Read) ? "RD" : "WR",
+              req_it->scratchpad[0], m_ot_counter[flat_bank_id]);
+          }
+          */
           // Per-bank per-command offload counters
           if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat) {
             int cmd_type = -1;
@@ -930,10 +1046,30 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
                   else if (buffer == &m_write_buffers[rk]) buf_type = 2;
                 }
               }
-              // [DEBUG]
-              // s_offload_cmd_log.push_back({req_it->addr_vec[rank_idx],
-              //   req_it->addr_vec[bankgroup_idx], req_it->addr_vec[bank_idx], cmd_type,
-              //   req_it->addr_vec[row_idx], buf_type, (long)m_clk});
+              // Debug: track Ch0 Rk0 BG7 BK1
+              if (flat_bank_id == m_debug_track_bank_flat) {
+                m_debug_track_events.push_back({(long)m_clk, cmd_type, m_ot_counter[flat_bank_id],
+                  req_it->addr_vec[m_dram->m_levels("row")]});
+              }
+              // Per-bank last-3 ring buffer: detect consecutive ACTO/PREO without RDO/WRO
+              {
+                auto& ring = m_bank_cmd_rings[flat_bank_id];
+                ring.cmds[ring.idx] = cmd_type;
+                ring.clks[ring.idx] = (long)m_clk;
+                ring.rows[ring.idx] = req_it->addr_vec[m_dram->m_levels("row")];
+                ring.idx = (ring.idx + 1) % 3;
+                ring.count++;
+                if (cmd_type == 2 || cmd_type == 3) {  // RDO or WRO
+                  ring.no_rdo_wro_seq = 0;
+                } else {  // ACTO or PREO
+                  ring.no_rdo_wro_seq++;
+                  if (ring.no_rdo_wro_seq > ring.no_rdo_wro_max)
+                    ring.no_rdo_wro_max = ring.no_rdo_wro_seq;
+                  if (ring.no_rdo_wro_seq >= 3) {
+                    ring.no_rdo_wro_violations++;
+                  }
+                }
+              }
             }
           }
         }
@@ -958,8 +1094,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             bool is_read = (req_it->type_id == Request::Type::Read);
             int cc = req_it->scratchpad[0];
             m_return_unit.push_back({*req_it, cc, flat_bank_id, is_read});
-            // [DEBUG]
-            // if (cc >= 1 && cc <= 3) s_ru_cmd_count_hist[cc]++;
+            if (flat_bank_id == m_debug_track_bank_flat) {
+              m_debug_track_events.push_back({(long)m_clk, 5/*RU_PUSH*/, m_ot_counter[flat_bank_id],
+                req_it->addr_vec[m_dram->m_levels("row")]});
+              m_debug_host_ru_log.push_back({(long)m_clk,
+                req_it->addr_vec[m_dram->m_levels("row")], cc, is_read, m_ot_counter[flat_bank_id]});
+            }
           }
           // REFO: no RU entry needed (refresh has no frontend callback)
           m_host_access_cnt++;
@@ -1057,6 +1197,26 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         buffers[1] = &m_write_buffers[rk_idx];
       }
 
+      // Pre-scan: identify banks that have row-hit requests (even if not ready now).
+      // If a bank has a pending row-hit, suppress PREO for that bank this tick
+      // to avoid closing the row that the hit needs. The hit will issue when DQ frees up.
+      std::vector<bool> bank_has_hit(m_total_banks_flat, false);
+      for (int bi = 0; bi < 2; bi++) {
+        auto& buffer = *buffers[bi];
+        for (auto it = buffer.begin(); it != buffer.end(); it++) {
+          int flat_bank_id = it->addr_vec[bank_idx]
+                           + it->addr_vec[bankgroup_idx] * num_banks
+                           + it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+          if (flat_bank_id < 0 || flat_bank_id >= m_total_banks_flat) continue;
+          if (bank_in_active[flat_bank_id]) continue;
+          if (m_ot_counter[flat_bank_id] >= HOST_OT_THRESHOLD) continue;
+          int target_row = it->addr_vec[row_idx];
+          if (m_open_row[flat_bank_id] >= 0 && m_open_row[flat_bank_id] == target_row) {
+            bank_has_hit[flat_bank_id] = true;
+          }
+        }
+      }
+
       // Best candidate tracking
       ReqBuffer::iterator best_it;
       ReqBuffer* best_buffer = nullptr;
@@ -1091,6 +1251,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             offload_cmd = m_dram->m_commands("ACTO");
           } else if (m_open_row[flat_bank_id] != target_row) {
             // Row conflict → PREO
+            // Skip PREO if this bank has a pending row-hit (avoid closing the row it needs)
+            if (bank_has_hit[flat_bank_id]) continue;
             offload_cmd = m_dram->m_commands("PREO");
           } else {
             // Row hit → RDO/WRO
@@ -1325,16 +1487,29 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (m_priority_buffers[rk_idx].size() == 0) continue;
 
           if (m_mode_per_rank[rk_idx] != AsyncDIMMMode::HOST) {
-            if (m_offload_stopped[rk_idx]) continue;  // REFO offload stopped — hold in priority_buffer
-            // CONCURRENT/NMA: convert REFab → REFO
+            if (m_offload_stopped[rk_idx]) continue;  // offload stopped — hold in priority_buffer
             req_it = m_priority_buffers[rk_idx].begin();
-            int refo_cmd = m_dram->m_commands("REFO");
-            if (m_dram->check_ready(refo_cmd, req_it->addr_vec)) {
-              req_it->command = refo_cmd;
-              request_found = true;
-              req_buffer = &m_priority_buffers[rk_idx];
-
-              break;
+            // Distinguish REF (REFab/REFsb) vs PRE (Row Policy cap close-row)
+            bool is_ref = (req_it->final_command == m_dram->m_commands("REFab") ||
+                           req_it->final_command == m_dram->m_commands("REFsb"));
+            if (is_ref) {
+              // REF → REFO (offload refresh to NMA MC)
+              int refo_cmd = m_dram->m_commands("REFO");
+              if (m_dram->check_ready(refo_cmd, req_it->addr_vec)) {
+                req_it->command = refo_cmd;
+                request_found = true;
+                req_buffer = &m_priority_buffers[rk_idx];
+                break;
+              }
+            } else {
+              // PRE (Row Policy cap) → PREO (offload single-bank close to NMA MC)
+              int preo_cmd = m_dram->m_commands("PREO");
+              if (m_dram->check_ready(preo_cmd, req_it->addr_vec)) {
+                req_it->command = preo_cmd;
+                request_found = true;
+                req_buffer = &m_priority_buffers[rk_idx];
+                break;
+              }
             }
           } else {
             // HOST: normal priority scheduling
@@ -1412,6 +1587,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       s_bandwidth = ((float)((s_num_read_reqs + s_num_write_reqs) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024 * 1024 * 1012);
       s_dq_bandwidth = ((float)((s_num_issue_reads + s_num_issue_writes) * tx_bytes) / (float)(m_clk * m_dram->m_timing_vals("tCK_ps"))) * 1E12 / (1024 * 1024 * 1012);
       s_max_bandwidth = (float)(m_dram->m_channel_width / 8) * (float)m_dram->m_timing_vals("rate") * 1E6 / (1024 * 1024 * 1012);
+
+      // Debug outputs disabled — enable when debugging OT issues
+
       return;
     }
 

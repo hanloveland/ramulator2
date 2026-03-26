@@ -270,6 +270,31 @@ class AsyncDIMMNMAController {
     };
     std::vector<CmdFifoIssueLogEntry> s_cmd_fifo_issue_log;
 
+    // Debug: NMA MC side offload command group tracking for target bank (Ch0 Rk0 BG7 BK1)
+    int m_debug_target_bg = -1;
+    int m_debug_target_bk = -1;
+    // Current in-progress command group (accumulates PRE→ACT→RD/WR)
+    struct NMACmdGroup {
+      long first_clk = 0;     // clk of first cmd in group
+      long last_clk = 0;      // clk of final RD/WR
+      int row = -1;
+      int cmd_count = 0;      // number of commands in this group
+      bool has_pre = false;
+      bool has_act = false;
+      bool has_rdwr = false;   // RD_L or WR_L
+      bool is_read = false;
+    };
+    NMACmdGroup m_debug_nma_cur_group;
+    struct NMACmdGroupLog {
+      long first_clk;
+      long last_clk;
+      int row;
+      int cmd_count;         // 1=RD, 2=ACT+RD, 3=PRE+ACT+RD
+      bool is_read;
+      std::string seq;       // e.g. "PRE→ACT→RD"
+    };
+    std::vector<NMACmdGroupLog> m_debug_nma_cmd_groups;
+
     // Interrupt signal to Host MC
     using InterruptCallback = std::function<void(int rank_id, int batch_size)>;
     InterruptCallback m_interrupt_cb = nullptr;
@@ -419,6 +444,13 @@ class AsyncDIMMNMAController {
       m_req_continuous_count.resize(m_total_banks, 0);
       m_cmd_quota_remaining.resize(m_total_banks, 0);
       s_per_bank_cmd.resize(m_total_banks);
+
+      // Debug: target bank for offload command group tracking (BG7 BK1, Rk0 only)
+      if (m_rank_id == 0 && m_num_bankgroups > 7 && m_num_banks > 1) {
+        m_debug_target_bg = 7;
+        m_debug_target_bk = 1;
+        m_debug_nma_cmd_groups.reserve(2048);
+      }
 
       // Cache DRAM read timing for read completion modeling
       m_nCL = m_dram->m_timing_vals("nCL");
@@ -635,6 +667,58 @@ class AsyncDIMMNMAController {
             else if (command == m_dram->m_commands("PREO")) s_per_bank_cmd[flat_id].preo++;
             else if (command == m_dram->m_commands("RDO"))  s_per_bank_cmd[flat_id].rdo++;
             else if (command == m_dram->m_commands("WRO"))  s_per_bank_cmd[flat_id].wro++;
+            // Debug: target bank command group tracking
+            if (addr_vec[m_bankgroup_level] == m_debug_target_bg &&
+                addr_vec[m_bank_level] == m_debug_target_bk) {
+              int row = addr_vec[m_row_level];
+              bool is_pre = (command == m_dram->m_commands("PREO"));
+              bool is_act = (command == m_dram->m_commands("ACTO"));
+              bool is_rd  = (command == m_dram->m_commands("RDO"));
+              bool is_wr  = (command == m_dram->m_commands("WRO"));
+              if (is_pre) {
+                // PRE starts a new group (if current group has no RD/WR, flush as incomplete)
+                if (m_debug_nma_cur_group.cmd_count > 0 && !m_debug_nma_cur_group.has_rdwr) {
+                  m_debug_nma_cur_group.last_clk = m_clk;
+                  std::string seq;
+                  if (m_debug_nma_cur_group.has_pre) seq += "PRE";
+                  if (m_debug_nma_cur_group.has_act) { if (!seq.empty()) seq += "→"; seq += "ACT"; }
+                  seq += "(INCOMPLETE)";
+                  m_debug_nma_cmd_groups.push_back({m_debug_nma_cur_group.first_clk, (long)m_clk,
+                    m_debug_nma_cur_group.row, m_debug_nma_cur_group.cmd_count,
+                    false, seq});
+                }
+                m_debug_nma_cur_group = {};
+                m_debug_nma_cur_group.first_clk = m_clk;
+                m_debug_nma_cur_group.row = row;
+                m_debug_nma_cur_group.has_pre = true;
+                m_debug_nma_cur_group.cmd_count = 1;
+              } else if (is_act) {
+                if (m_debug_nma_cur_group.cmd_count == 0) {
+                  m_debug_nma_cur_group.first_clk = m_clk;
+                  m_debug_nma_cur_group.row = row;
+                }
+                m_debug_nma_cur_group.has_act = true;
+                m_debug_nma_cur_group.cmd_count++;
+              } else if (is_rd || is_wr) {
+                if (m_debug_nma_cur_group.cmd_count == 0) {
+                  m_debug_nma_cur_group.first_clk = m_clk;
+                  m_debug_nma_cur_group.row = row;
+                }
+                m_debug_nma_cur_group.has_rdwr = true;
+                m_debug_nma_cur_group.is_read = is_rd;
+                m_debug_nma_cur_group.cmd_count++;
+                m_debug_nma_cur_group.last_clk = m_clk;
+                // Group complete: PRE?→ACT?→RD/WR
+                std::string seq;
+                if (m_debug_nma_cur_group.has_pre) seq += "PRE→";
+                if (m_debug_nma_cur_group.has_act) seq += "ACT→";
+                seq += is_rd ? "RD" : "WR";
+                m_debug_nma_cmd_groups.push_back({m_debug_nma_cur_group.first_clk, (long)m_clk,
+                  m_debug_nma_cur_group.row, m_debug_nma_cur_group.cmd_count,
+                  m_debug_nma_cur_group.is_read, seq});
+                m_debug_nma_cur_group = {};  // reset for next group
+              }
+            }
           } else {
             // [DEBUG] CMD_DROP logging
             // const char* cn = "?";
@@ -794,6 +878,54 @@ class AsyncDIMMNMAController {
         if (!fifo.empty()) return false;
       }
       return true;
+    }
+
+    // Debug: return comprehensive state string for periodic logging
+    std::string get_debug_state_str() const {
+      static const char* state_names[] = {"IDLE", "ISSUE_START", "RUN", "BAR", "WAIT", "DONE"};
+      int state_idx = static_cast<int>(m_nma_state);
+      const char* state_name = (state_idx >= 0 && state_idx <= 5) ? state_names[state_idx] : "???";
+
+      // Per-bank FIFO sizes
+      int req_total = 0, cmd_total = 0;
+      int req_max = 0, cmd_max = 0;
+      int req_max_bank = -1, cmd_max_bank = -1;
+      int cmd_using_count = 0;
+      int open_count = 0, closed_count = 0, refresh_count = 0;
+      for (int b = 0; b < m_total_banks; b++) {
+        int rs = static_cast<int>(m_nma_req_buffer[b].size());
+        int cs = m_concurrent_mode ? static_cast<int>(m_cmd_fifo[b].size()) : 0;
+        req_total += rs;
+        cmd_total += cs;
+        if (rs > req_max) { req_max = rs; req_max_bank = b; }
+        if (cs > cmd_max) { cmd_max = cs; cmd_max_bank = b; }
+        if (m_concurrent_mode && m_arbiter_use_cmd[b]) cmd_using_count++;
+        switch (m_bank_fsm[b].state) {
+          case BankState::OPENED:     open_count++; break;
+          case BankState::CLOSED:     closed_count++; break;
+          case BankState::REFRESHING: refresh_count++; break;
+        }
+      }
+
+      char buf[512];
+      snprintf(buf, sizeof(buf),
+        "state=%s prog=%zu pc=%d remain=%d addr_gen=%zu | "
+        "REQ_FIFO=%d(max=%d@bk%d) CMD_FIFO=%d(max=%d@bk%d) | "
+        "ret_buf=%zu pend_rd=%zu pend_int=%zu | "
+        "arb_cmd=%d banks[O=%d,C=%d,R=%d]",
+        state_name,
+        m_nma_program.size(),
+        m_nma_pc,
+        (int)m_nma_program.size() - m_nma_pc,
+        m_addr_gen_slots.size(),
+        req_total, req_max, req_max_bank,
+        cmd_total, cmd_max, cmd_max_bank,
+        m_return_buffer.size(),
+        m_pending_reads.size(),
+        m_pending_interrupts.size(),
+        cmd_using_count,
+        open_count, closed_count, refresh_count);
+      return std::string(buf);
     }
 
     void print_stats() const {
@@ -976,6 +1108,9 @@ class AsyncDIMMNMAController {
       (void)batch_size;
     }
 
+    const std::vector<NMACmdGroupLog>& get_debug_nma_cmd_groups() const { return m_debug_nma_cmd_groups; }
+    const NMACmdGroup& get_debug_nma_cur_group() const { return m_debug_nma_cur_group; }
+
     /**
      * True when NMA state is IDLE and all CMD FIFOs are drained.
      * Used by System to detect end of concurrent execution.
@@ -1011,6 +1146,28 @@ class AsyncDIMMNMAController {
     int get_total_banks() const { return m_total_banks; }
     int get_num_bankgroups() const { return m_num_bankgroups; }
     int get_num_banks() const { return m_num_banks; }
+
+    // Per-bank debug state for external logging
+    struct NMABankDebugState {
+      int cmd_fifo_sz;
+      int req_fifo_sz;
+      int bank_state;    // 0=CLOSED, 1=OPENED, 2=REFRESHING
+      int open_row;
+      bool sr_pending;
+      bool arbiter_use_cmd;
+    };
+    NMABankDebugState get_bank_debug_state(int flat_bank_id) const {
+      NMABankDebugState s{};
+      if (flat_bank_id < 0 || flat_bank_id >= m_total_banks) return s;
+      s.cmd_fifo_sz = (int)m_cmd_fifo[flat_bank_id].size();
+      s.req_fifo_sz = (int)m_nma_req_buffer[flat_bank_id].size();
+      s.bank_state  = (int)m_bank_fsm[flat_bank_id].state;
+      s.open_row    = m_bank_fsm[flat_bank_id].open_row;
+      s.sr_pending  = m_sr_recovery[flat_bank_id].pending;
+      s.arbiter_use_cmd = m_arbiter_use_cmd[flat_bank_id];
+      return s;
+    }
+    bool is_refresh_pending() const { return m_nma_refresh_pending; }
     const PerBankCmdCount& get_per_bank_cmd(int flat_bank_id) const {
       return s_per_bank_cmd[flat_bank_id];
     }

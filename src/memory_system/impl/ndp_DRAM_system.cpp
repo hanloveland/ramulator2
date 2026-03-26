@@ -264,7 +264,7 @@ class NDPDRAMSystem final : public IMemorySystem, public Implementation {
     bool m_ndp_trace = true;
 
     // Host stall detection (tcore mode only)
-    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 50000;
     uint64_t m_last_host_send_clk = 0;
     bool m_host_send_ever = false;
     bool m_host_stall_terminated = false;

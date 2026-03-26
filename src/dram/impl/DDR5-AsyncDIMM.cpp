@@ -138,7 +138,7 @@ class DDR5AsyncDIMM : public IDRAM, public Implementation {
         {"ACTO",        {false,  false,   false,   false}},
         {"PREO",        {false,  false,   false,   false}},
         {"RDO",         {false,  false,   false,   false}},
-        {"WRO",         {false,  false,   true,    false}},
+        {"WRO",         {false,  false,   false,   false}},
         {"REFO",        {false,  false,   false,   false}},  // No bank state change on host side
         // RT_N: access=true (DQ bus used for data return)
         {"RT1", {false,false,true,false}}, {"RT2", {false,false,true,false}},

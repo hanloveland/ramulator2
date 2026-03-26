@@ -80,7 +80,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     bool m_nma_trace = false;
 
     // Host stall detection (tcore mode only)
-    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 50000;
     uint64_t m_last_host_send_clk = 0;
     bool m_host_send_ever = false;
     bool m_host_stall_terminated = false;
@@ -99,6 +99,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
     bool m_debug_mode = false;
     int m_wait_trace_done = 0;
     bool m_trace_done = false;
+    bool m_trace_exhausted_logged = false;  // One-shot log when trace fully sent
     bool m_nma_ever_started = false;  // Track if NMA was ever triggered
     int m_trace_repeat = 1;           // Number of times to repeat the trace
     int m_trace_repeat_done = 0;      // Number of completed repeats
@@ -232,7 +233,28 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
           host_mc->set_nma_query_callback([this, ch](int rk) {
             return m_nma_controllers[ch][rk]->is_nma_idle();
           });
-          m_logger->info("   - Wired NMA idle query: Host MC Ch {} -> NMA MCs", ch);
+          // Wire NMA debug callback (per-bank CMD/REQ FIFO, bank state, refresh)
+          host_mc->set_nma_debug_callback([this, ch](int rk) -> std::string {
+            auto* nma = m_nma_controllers[ch][rk];
+            char buf[512];
+            int off = 0;
+            off += snprintf(buf+off, sizeof(buf)-off, "st=%d ref=%d ret=%d prd=%d pint=%d banks[",
+              (int)nma->get_nma_state(), nma->is_refresh_pending() ? 1 : 0,
+              nma->get_return_buffer_size(), nma->get_pending_reads_size(),
+              nma->get_pending_interrupts_size());
+            for (int b = 0; b < nma->get_total_banks() && off < (int)sizeof(buf)-30; b++) {
+              auto bs = nma->get_bank_debug_state(b);
+              if (bs.cmd_fifo_sz > 0 || bs.req_fifo_sz > 0 || bs.sr_pending) {
+                off += snprintf(buf+off, sizeof(buf)-off, "b%d:c%dr%d%s%s ",
+                  b, bs.cmd_fifo_sz, bs.req_fifo_sz,
+                  bs.sr_pending ? "S" : "",
+                  bs.arbiter_use_cmd ? "C" : "R");
+              }
+            }
+            off += snprintf(buf+off, sizeof(buf)-off, "]");
+            return std::string(buf);
+          });
+          m_logger->info("   - Wired NMA idle query + debug: Host MC Ch {} -> NMA MCs", ch);
         } else {
           m_logger->warn("   - Host MC Ch {} is not AsyncDIMMHostController, bypass not wired!", ch);
         }
@@ -251,7 +273,12 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
       // Pass concurrent mode flag to Host MCs
       for (int ch = 0; ch < m_num_channels; ch++) {
         auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
-        if (host_mc) host_mc->set_concurrent_mode_enable(m_concurrent_mode_enable);
+        if (host_mc) {
+          host_mc->set_concurrent_mode_enable(m_concurrent_mode_enable);
+          #ifdef ASYNC_DEBUG
+          host_mc->set_debug_nma_offload(m_debug_mode);
+          #endif
+        }
       }
 
       // Phase 3: Wire NMA MC interrupt callback → Host MC on_nma_interrupt()
@@ -382,247 +409,37 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
       if (m_debug_fsm_sync)
         verify_fsm_sync();
 
-      // [DEBUG]
-      // // Debug dump at cycle 2100000 and exit (disabled)
-      // if (false && m_clk == 2100000) {
-      //   printf("\n========== DEBUG DUMP @ cycle %ld ==========\n", m_clk);
-      //   for (int ch = 0; ch < m_num_channels; ch++) {
-      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]);
-      //     if (!host_mc) continue;
-      //     int n_bg = host_mc->get_num_bankgroups();
-      //     int n_bk = host_mc->get_num_banks();
-      //     int n_rk = host_mc->get_num_ranks();
-      //
-      //     printf("[Host MC ch=%d] OT total_inc=%zu  total_dec=%zu  delta=%zd\n",
-      //       ch, host_mc->get_ot_total_inc(), host_mc->get_ot_total_dec(),
-      //       (ssize_t)host_mc->get_ot_total_inc() - (ssize_t)host_mc->get_ot_total_dec());
-      //     {
-      //       auto* h = host_mc->get_ru_cmd_count_hist();
-      //       printf("[Host MC ch=%d] RU cmd_count histogram: cc=1:%zu  cc=2:%zu  cc=3:%zu  (total=%zu)\n",
-      //         ch, h[1], h[2], h[3], h[1]+h[2]+h[3]);
-      //     }
-      //     for (int rk = 0; rk < n_rk; rk++) {
-      //       auto* nma_mc = m_nma_controllers[ch][rk];
-      //       printf("[ch=%d rk=%d] Interrupts sent(NMA): %zu  received(Host): %zu  delta: %zd\n",
-      //         ch, rk, nma_mc->get_num_interrupts_sent(), host_mc->get_interrupt_count(rk),
-      //         (ssize_t)nma_mc->get_num_interrupts_sent() - (ssize_t)host_mc->get_interrupt_count(rk));
-      //     }
-      //
-      //     for (int rk = 0; rk < n_rk; rk++) {
-      //       auto* nma_mc = m_nma_controllers[ch][rk];
-      //
-      //       // Per-rank summary
-      //       size_t h_acto=0,h_preo=0,h_rdo=0,h_wro=0;
-      //       size_t n_acto=0,n_preo=0,n_rdo=0,n_wro=0;
-      //       size_t i_act=0,i_pre=0,i_rd=0,i_wr=0;
-      //       for (int bg = 0; bg < n_bg; bg++)
-      //         for (int bk = 0; bk < n_bk; bk++) {
-      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
-      //           int nf = bg * n_bk + bk;
-      //           auto& ho = host_mc->get_offload_per_bank(hf);
-      //           h_acto+=ho.acto; h_preo+=ho.preo; h_rdo+=ho.rdo; h_wro+=ho.wro;
-      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
-      //           n_acto+=nc.acto; n_preo+=nc.preo; n_rdo+=nc.rdo; n_wro+=nc.wro;
-      //           i_act+=nc.issue_act; i_pre+=nc.issue_pre; i_rd+=nc.issue_rd; i_wr+=nc.issue_wr;
-      //         }
-      //       printf("\n--- ch=%d rk=%d ---\n", ch, rk);
-      //       printf("[Host Offload Total] ACTO=%zu  PREO=%zu  RDO=%zu  WRO=%zu  (sum=%zu)\n",
-      //         h_acto, h_preo, h_rdo, h_wro, h_acto+h_preo+h_rdo+h_wro);
-      //       printf("[NMA  Recv    Total] ACTO=%zu  PREO=%zu  RDO=%zu  WRO=%zu  (sum=%zu)\n",
-      //         n_acto, n_preo, n_rdo, n_wro, n_acto+n_preo+n_rdo+n_wro);
-      //       printf("[NMA  Issue   Total] ACT_L=%zu PRE_L=%zu RD_L=%zu WR_L=%zu (sum=%zu)\n",
-      //         i_act, i_pre, i_rd, i_wr, i_act+i_pre+i_rd+i_wr);
-      //       printf("[NMA  Queue] CMD_FIFO=%d  ret_buf=%d  pend_rd=%d  pend_int=%d\n",
-      //         nma_mc->get_cmd_fifo_outstanding(), nma_mc->get_return_buffer_size(),
-      //         nma_mc->get_pending_reads_size(), nma_mc->get_pending_interrupts_size());
-      //
-      //       // Per-bank detail
-      //       printf("  BG BK | Host:ACTO PREO  RDO  WRO | NMA_Recv:ACTO PREO  RDO  WRO | CMD_Issue:ACT  PRE   RD   WR | OT CMDQ | OT_inc OT_dec delta | dec_cc1 dec_cc2 dec_cc3\n");
-      //       printf("  ------+---------------------------+------------------------------+-------------------------------+---------+---------------------+-----------------------\n");
-      //       for (int bg = 0; bg < n_bg; bg++) {
-      //         for (int bk = 0; bk < n_bk; bk++) {
-      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
-      //           int nf = bg * n_bk + bk;
-      //           auto& ho = host_mc->get_offload_per_bank(hf);
-      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
-      //           auto& dh = host_mc->get_ot_dec_hist(hf);
-      //           int ot = host_mc->get_ot_counter(hf);
-      //           int cmdq = (int)nma_mc->get_per_bank_cmd_fifo_size(nf);
-      //           printf("  %2d %2d | %5zu %4zu %4zu %4zu | %5zu %5zu %4zu %4zu | %5zu %4zu %4zu %4zu | %2d  %2d  | %6zu %6zu %5zd | %7zu %7zu %7zu\n",
-      //             bg, bk,
-      //             ho.acto, ho.preo, ho.rdo, ho.wro,
-      //             nc.acto, nc.preo, nc.rdo, nc.wro,
-      //             nc.issue_act, nc.issue_pre, nc.issue_rd, nc.issue_wr,
-      //             ot, cmdq,
-      //             ho.ot_inc, ho.ot_dec, (ssize_t)ho.ot_inc - (ssize_t)ho.ot_dec,
-      //             dh.hist[1], dh.hist[2], dh.hist[3]);
-      //         }
-      //       }
-      //     }
-      //   }
-      //   // === Filtered logs: Ch0 Rk2 BG3 BK0 (ALL entries) ===
-      //   {
-      //     const char* cmd_names[] = {"ACTO", "PREO", "RDO", "WRO"};
-      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[0]);
-      //     if (host_mc) {
-      //       // Offload command timeline
-      //       auto& cmd_log = host_mc->get_offload_cmd_log();
-      //       size_t cnt = 0;
-      //       for (auto& e : cmd_log)
-      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0) cnt++;
-      //       printf("\n[Host MC ch=0 rk=2 BG=3 BK=0] Offload Cmd Log (ALL %zu entries):\n", cnt);
-      //       printf("  %10s  %4s\n", "cycle", "cmd");
-      //       for (auto& e : cmd_log) {
-      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0)
-      //           printf("  %10ld  %4s\n", e.clk, cmd_names[e.cmd_type]);
-      //       }
-      //
-      //       // RU pop log
-      //       auto& ru_log = host_mc->get_ru_pop_log();
-      //       cnt = 0;
-      //       for (auto& e : ru_log)
-      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0) cnt++;
-      //       printf("\n[Host MC ch=0 rk=2 BG=3 BK=0] RU Pop Log (ALL %zu entries):\n", cnt);
-      //       printf("  %10s  %3s  %4s\n", "cycle", "cc", "R/W");
-      //       for (auto& e : ru_log) {
-      //         if (e.rank == 2 && e.bg == 3 && e.bk == 0)
-      //           printf("  %10ld  %3d  %4s\n", e.clk, e.cmd_count, e.is_read ? "RD" : "WR");
-      //       }
-      //     }
-      //     // Matching NMA interrupt log for same bank
-      //     auto* nma_mc = m_nma_controllers[0][2];
-      //     if (nma_mc) {
-      //       auto& int_log = nma_mc->get_interrupt_log();
-      //       size_t cnt = 0;
-      //       for (auto& e : int_log)
-      //         if (e.bg == 3 && e.bk == 0) cnt++;
-      //       printf("\n[NMA MC ch=0 rk=2 BG=3 BK=0] Interrupt Log (ALL %zu entries):\n", cnt);
-      //       printf("  %10s  %6s  %4s\n", "cycle", "seq", "R/W");
-      //       for (auto& e : int_log) {
-      //         if (e.bg == 3 && e.bk == 0)
-      //           printf("  %10ld  %6lu  %4s\n", (long)e.clk, e.seq_num, e.is_read ? "RD" : "WR");
-      //       }
-      //     }
-      //   }
-      //
-      //   printf("\n============================================\n");
-      //   std::exit(0);
-      // }
+      #ifdef ASYNC_DEBUG
+      // Periodic debug: every 50M cycles, print CONCURRENT rank status (Host MC + NMA MC)
+      if (m_debug_mode && m_clk % 50000000 == 0) {
+        bool any_conc = false;
+        for (int ch = 0; ch < m_num_channels && !any_conc; ch++)
+          for (int rk = 0; rk < m_num_ranks && !any_conc; rk++)
+            if (m_rank_state[ch][rk] == SystemNMAState::CONCURRENT ||
+                m_rank_state[ch][rk] == SystemNMAState::TRANSITIONING_C2H)
+              any_conc = true;
 
-      // [DEBUG]
-      // // Debug dump at cycle 900000: Host MC + NMA MC full state per rank, then exit
-      // if (false && m_clk == 2900000) {
-      //   printf("\n========== BUFFER DEBUG DUMP @ cycle %ld ==========\n", m_clk);
-      //   for (int ch = 0; ch < m_num_channels; ch++) {
-      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]);
-      //     if (!host_mc) continue;
-      //     int n_rk = host_mc->get_num_ranks();
-      //     int n_bg = host_mc->get_num_bankgroups();
-      //     int n_bk = host_mc->get_num_banks();
-      //
-      //     // Global RU cmd_count histogram
-      //     {
-      //       auto* h = host_mc->get_ru_cmd_count_hist();
-      //       printf("[Host MC ch=%d] RU cmd_count histogram: cc=1:%zu  cc=2:%zu  cc=3:%zu  (total=%zu)\n",
-      //         ch, h[1], h[2], h[3], h[1]+h[2]+h[3]);
-      //     }
-      //
-      //     for (int rk = 0; rk < n_rk; rk++) {
-      //       auto ds = host_mc->get_debug_state(rk);
-      //       auto* nma_mc = m_nma_controllers[ch][rk];
-      //
-      //       printf("\n===== ch=%d rk=%d =====\n", ch, rk);
-      //
-      //       // --- Host MC summary ---
-      //       printf("[Host MC] active_buf=%d  rd_buf=%d  wr_buf=%d  pri_buf=%d\n",
-      //         ds.active_buf, ds.rd_buf, ds.wr_buf, ds.pri_buf);
-      //       printf("[Host MC] RU_size=%d  RT_pending=%d  OT_sum=%d  pending_depart=%d\n",
-      //         ds.ru_size, ds.rt_pending, ds.ot_sum, ds.pending_depart);
-      //       printf("[Host MC] Interrupts_received=%zu\n", host_mc->get_interrupt_count(rk));
-      //
-      //       // --- NMA MC summary ---
-      //       printf("[NMA  MC] CMD_FIFO_total=%d  REQ_FIFO_outstanding=%d\n",
-      //         nma_mc->get_cmd_fifo_outstanding(), nma_mc->get_nma_outstanding());
-      //       printf("[NMA  MC] return_buf=%d  pending_reads=%d  pending_interrupts=%d\n",
-      //         nma_mc->get_return_buffer_size(),
-      //         nma_mc->get_pending_reads_size(),
-      //         nma_mc->get_pending_interrupts_size());
-      //       printf("[NMA  MC] Interrupts_sent=%zu\n", nma_mc->get_num_interrupts_sent());
-      //
-      //       // --- Per-bank detail table ---
-      //       printf("  BG BK | Host_Offload:ACTO PREO  RDO  WRO | RU_dec:cc1  cc2  cc3 | OT  | NMA_CMD_Issue:ACT  PRE   RD   WR | CMDQ\n");
-      //       printf("  ------+------------------------------------+---------------------+-----+-----------------------------------+-----\n");
-      //       for (int bg = 0; bg < n_bg; bg++) {
-      //         for (int bk = 0; bk < n_bk; bk++) {
-      //           int hf = bk + bg * n_bk + rk * n_bg * n_bk;
-      //           int nf = bg * n_bk + bk;
-      //           auto& ho = host_mc->get_offload_per_bank(hf);
-      //           auto& dh = host_mc->get_ot_dec_hist(hf);
-      //           int ot = host_mc->get_ot_counter(hf);
-      //           auto& nc = nma_mc->get_per_bank_cmd(nf);
-      //           int cmdq = (int)nma_mc->get_per_bank_cmd_fifo_size(nf);
-      //           printf("  %2d %2d | %5zu %4zu %4zu %4zu | %4zu %4zu %4zu | %3d | %5zu %4zu %4zu %4zu | %3d\n",
-      //             bg, bk,
-      //             ho.acto, ho.preo, ho.rdo, ho.wro,
-      //             dh.hist[1], dh.hist[2], dh.hist[3],
-      //             ot,
-      //             nc.issue_act, nc.issue_pre, nc.issue_rd, nc.issue_wr,
-      //             cmdq);
-      //         }
-      //       }
-      //     }
-      //   }
-      //   // === Filtered timeline logs: Ch0 Rk0 BG0 BK0 ===
-      //   {
-      //     auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[0]);
-      //     auto* nma_mc = m_nma_controllers[0][0];
-      //     if (host_mc && nma_mc) {
-      //       const char* offload_names[] = {"ACTO", "PREO", "RDO", "WRO"};
-      //       const char* issue_names[] = {"ACT", "PRE", "RD", "WR"};
-      //
-      //       // Host offload command timeline
-      //       auto& cmd_log = host_mc->get_offload_cmd_log();
-      //       size_t cnt = 0;
-      //       for (auto& e : cmd_log)
-      //         if (e.rank == 0 && e.bg == 6 && e.bk == 1) cnt++;
-      //       const char* buf_names[] = {"ACT_BUF", "RD_BUF", "WR_BUF"};
-      //       printf("\n[Host MC ch=0 rk=0 BG=6 BK=1] Offload Cmd Log (%zu entries):\n", cnt);
-      //       printf("  %10s  %4s  %8s  %7s\n", "cycle", "cmd", "row", "buffer");
-      //       for (auto& e : cmd_log) {
-      //         if (e.rank == 0 && e.bg == 6 && e.bk == 1)
-      //           printf("  %10ld  %4s  %8d  %7s\n", e.clk, offload_names[e.cmd_type],
-      //             e.row, buf_names[e.buf_type]);
-      //       }
-      //
-      //       // NMA CMD FIFO issue timeline
-      //       auto& issue_log = nma_mc->get_cmd_fifo_issue_log();
-      //       cnt = 0;
-      //       for (auto& e : issue_log)
-      //         if (e.bg == 6 && e.bk == 1) cnt++;
-      //       printf("\n[NMA MC ch=0 rk=0 BG=6 BK=1] CMD FIFO Issue Log (%zu entries):\n", cnt);
-      //       printf("  %10s  %4s\n", "cycle", "cmd");
-      //       for (auto& e : issue_log) {
-      //         if (e.bg == 6 && e.bk == 1)
-      //           printf("  %10ld  %4s\n", (long)e.clk, issue_names[e.cmd_type]);
-      //       }
-      //
-      //       // NMA interrupt log for same bank
-      //       auto& int_log = nma_mc->get_interrupt_log();
-      //       cnt = 0;
-      //       for (auto& e : int_log)
-      //         if (e.bg == 6 && e.bk == 1) cnt++;
-      //       printf("\n[NMA MC ch=0 rk=0 BG=6 BK=1] Interrupt Log (%zu entries):\n", cnt);
-      //       printf("  %10s  %6s  %4s\n", "cycle", "seq", "R/W");
-      //       for (auto& e : int_log) {
-      //         if (e.bg == 6 && e.bk == 1)
-      //           printf("  %10ld  %6lu  %4s\n", (long)e.clk, e.seq_num, e.is_read ? "RD" : "WR");
-      //       }
-      //     }
-      //   }
-      //
-      //   printf("\n============================================\n");
-      //   std::exit(0);
-      // }
+        if (any_conc) {
+          m_logger->info("[{}] === 50M Periodic Debug ===", m_clk);
+          for (int ch = 0; ch < m_num_channels; ch++) {
+            auto* host_mc = dynamic_cast<AsyncDIMMHostController*>(m_host_controllers[ch]->m_impl);
+            if (!host_mc) continue;
+            for (int rk = 0; rk < m_num_ranks; rk++) {
+              if (m_rank_state[ch][rk] != SystemNMAState::CONCURRENT &&
+                  m_rank_state[ch][rk] != SystemNMAState::TRANSITIONING_C2H)
+                continue;
+              std::string host_str = host_mc->get_debug_state_str(rk);
+              std::string nma_str = m_nma_controllers[ch][rk]->get_debug_state_str();
+              m_logger->info("  Ch{} Rk{} Host: {}", ch, rk, host_str);
+              m_logger->info("  Ch{} Rk{} NMA:  {}", ch, rk, nma_str);
+            }
+          }
+        }
+      }
+      #endif
+
+      // [DEBUG] old debug dumps removed — see git history for detail
+      // Last removed: per-bank OT/CMD/REQ detail dumps at fixed cycles (see git history)
     };
 
     float get_tCK() override {
@@ -759,6 +576,9 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
           m_nma_controllers[ch][rk]->print_stats();
 
       report();
+
+      // Debug: Host MC RU vs NMA MC CMD group comparison — disabled
+      // (enable when debugging OT accounting issues)
 
       // FSM sync summary
       if (m_debug_fsm_sync) {
@@ -946,6 +766,14 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
      */
     void try_issue_trace_requests() {
       if (m_curr_trace_idx >= m_trace.size() && m_outstanding_reads.empty()) {
+        #ifdef ASYNC_DEBUG
+        // Log when tcore trace is fully consumed (one-shot per iteration)
+        if (!m_trace_exhausted_logged) {
+          m_logger->info("[{}] Tcore trace exhausted: all {} entries sent, outstanding_reads=0",
+                         m_clk, m_trace.size());
+          m_trace_exhausted_logged = true;
+        }
+        #endif
         if (m_nma_trace) {
           // NMA trace: wait for all NMAs to return to idle before repeating or finishing.
           if (m_nma_ever_started) {
@@ -953,7 +781,16 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
             for (int ch = 0; ch < m_num_channels && all_idle; ch++)
               for (int rk = 0; rk < m_num_ranks && all_idle; rk++)
                 if (!m_nma_controllers[ch][rk]->is_nma_idle()) all_idle = false;
+            // Also wait for all ranks to return to HOST_MODE (C2H drain complete)
+            // NMAInst writes must happen in HOST mode; if a rank is still CONCURRENT,
+            // writes would be offloaded as WRO → CMD FIFO instead of magic path.
+            bool all_host = true;
             if (all_idle) {
+              for (int ch = 0; ch < m_num_channels && all_host; ch++)
+                for (int rk = 0; rk < m_num_ranks && all_host; rk++)
+                  if (m_rank_state[ch][rk] != SystemNMAState::HOST_MODE) all_host = false;
+            }
+            if (all_idle && all_host) {
               m_trace_repeat_done++;
               // trace_repeat <= 0 means infinite repeat (until Frontend finishes)
               if (m_trace_repeat > 0 && m_trace_repeat_done >= m_trace_repeat) {
@@ -967,6 +804,7 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
                 m_curr_trace_idx = 0;
                 m_next_request_id = 0;
                 m_nma_ever_started = false;
+                m_trace_exhausted_logged = false;
                 // Clear NMA programs for fresh instruction loading
                 for (int ch = 0; ch < m_num_channels; ch++)
                   for (int rk = 0; rk < m_num_ranks; rk++)

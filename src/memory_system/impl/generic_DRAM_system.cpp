@@ -42,7 +42,7 @@ class GenericDRAMSystem final : public IMemorySystem, public Implementation {
     // Host stall detection (tcore mode only)
     // When tcore is active and host send() hasn't been called for STALL_THRESHOLD cycles,
     // the host is stalled due to tcore backpressure → terminate simulation.
-    static constexpr uint64_t HOST_STALL_THRESHOLD = 100000;
+    static constexpr uint64_t HOST_STALL_THRESHOLD = 50000;
     uint64_t m_last_host_send_clk = 0;
     bool m_host_send_ever = false;
     bool m_host_stall_terminated = false;
