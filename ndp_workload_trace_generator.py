@@ -2920,6 +2920,19 @@ def gemv_asyncdimm(f, input_size):
 
     n_mac_iterations = n_tile_block_row * n_row_p_vec
 
+    # Write DRAM (Vector Data) — same as gemv_pch but without pseudo-channel
+    n_wr_dram_row = int(vec_size / row_size)
+    if n_wr_dram_row == 0:
+        n_wr_dram_row = 1
+    print(f"    Writing vector data to DRAM: {n_wr_dram_row} rows × {ASYNCDIMM_NUM_COL} cols × {ASYNCDIMM_NUM_CHANNEL} ch × {ASYNCDIMM_NUM_RANK} rk × {n_row_p_vec} bg")
+    for ro in range(n_wr_dram_row):
+        for co in range(ASYNCDIMM_NUM_COL):
+            for ch in range(ASYNCDIMM_NUM_CHANNEL):
+                for rk in range(ASYNCDIMM_NUM_RANK):
+                    for bg in range(n_row_p_vec):
+                        addr = encode_asyncdimm_address(ch, rk, bg, ndp_bk, 1000 + ro, co)
+                        write_normal_trace(f, 'ST', addr)
+
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
