@@ -1503,6 +1503,13 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     };
 
     void set_write_mode_per_rank(int rk_idx) {
+      // NMAInst writes pending → force write drain mode for fast NMA programming
+      if (m_nma_wr_send_cnt[rk_idx] > m_nma_wr_issue_cnt[rk_idx] ||
+          m_nma_start_hold[rk_idx].has_value()) {
+        m_is_write_mode_per_rank[rk_idx] = true;
+        return;
+      }
+
       if (!m_is_write_mode_per_rank[rk_idx]) {
         if ((m_write_buffers[rk_idx].size() > m_wr_high_watermark * m_write_buffers[rk_idx].max_size) || m_read_buffers[rk_idx].size() == 0) {
           m_is_write_mode_per_rank[rk_idx] = true;
