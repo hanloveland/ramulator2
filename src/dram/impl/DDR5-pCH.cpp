@@ -676,6 +676,22 @@ class DDR5PCH : public IDRAM, public Implementation {
                   // Nothing
                 }
                 else {
+                  // Debug check: wildcard same-id collision detection
+                  // Two wildcard Inst_Slots with the same id must not coexist in the queue
+                  // (MC does not guarantee cross-bank ordering → ambiguous matching)
+                  if (inst.wildcard) {
+                    for (int k = 0; k < (int)ndp_inst_slot_per_pch[pch_idx].size(); k++) {
+                      if (ndp_inst_slot_per_pch[pch_idx][k].wildcard &&
+                          ndp_inst_slot_per_pch[pch_idx][k].id == inst.id) {
+                        std::cout << "[ERROR] Wildcard same-id collision at PCH " << pch_idx
+                                  << ": existing slot[" << k << "] id=" << ndp_inst_slot_per_pch[pch_idx][k].id
+                                  << " opcode=" << ndp_inst_slot_per_pch[pch_idx][k].opcode
+                                  << ", new inst id=" << inst.id
+                                  << " opcode=" << inst.opcode << std::endl;
+                        throw std::runtime_error("Wildcard Inst_Slot same-id collision! Use BARRIER to serialize.");
+                      }
+                    }
+                  }
                   ndp_inst_slot_per_pch[pch_idx].push_back(inst);
                   // Segment tracking: determine type from fetched instruction opcode
                   if (ndp_seg_tracking_per_pch[pch_idx] && ndp_cur_segment_per_pch[pch_idx].type == NdpSegType::UNKNOWN) {
@@ -803,14 +819,25 @@ class DDR5PCH : public IDRAM, public Implementation {
                 } else if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
                   // Nothing
                 }                
-                else {                  
+                else {
+                  // Debug check: wildcard same-id collision (self_exec path)
+                  if (inst.wildcard) {
+                    for (int k = 0; k < (int)ndp_inst_slot_per_pch[pch_idx].size(); k++) {
+                      if (ndp_inst_slot_per_pch[pch_idx][k].wildcard &&
+                          ndp_inst_slot_per_pch[pch_idx][k].id == inst.id) {
+                        std::cout << "[ERROR] Wildcard same-id collision (self_exec) at PCH " << pch_idx
+                                  << ": existing slot[" << k << "] id=" << inst.id << std::endl;
+                        throw std::runtime_error("Wildcard Inst_Slot same-id collision! Use BARRIER to serialize.");
+                      }
+                    }
+                  }
                   ndp_inst_slot_per_pch[pch_idx].push_back(inst);
-                }  
+                }
 
-                // Loop Control 
+                // Loop Control
                 if(inst.opcode == m_ndp_inst_op.at("LOOP")) {
                   if(loop_cnt_per_pch[pch_idx * 8 + inst.id] == inst.loop_cnt) {
-                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," (self_exec) Loop End"); 
+                    DEBUG_PRINT(m_clk, "NDP Unit", ch, pch," (self_exec) Loop End");
                     loop_cnt_per_pch[pch_idx * 8 + inst.id] = 0;
                     ndp_pc_per_pch[pch_idx]++;
                   }
@@ -996,27 +1023,28 @@ class DDR5PCH : public IDRAM, public Implementation {
                         throw std::runtime_error("NDP DRAM RD when ndp_inst_slot is empty!");
                     #endif                     
                   } else {
-                    // Find Matching Inst
+                    // Find Matching Inst (wildcard bit[42]: match by id only, ignore bg/bk)
                     bool is_find = false;
                     int match_idx = -1;
                     for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
                       if(ndp_inst_slot_per_pch[pch_idx][i].id == ndp_id_per_pch[pch_idx] &&
-                         ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
-                         ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]) {
+                         (ndp_inst_slot_per_pch[pch_idx][i].wildcard ||
+                          (ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
+                           ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]))) {
                         is_find = true;
                         match_idx = i;
                       }
                       if(is_find) break;
                     }
                     if(!is_find) {
-                      // Print NDP Instruction Slot 
+                      // Print NDP Instruction Slot
                       std::cout<<""<<std::endl;
                       for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
                         std::cout<<"decoding opcode "<<ndp_inst_slot_per_pch[pch_idx][i].opcode<<" opsize "<<ndp_inst_slot_per_pch[pch_idx][i].opsize<<
                         " id "<<ndp_inst_slot_per_pch[pch_idx][i].id<<" bg "<<ndp_inst_slot_per_pch[pch_idx][i].bg<<
                         " cnt "<<ndp_inst_slot_per_pch[pch_idx][i].cnt<<
-                        " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;                        
-                       }                                            
+                        " bk "<<ndp_inst_slot_per_pch[pch_idx][i].bk<<" loop "<<ndp_inst_slot_per_pch[pch_idx][i].loop_cnt<<" pc "<<ndp_inst_slot_per_pch[pch_idx][i].jump_pc<<std::endl;
+                       }
                        std::cout<<"<-> DRAM RD PCH ["<<ndp_id_per_pch[pch_idx]<<"] BG ["<<ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]]<<"] BK ["<<ndp_addr_per_pch[pch_idx][m_levels["bank"]]<<"]"<<std::endl;
                        std::cout<<" NDP Status : "<<ndp_status_per_pch[pch_idx]<<std::endl;
                        std::cout<<" NDP PC: "<<ndp_pc_per_pch[pch_idx]<<std::endl;
@@ -1085,20 +1113,21 @@ class DDR5PCH : public IDRAM, public Implementation {
                         throw std::runtime_error("NDP DRAM WR when ndp_inst_slot is empty!");
                     #endif     
                   } else {
-                    // Find Matching Inst
+                    // Find Matching Inst (wildcard bit[42]: match by id only, ignore bg/bk)
                     bool is_find = false;
                     int match_idx = -1;
                     for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
                       if(ndp_inst_slot_per_pch[pch_idx][i].id == ndp_id_per_pch[pch_idx] &&
-                         ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
-                         ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]) {
+                         (ndp_inst_slot_per_pch[pch_idx][i].wildcard ||
+                          (ndp_inst_slot_per_pch[pch_idx][i].bg == ndp_addr_per_pch[pch_idx][m_levels["bankgroup"]] &&
+                           ndp_inst_slot_per_pch[pch_idx][i].bk == ndp_addr_per_pch[pch_idx][m_levels["bank"]]))) {
                         is_find = true;
                         match_idx = i;
                       }
                       if(is_find) break;
                     }
                     if(!is_find) {
-                      // Print NDP Instruction Slot 
+                      // Print NDP Instruction Slot
                       std::cout<<"NDP Status : "<<ndp_status_per_pch[pch_idx]<<std::endl;
                       for(int i=0;i<ndp_inst_slot_per_pch[pch_idx].size();i++) {
                         std::cout<<"decoding opcode "<<ndp_inst_slot_per_pch[pch_idx][i].opcode<<" opsize "<<ndp_inst_slot_per_pch[pch_idx][i].opsize<<
@@ -1608,6 +1637,7 @@ class DDR5PCH : public IDRAM, public Implementation {
       uint64_t id     = (inst >> 48) & 0x7;
       uint64_t bg     = (inst >> 45) & 0x7;
       uint64_t bk     = (inst >> 43) & 0x3;
+      bool     wc     = (inst >> 42) & 0x1;  // bit[42]: wildcard flag
       uint64_t loop   = 0;
       uint64_t pc     = 0;
       if (opcode == m_ndp_inst_op.at("T_ADD") ||
@@ -1618,15 +1648,15 @@ class DDR5PCH : public IDRAM, public Implementation {
         // NDP Self Execution Mode Increase Opsize x 2 (Each Instruction take two cycle)
         opsize = (opsize+1)*2 - 1;
       }
-      
+
       if(opcode == m_ndp_inst_op.at("LOOP")) {
         loop = (inst >> 16) & 0x3ff;
         pc   = (inst >> 0) & 0x3ff;
       }
       #ifdef PRINT_DEBUG
-      std::cout<<"decoding ["<<std::hex<<inst<<"] - opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<" loop "<<loop<<" pc "<<pc<<std::endl;
-      #endif 
-      return Inst_Slot(true,opcode,opsize,id,bg,bk,loop,pc);
+      std::cout<<"decoding ["<<std::hex<<inst<<"] - opcode "<<opcode<<" opsize "<<opsize<<" id "<<id<<" bg "<<bg<<" bk "<<bk<<" wc "<<wc<<" loop "<<loop<<" pc "<<pc<<std::endl;
+      #endif
+      return Inst_Slot(true,opcode,opsize,id,bg,bk,wc,loop,pc);
     };
 
     void count_ndp_ops(u_int32_t channel_id, u_int32_t pseudo_channel_id, uint32_t opcode, uint32_t opsize) {

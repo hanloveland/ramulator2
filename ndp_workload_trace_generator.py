@@ -2,6 +2,7 @@
 import math
 import os
 import shutil
+import random
 from pathlib import Path
 
 # 1 (x4), 2 (x8), 4 (x16)
@@ -42,7 +43,7 @@ NORMAL_RANK_BITS       = int(math.log2(NUM_RANK))             # 4 Rank
 NORMAL_BANKGROUP_BITS  = int(math.log2(NUM_BANKGROUP))        # 8 Bank Group  
 NORMAL_BANK_BITS       = int(math.log2(NUM_BANK))             # 4 Bank   
 NORMAL_ROW_BITS        = int(math.log2(NUM_ROW))              # 64K Row
-NORMAL_COLUMN_BITS     = int(math.log2(BURST_SIZE))           # 2K Column (1KB/8B=128)
+NORMAL_COLUMN_BITS     = int(math.log2(NUM_NORMAL_COL))       # 128 columns (log2(2048)-log2(prefetch=16)=7)
 NORMAL_BURST_SIZE      = 64                                   # Prefetch Size 64
 NORMAL_GRANULARITY     = int(math.log2(NORMAL_BURST_SIZE))    # 64B 
 
@@ -78,6 +79,10 @@ NDP_DAT2_MEM_BG = -1 # Not Used when DRAM x4
 NDP_DAT3_MEM_BK = -1 # Not Used when DRAM x4 
 NDP_DAT3_MEM_BG = -1 # Not Used when DRAM x4 
 NDP_TARGET_BK = 3    # To decoule host access and DRAM access
+
+# NDPInst Wildcard: bit[42]=1 → match by id only, ignore bg/bk in matching
+# Usage: inst(opcode, opsize, id, bg, bk, op1, op2, op3, wildcard=1)
+NDP_INST_WILDCARD = 1
 
 SPLIT_HIGH_BANK = False
 LINEAR_ACCESS = False
@@ -187,6 +192,35 @@ workload_list = {
     "SCAL",
     "GEMV"
 }
+
+# =========================================================================
+#  SLS (SparseLengthsSum) — Recommendation System Workload
+# =========================================================================
+SLS_NUM_TABLES          = 128           # T: number of embedding tables
+SLS_ENTRIES_PER_TABLE   = 1_000_000     # N: entries per table
+SLS_EMBED_DIM           = 128           # D: embedding dimension (FP16)
+SLS_VECTOR_BYTES        = 256           # D × 2 bytes (FP16)
+SLS_COLS_PER_VECTOR     = 4             # 256B / 64B burst
+SLS_VECTORS_PER_ROW     = 32            # 128 cols / 4 cols per vector (8KB row)
+SLS_ZIPF_ALPHA          = 1.05          # Criteo empirical distribution
+SLS_ZIPF_SEED           = 42            # Reproducibility
+
+# Mapper-accurate bit widths for DDR5_16Gb_x4 (ch=2, rk=4) + RoBaCoRaCh
+# Col bits = log2(2048) - log2(prefetch=16) = 11 - 4 = 7
+SLS_CH_BITS  = 1    # log2(2 channels)
+SLS_RA_BITS  = 2    # log2(4 ranks)
+SLS_CO_BITS  = 7    # 128 columns after prefetch adjustment
+SLS_BG_BITS  = 3    # log2(8 bank groups)
+SLS_BK_BITS  = 2    # log2(4 banks)
+SLS_RO_BITS  = 16   # log2(65536 rows)
+SLS_TX_OFFSET = 6   # log2(prefetch=16 × channel_width=32 / 8) = log2(64)
+
+sls_config_list = {
+    "SLS-S": {"B": 1,  "L": 16},    # Single query
+    "SLS-M": {"B": 16, "L": 16},    # Batched inference
+    "SLS-L": {"B": 64, "L": 64},    # High-throughput serving
+}
+sls_config_names = ["SLS-S", "SLS-M", "SLS-L"]
 
 def config_scale_factor(scaling_factor):
     global NUM_CHANNEL
@@ -501,14 +535,98 @@ def write_normal_trace(f, instr_type, address):
     else:
         f.write(f"{instr_type} 0x{address:016X}\n")
 
-# NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
-def inst(opcode,opsize,id,bg,bk,op1,op2,op3):
+def write_wait_ndp(f):
+    """Emit WAIT_NDP synchronization barrier.
+    Blocks trace issuance until NDP execution completes and all outstanding reads drain."""
+    f.write("WAIT_NDP\n")
+
+# =========================================================================
+#  SLS Helper Functions
+# =========================================================================
+
+def sls_table_to_bank(table_id):
+    """Map table_id (0~127) -> (ch, rk, bg, bk).
+    CH->RK->BG->BK placement for maximum parallelism.
+    128 tables use BK=0,1 only (BK=2,3 reserved for output)."""
+    ch = table_id % 2
+    rk = (table_id // 2) % 4
+    bg = (table_id // 8) % 8
+    bk = (table_id // 64) % 4
+    return ch, rk, bg, bk
+
+def sls_entry_to_row_col(entry_idx):
+    """Convert embedding entry index to (row, col_start) within a table's bank.
+    16 vectors per row (8KB row / 512B vector), 8 columns per vector."""
+    row = entry_idx // SLS_VECTORS_PER_ROW
+    col_start = (entry_idx % SLS_VECTORS_PER_ROW) * SLS_COLS_PER_VECTOR
+    return row, col_start
+
+def encode_sls_address(channel, rank, bg, bank, row, col):
+    """Encode address that exactly matches the RoBaCoRaCh mapper decoding.
+
+    Mapper extraction order (after >> tx_offset=6):
+      Ch(1b) | Ra(2b) | Col(7b) | BG(3b) | BK(2b) | Row(16b)
+
+    Col = 7 bits (log2(2048) - log2(prefetch=16) = 11 - 4 = 7).
+    """
+    address = 0
+    address |= (channel & ((1 << SLS_CH_BITS) - 1))
+    address |= (rank    & ((1 << SLS_RA_BITS) - 1)) << SLS_CH_BITS
+    address |= (col     & ((1 << SLS_CO_BITS) - 1)) << (SLS_CH_BITS + SLS_RA_BITS)
+    address |= (bg      & ((1 << SLS_BG_BITS) - 1)) << (SLS_CH_BITS + SLS_RA_BITS + SLS_CO_BITS)
+    address |= (bank    & ((1 << SLS_BK_BITS) - 1)) << (SLS_CH_BITS + SLS_RA_BITS + SLS_CO_BITS + SLS_BG_BITS)
+    address |= (row     & ((1 << SLS_RO_BITS) - 1)) << (SLS_CH_BITS + SLS_RA_BITS + SLS_CO_BITS + SLS_BG_BITS + SLS_BK_BITS)
+    address = address << SLS_TX_OFFSET
+    return address
+
+def sls_generate_zipf_indices(B, L, T, N, alpha, seed):
+    """Generate Zipf-distributed embedding indices.
+    Returns list of shape [T][B][L] with values in [0, N-1].
+    Uses inverse CDF method (no numpy dependency)."""
+    rng = random.Random(seed)
+
+    # Pre-compute CDF for Zipf(alpha) over [1, N]
+    # For large N, compute harmonic numbers incrementally
+    H = 0.0
+    pmf = [0.0] * (N + 1)  # pmf[k] = 1/k^alpha, k=1..N
+    for k in range(1, N + 1):
+        pmf[k] = 1.0 / (k ** alpha)
+        H += pmf[k]
+
+    # Build CDF table (sampled at checkpoints for memory efficiency)
+    # For N=1M with alpha=1.05, most probability mass is in k<10000.
+    # Use rejection sampling: generate uniform, binary search CDF.
+    # Optimization: pre-compute cumulative sums
+    cdf = [0.0] * (N + 1)
+    for k in range(1, N + 1):
+        cdf[k] = cdf[k - 1] + pmf[k] / H
+
+    def sample_one():
+        u = rng.random()
+        # Binary search for smallest k where cdf[k] >= u
+        lo, hi = 1, N
+        while lo < hi:
+            mid = (lo + hi) // 2
+            if cdf[mid] < u:
+                lo = mid + 1
+            else:
+                hi = mid
+        return lo - 1  # 0-indexed
+
+    # Generate all indices
+    indices = [[[sample_one() for _ in range(L)] for _ in range(B)] for _ in range(T)]
+    return indices
+
+# NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3, wildcard
+# bit[42] = wildcard flag: 1 = match by id only (ignore bg/bk), 0 = exact 3-field match
+def inst(opcode,opsize,id,bg,bk,op1,op2,op3,wildcard=0):
     inst_64bit = 0
     inst_64bit |= (opcode & 0x3f) << 58
     inst_64bit |= (opsize & 0x7f) << 51
     inst_64bit |= (id & 0x7) << 48
     inst_64bit |= (bg & 0x7) << 45
     inst_64bit |= (bk & 0x3) << 43
+    inst_64bit |= (wildcard & 0x1) << 42       # Wildcard flag
     if opcode == ndp_inst_opcode["LOOP"]:
         inst_64bit |= (op1 & 0x3FF) << 16      # Iteration
         inst_64bit |= (op2 & 0x3FF)            # PC
@@ -2388,6 +2506,54 @@ def gemv_normal(f, input_size):
     print(f"  - WR Vecotr: {num_rd}")    
 
 ###############################################################################
+# SLS (SparseLengthsSum) Baseline Trace Generation
+#
+# Random access to T=128 embedding tables with Zipf(alpha=1.05) distribution.
+# Each table occupies a dedicated bank (CH->RK->BG->BK placement).
+# Access order: for b -> for l -> for t (lookup-interleaved for max BLP).
+###############################################################################
+
+def sls_normal(f, sls_config_name):
+    """Generate baseline SLS trace for conventional DDR5.
+
+    Read-only: B × L × T vectors fetched from DRAM (each 8 column accesses = 512B).
+    CPU performs element-wise sum reduction in cache and consumes the result.
+    No DRAM write-back — reduced vectors stay in CPU cache/registers.
+
+    Access order: for b -> for l -> for t (table-interleaved per lookup)
+    maximizes bank-level parallelism since consecutive tables map to
+    different channels/ranks/bank groups.
+    """
+    config = sls_config_list[sls_config_name]
+    B, L = config["B"], config["L"]
+    T = SLS_NUM_TABLES
+    N = SLS_ENTRIES_PER_TABLE
+
+    # Pre-generate all Zipf indices: shape (T, B, L)
+    indices = sls_generate_zipf_indices(B, L, T, N, SLS_ZIPF_ALPHA, SLS_ZIPF_SEED)
+
+    # --- Read phase: fetch embedding vectors ---
+    # Order: for b -> for l -> for t  (BLP maximized)
+    # CPU accumulates in cache: Out_t += E_t[idx] for each lookup
+    for b in range(B):
+        for l in range(L):
+            for t in range(T):
+                entry_idx = indices[t][b][l]
+                row, col_start = sls_entry_to_row_col(entry_idx)
+                ch, rk, bg, bk = sls_table_to_bank(t)
+                for c in range(SLS_COLS_PER_VECTOR):
+                    addr = encode_sls_address(ch, rk, bg, bk, row, col_start + c)
+                    write_normal_trace(f, 'LD', addr)
+
+    # No write phase: reduction result consumed by host in cache
+
+    total_rd = B * L * T * SLS_COLS_PER_VECTOR
+    print(f"  SLS {sls_config_name}: B={B}, L={L}, T={T}, N={N}")
+    print(f"    Reads:  {total_rd:>10,} lines ({total_rd * 64 / (1024*1024):.1f} MB)")
+    print(f"    Total:  {total_rd:>10,} lines (read-only, no write-back)")
+
+
+###############################################################################
 # AsyncDIMM Trace Generation
 #
 # AsyncDIMM uses base DDR5 (no pseudo-channel), rank-level NMA MC.
@@ -3193,6 +3359,21 @@ def generate_asyncdimm_trace(workload, size, output_path=''):
     print(f"-> Generated AsyncDIMM trace in '{file_name}'.")
 
 
+def generate_sls_trace(sls_config_name, output_path=''):
+    """Generate baseline SLS trace for conventional DDR5."""
+    if sls_config_name not in sls_config_list:
+        print(f"Error: Invalid SLS config '{sls_config_name}'. Available: {list(sls_config_list.keys())}")
+        return
+
+    file_name = f"baseline_{sls_config_name}.txt"
+    file_name = output_path + "/" + file_name
+
+    with open(file_name, 'w') as f:
+        sls_normal(f, sls_config_name)
+
+    print(f"-> Generated SLS trace in '{file_name}'.")
+
+
 def crete_folder(folder_path):
     if not os.path.exists(folder_path):
         os.mkdir(folder_path)
@@ -3210,6 +3391,7 @@ if __name__ == '__main__':
     GEN_EXP1_BASE_STANDALONE   = True   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
     GEN_EXP2_SCALING_DRAM      = True   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
     GEN_EXP3_SCALING_DIMM      = True   # x4: 1, 2, 4, 8, 16 DIMM DBX
+    GEN_SLS_BASELINE           = True   # SLS baseline (conventional DDR5)
 
     root_path = "generated_traces"
 
@@ -3265,6 +3447,24 @@ if __name__ == '__main__':
             generate_asyncdimm_trace("GEMV", size, exp1_asyncdimm)
 
         print(f"[Exp1] Done.")
+
+    # =================================================================
+    #  SLS Baseline: Recommendation System workload
+    #    Conventional DDR5, Zipf random access to 128 embedding tables
+    # =================================================================
+    if GEN_SLS_BASELINE:
+        sls_root = root_path + "/sls_baseline"
+        setup_dir(sls_root)
+
+        print()
+        print("[SLS] Baseline: conventional DDR5, Zipf(1.05)")
+        print(f"  Output: {sls_root}")
+        print()
+
+        for sls_cfg in sls_config_names:
+            generate_sls_trace(sls_cfg, sls_root)
+
+        print(f"[SLS] Done.")
 
     # =================================================================
     #  Experiment 2: Scaling DRAM Device

@@ -27,9 +27,9 @@ MemorySystem:
   trace_repeat: 0
   trace_path: "generated_traces/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_8K_GEMV.txt"
   # H/N Arbiter fairness (concurrent mode only)
-  hn_cmd_service_interval: 16   # (A) REQ ticks before forced CMD switch (0=disabled)
-  hn_cmd_service_quota: 4       # (A) Minimum CMD ticks per forced switch
-  hn_req_continuous_cap: 8      # (C) REQ consecutive service cap (0=disabled)
+  hn_cmd_service_interval: 8    # (A) REQ ticks before forced CMD switch (0=disabled)
+  hn_cmd_service_quota: 8       # (A) Minimum CMD ticks per forced switch
+  hn_req_continuous_cap: 4      # (C) REQ consecutive service cap (0=disabled)
 
   DRAM:
     impl: DDR5-AsyncDIMM

@@ -233,6 +233,10 @@ class AsyncDIMMSystem final : public IMemorySystem, public Implementation {
           host_mc->set_nma_query_callback([this, ch](int rk) {
             return m_nma_controllers[ch][rk]->is_nma_idle();
           });
+          // Wire NMA refresh state query callback (Host MC checks NMA refresh during C2H drain)
+          host_mc->set_nma_refresh_query_callback([this, ch](int rk) {
+            return m_nma_controllers[ch][rk]->is_refresh_busy();
+          });
           // Wire NMA debug callback (per-bank CMD/REQ FIFO, bank state, refresh)
           host_mc->set_nma_debug_callback([this, ch](int rk) -> std::string {
             auto* nma = m_nma_controllers[ch][rk];

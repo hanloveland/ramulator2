@@ -165,8 +165,13 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // NMA idle polling for C2H transition (Host MC driven)
     static constexpr int NMA_POLL_INTERVAL = 256;  // polling period (DRAM cycles)
     std::vector<bool> m_offload_stopped;             // [rank] offload stopped after NMA IDLE detected
+    std::vector<bool> m_c2h_draining;                // [rank] C2H OT drain in progress (partial offload completion)
     using NMAIdleQueryCallback = std::function<bool(int rank_id)>;
     NMAIdleQueryCallback m_query_nma_idle = nullptr;
+
+    // NMA MC refresh state query for C2H drain completion check
+    using NMARefreshQueryCallback = std::function<bool(int rank_id)>;
+    NMARefreshQueryCallback m_query_nma_refreshing = nullptr;
 
     // NMA MC debug callback: returns per-bank debug string for a rank
     using NMADebugCallback = std::function<std::string(int rank_id)>;
@@ -433,6 +438,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       // Initialize per-rank mode register (Host Mode only in Phase 1)
       m_mode_per_rank.resize(m_num_rank, AsyncDIMMMode::HOST);
       m_offload_stopped.resize(m_num_rank, false);
+      m_c2h_draining.resize(m_num_rank, false);
 
       // NMA write tracking
       m_nma_wr_send_cnt.resize(num_ranks, 0);
@@ -479,6 +485,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
     void set_nma_query_callback(NMAIdleQueryCallback cb) { m_query_nma_idle = cb; }
     void set_nma_debug_callback(NMADebugCallback cb) { m_nma_debug_cb = cb; }
+    void set_nma_refresh_query_callback(NMARefreshQueryCallback cb) { m_query_nma_refreshing = cb; }
 
     const std::vector<HostRULog>& get_debug_host_ru_log() const { return m_debug_host_ru_log; }
     int get_debug_track_bank_flat() const { return m_debug_track_bank_flat; }
@@ -519,6 +526,39 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         if (entry.addr_vec[m_rank_addr_idx] == rank_id) return true;
       }
       return false;
+    }
+
+    /**
+     * Check if C2H OT drain is complete for a rank.
+     * All conditions must be met:
+     *   1. OT_sum == 0 for all banks of this rank (no leaked OT counters)
+     *   2. RU empty for this rank
+     *   3. RT-pending empty for this rank
+     *   4. active_buffer empty for this rank
+     *   5. NMA MC not refreshing (refresh pending or in-progress)
+     */
+    bool is_c2h_drain_complete(int rank_id) {
+      // 1. All bank OT counters must be 0 for this rank
+      int base = rank_id * num_bankgroups * num_banks;
+      for (int i = 0; i < num_bankgroups * num_banks; i++) {
+        if (m_ot_counter[base + i] != 0) return false;
+      }
+      // 2. RU entries for this rank
+      for (const auto& entry : m_return_unit) {
+        if (entry.req.addr_vec[m_rank_addr_idx] == rank_id) return false;
+      }
+      // 3. RT-pending reads
+      if (rank_id >= 0 && rank_id < m_num_rank) {
+        if (!m_rt_read_pending[rank_id].empty()) return false;
+        if (m_rt_pending_count[rank_id] > 0) return false;
+      }
+      // 4. active_buffer entries for this rank
+      for (const auto& entry : m_active_buffer) {
+        if (entry.addr_vec[m_rank_addr_idx] == rank_id) return false;
+      }
+      // 5. NMA MC refresh state (must not be refreshing or refresh-pending)
+      if (m_query_nma_refreshing && m_query_nma_refreshing(rank_id)) return false;
+      return true;
     }
 
     /**
@@ -639,8 +679,10 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     // Set mode for a rank (used by memory system for mode transitions)
     void set_mode(int rank_id, AsyncDIMMMode mode) {
       m_mode_per_rank[rank_id] = mode;
-      if (mode != AsyncDIMMMode::CONCURRENT && rank_id >= 0 && rank_id < m_num_rank)
+      if (mode != AsyncDIMMMode::CONCURRENT && rank_id >= 0 && rank_id < m_num_rank) {
         m_offload_stopped[rank_id] = false;
+        m_c2h_draining[rank_id] = false;
+      }
     }
 
     bool send(Request& req) override {
@@ -854,21 +896,24 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       //   }
       // }
 
-      // 1.7. NMA idle polling + C2H offload drain (Host MC driven)
+      // 1.7. NMA idle polling + C2H OT drain (Host MC driven)
+      // Phase A: detect NMA idle → enter drain mode
       if (m_query_nma_idle && m_clk % NMA_POLL_INTERVAL == 0) {
         for (int rk = 0; rk < m_num_rank; rk++) {
           if (m_mode_per_rank[rk] == AsyncDIMMMode::CONCURRENT && !m_offload_stopped[rk]) {
             if (m_query_nma_idle(rk)) {
-              m_offload_stopped[rk] = true;
+              m_offload_stopped[rk] = true;   // block new offloads from rd/wr buffers
+              m_c2h_draining[rk] = true;      // enable partial-offload completion mode
             }
           }
         }
       }
-      // Check drain completion: RU empty + RT empty + active_buffer empty → transition to HOST
+      // Phase B+C: OT drain complete + NMA refresh complete → transition to HOST
       for (int rk = 0; rk < m_num_rank; rk++) {
-        if (m_offload_stopped[rk] && !has_pending_offloads_for_rank(rk)) {
+        if (m_c2h_draining[rk] && is_c2h_drain_complete(rk)) {
           m_mode_per_rank[rk] = AsyncDIMMMode::HOST;
           m_offload_stopped[rk] = false;
+          m_c2h_draining[rk] = false;
         }
       }
       // Debug: periodic status — disabled
@@ -1289,6 +1334,112 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       return false;
     }
 
+    /**
+     * C2H drain-mode offload scheduling: only complete partially-offloaded requests.
+     * Called when m_c2h_draining[rk] is true (NMA idle, draining OT to 0).
+     *
+     * Filters vs normal schedule_offload_for_rank():
+     *   1. Skip banks where OT == 0 (already drained, no need to offload)
+     *   2. Skip requests where scratchpad[0] == 0 (not yet offloaded, leave for HOST mode)
+     * Only requests that already had PREO issued (scratchpad[0] > 0, still in rd/wr buffer)
+     * are allowed to continue their offload sequence (ACTO → RDO/WRO).
+     */
+    bool schedule_offload_for_rank_drain(int rk_idx, ReqBuffer::iterator& req_it, ReqBuffer*& req_buffer) {
+      if ((int)m_return_unit.size() >= RU_MAX_ENTRIES) return false;
+
+      // Build active_buffer bank set (same as normal path)
+      std::vector<bool> bank_in_active(m_total_banks_flat, false);
+      for (auto it = m_active_buffer.begin(); it != m_active_buffer.end(); it++) {
+        int ab_rk = it->addr_vec[m_rank_addr_idx];
+        if (ab_rk != rk_idx) continue;
+        int ab_flat = it->addr_vec[bank_idx]
+                    + it->addr_vec[bankgroup_idx] * num_banks
+                    + it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+        if (ab_flat >= 0 && ab_flat < m_total_banks_flat)
+          bank_in_active[ab_flat] = true;
+      }
+
+      ReqBuffer* buffers[2];
+      if (m_is_write_mode_per_rank[rk_idx]) {
+        buffers[0] = &m_write_buffers[rk_idx];
+        buffers[1] = &m_read_buffers[rk_idx];
+      } else {
+        buffers[0] = &m_read_buffers[rk_idx];
+        buffers[1] = &m_write_buffers[rk_idx];
+      }
+
+      ReqBuffer::iterator best_it;
+      ReqBuffer* best_buffer = nullptr;
+      int best_cmd = -1;
+      bool best_is_hit = false;
+      Clk_t best_arrive = std::numeric_limits<Clk_t>::max();
+
+      for (int bi = 0; bi < 2; bi++) {
+        auto& buffer = *buffers[bi];
+        if (buffer.size() == 0) continue;
+
+        for (auto it = buffer.begin(); it != buffer.end(); it++) {
+          // DRAIN FILTER: only requests that already started offloading
+          if (it->scratchpad[0] == 0) continue;
+
+          int flat_bank_id = it->addr_vec[bank_idx]
+                           + it->addr_vec[bankgroup_idx] * num_banks
+                           + it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+
+          // DRAIN FILTER: skip banks where OT is already 0
+          if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat &&
+              m_ot_counter[flat_bank_id] == 0) continue;
+
+          // OT backpressure (same as normal)
+          if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat &&
+              m_ot_counter[flat_bank_id] >= HOST_OT_THRESHOLD) continue;
+
+          // Skip banks with pending RDO/WRO in active_buffer
+          if (flat_bank_id >= 0 && flat_bank_id < m_total_banks_flat &&
+              bank_in_active[flat_bank_id]) continue;
+
+          int target_row = it->addr_vec[row_idx];
+          bool is_read   = (it->type_id == Request::Type::Read);
+          bool is_hit = false;
+          int offload_cmd = -1;
+
+          if (m_open_row[flat_bank_id] == -1) {
+            offload_cmd = m_dram->m_commands("ACTO");
+          } else if (m_open_row[flat_bank_id] != target_row) {
+            offload_cmd = m_dram->m_commands("PREO");
+          } else {
+            is_hit = true;
+            offload_cmd = is_read ? m_dram->m_commands("RDO")
+                                  : m_dram->m_commands("WRO");
+          }
+
+          if (!m_dram->check_ready(offload_cmd, it->addr_vec)) continue;
+
+          // Compare: hit > miss, then FCFS
+          bool dominated = false;
+          if (best_cmd >= 0) {
+            if (best_is_hit && !is_hit) dominated = true;
+            else if (best_is_hit == is_hit && best_arrive <= it->arrive) dominated = true;
+          }
+          if (dominated) continue;
+
+          best_it = it;
+          best_buffer = &buffer;
+          best_cmd = offload_cmd;
+          best_is_hit = is_hit;
+          best_arrive = it->arrive;
+        }
+      }
+
+      if (best_cmd >= 0) {
+        best_it->command = best_cmd;
+        req_it = best_it;
+        req_buffer = best_buffer;
+        return true;
+      }
+      return false;
+    }
+
     bool is_row_hit(ReqBuffer::iterator& req) {
       return m_dram->check_rowbuffer_hit(req->final_command, req->addr_vec);
     }
@@ -1528,11 +1679,18 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::NMA) continue;
 
           if (m_mode_per_rank[rk_idx] == AsyncDIMMMode::CONCURRENT) {
-            if (m_offload_stopped[rk_idx]) continue;  // offload stopped — scheduling 보류
+            if (m_offload_stopped[rk_idx] && !m_c2h_draining[rk_idx]) continue;  // fully stopped
             // Offload: use m_open_row[] for prerequisite, check OT
-            if (schedule_offload_for_rank(rk_idx, req_it, req_buffer)) {
+            bool found;
+            if (m_c2h_draining[rk_idx]) {
+              // C2H drain mode: only complete partially-offloaded requests
+              found = schedule_offload_for_rank_drain(rk_idx, req_it, req_buffer);
+            } else {
+              // Normal concurrent mode
+              found = schedule_offload_for_rank(rk_idx, req_it, req_buffer);
+            }
+            if (found) {
               request_found = true;
-
               break;
             }
           } else {

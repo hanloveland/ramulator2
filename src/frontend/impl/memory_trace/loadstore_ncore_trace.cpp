@@ -20,6 +20,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
     struct Trace {
       uint64_t timestamp;  // When this request should be issued (in cycles)
       bool is_write;
+      bool is_wait_ndp = false;  // WAIT_NDP: block until NDP done + outstanding drained
       Addr_t addr;
       std::vector<uint64_t> payload;
     };
@@ -181,12 +182,20 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
         if(core->repeat_trace_count < core->repeat_trace) core->curr_idx = 0; 
       }
 
-      while (core->curr_idx < core->trace.size() && 
-             core->outstanding_reads.size() < core->max_outstanding && 
+      while (core->curr_idx < core->trace.size() &&
+             core->outstanding_reads.size() < core->max_outstanding &&
              core->m_max_trace_inst > core->curr_idx) {
-        
+
         const Trace& t = core->trace[core->curr_idx];
-        
+
+        // WAIT_NDP: block until NDP execution completes and all outstanding reads drain
+        if (t.is_wait_ndp) {
+          if (!core->is_ndp_done || !core->outstanding_reads.empty())
+            break;              // Conditions not met — retry next cycle
+          core->curr_idx++;     // NDP done + drained — consume WAIT and continue
+          continue;
+        }
+
         // Check if it's time to issue this request
         if (t.timestamp > m_current_cycle) {
           break;  // Too early for this request
@@ -301,9 +310,17 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
 
         // Format: [TIMESTAMP] LD/ST ADDR [PAYLOAD...]
         // Or legacy: LD/ST ADDR [PAYLOAD...]
-        
+        // Or: WAIT_NDP (no address, no payload)
+
+        // Check for WAIT_NDP (synchronization barrier)
+        if (tokens[0] == "WAIT_NDP") {
+          t.is_wait_ndp = true;
+          trace_vec.push_back(t);
+          continue;
+        }
+
         size_t token_offset = 0;
-        
+
         // Check if first token is a timestamp (number)
         if (tokens.size() >= 3 && std::isdigit(tokens[0][0])) {
           t.timestamp = std::stoull(tokens[0]);
@@ -323,7 +340,7 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
         } else if (tokens[token_offset] == "ST") {
           is_write = true;
         } else {
-          throw ConfigurationError("Trace {} format invalid at line {}! Unknown operation '{}'.", 
+          throw ConfigurationError("Trace {} format invalid at line {}! Unknown operation '{}'.",
                                   file_path_str, line_number, tokens[token_offset]);
         }
 

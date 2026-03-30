@@ -121,7 +121,7 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_${wl}.txt"
                 run_one "E1_base_${wl}_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
-                    -p "Frontend.max_inst=500000000" &
+                    -p "Frontend.max_inst=500000" &
                 job_throttle
 
                 # DBX host-only (pCH, no NDP)
@@ -154,7 +154,7 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_GEMV.txt"
             run_one "E1_base_GEMV_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
-                -p "Frontend.max_inst=500000000" &
+                -p "Frontend.max_inst=500000" &
             job_throttle
 
             trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${sz}_GEMV.txt"
@@ -302,7 +302,7 @@ if [ "$SKIP_SIM" = false ]; then
                 run_one "E4_base_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
                     "$EXP4_LOG/base_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000000" &
+                    -p "Frontend.max_inst=500000" &
                 job_throttle
 
                 # --- base-T: Host + tcore GEMV (baseline DDR5, non-NDP LD/ST) ---
@@ -310,7 +310,7 @@ if [ "$SKIP_SIM" = false ]; then
                 run_one "E4_baseT_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
                     "$EXP4_LOG/baseT_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000000" \
+                    -p "Frontend.max_inst=500000" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=false" \
                     -p "MemorySystem.trace_path=$tcore_trace" &
@@ -321,7 +321,7 @@ if [ "$SKIP_SIM" = false ]; then
                     "$EXP4_LOG/dbx_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000000" \
+                    -p "Frontend.max_inst=500000" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
@@ -332,7 +332,7 @@ if [ "$SKIP_SIM" = false ]; then
                     "$EXP4_LOG/dbxT_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000000" \
+                    -p "Frontend.max_inst=500000" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=false" \
                     -p "MemorySystem.trace_path=$tcore_trace" \
@@ -346,7 +346,7 @@ if [ "$SKIP_SIM" = false ]; then
                     "$EXP4_LOG/dbxN_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000000" \
+                    -p "Frontend.max_inst=500000" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=true" \
                     -p "MemorySystem.trace_path=$tcore_trace" \
@@ -359,7 +359,7 @@ if [ "$SKIP_SIM" = false ]; then
                 run_one "E4_asyncN_${btag}_G${gsz}" "$CFG_ASYNCDIMM" "$spec_trace" \
                     "$EXP4_LOG/asyncN_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000000" \
+                    -p "Frontend.max_inst=500000" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_nma_type=true" \
                     -p "MemorySystem.trace_path=$tcore_trace" \

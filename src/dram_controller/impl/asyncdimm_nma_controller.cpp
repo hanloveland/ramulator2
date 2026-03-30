@@ -1121,7 +1121,9 @@ class AsyncDIMMNMAController {
           && all_cmd_fifos_empty()
           && m_return_buffer.empty()
           && m_pending_reads.empty()
-          && m_pending_interrupts.empty();
+          && m_pending_interrupts.empty()
+          && !m_nma_refresh_pending       // no pending refresh request
+          && !any_bank_refreshing();      // no bank in REFRESHING state
     }
 
     bool all_cmd_fifos_empty() const {
@@ -1168,6 +1170,7 @@ class AsyncDIMMNMAController {
       return s;
     }
     bool is_refresh_pending() const { return m_nma_refresh_pending; }
+    bool is_refresh_busy() const { return m_nma_refresh_pending || any_bank_refreshing(); }
     const PerBankCmdCount& get_per_bank_cmd(int flat_bank_id) const {
       return s_per_bank_cmd[flat_bank_id];
     }
@@ -1206,110 +1209,119 @@ class AsyncDIMMNMAController {
         return;  // No CMD/REQ FIFO commands while refresh pending
       }
 
-      for (int i = 0; i < m_total_banks; i++) {
-        int bank_id = (m_req_rr_bank_idx + i) % m_total_banks;
-        bool use_cmd = m_arbiter_use_cmd[bank_id];
+      // 2-pass CMD-first scheduling:
+      //   Pass 1: banks with CMD FIFO data (host preemption)
+      //   Pass 2: banks with REQ FIFO only (NMA fallback)
+      for (int pass = 0; pass < 2; pass++) {
+        for (int i = 0; i < m_total_banks; i++) {
+          int bank_id = (m_req_rr_bank_idx + i) % m_total_banks;
+          bool use_cmd = m_arbiter_use_cmd[bank_id];
 
-        auto& cmd_fifo = m_cmd_fifo[bank_id];
-        auto& req_fifo = m_nma_req_buffer[bank_id];
-        bool cmd_empty = cmd_fifo.empty() && !m_sr_recovery[bank_id].pending;
-        bool req_empty = req_fifo.empty();
+          auto& cmd_fifo = m_cmd_fifo[bank_id];
+          auto& req_fifo = m_nma_req_buffer[bank_id];
+          bool cmd_empty = cmd_fifo.empty() && !m_sr_recovery[bank_id].pending;
+          bool req_empty = req_fifo.empty();
 
-        // ---- (A) CMD Service Quota: forced CMD service in progress ----
-        // If quota remaining > 0, stay on CMD FIFO until quota exhausted or CMD empty.
-        if (m_cmd_quota_remaining[bank_id] > 0) {
-          if (!cmd_empty) {
-            // Continue forced CMD service
-            bool issued = try_issue_from_cmd_fifo(bank_id);
+          // Pass 0: only banks with CMD data; Pass 1: only banks without CMD data
+          if (pass == 0 && cmd_empty) continue;
+          if (pass == 1 && !cmd_empty) continue;
+
+          // ---- (A) CMD Service Quota: forced CMD service in progress ----
+          // If quota remaining > 0, stay on CMD FIFO until quota exhausted or CMD empty.
+          if (m_cmd_quota_remaining[bank_id] > 0) {
+            if (!cmd_empty) {
+              // Continue forced CMD service
+              bool issued = try_issue_from_cmd_fifo(bank_id);
+              if (issued) {
+                // [DEBUG] m_issue_track_cmd++;
+                m_cmd_quota_remaining[bank_id]--;
+                return;
+              }
+              // CMD not ready this tick — try other banks (don't block)
+              continue;
+            }
+            // CMD became empty during quota — end forced service, fall through
+            m_cmd_quota_remaining[bank_id] = 0;
+            if (!req_empty) {
+              m_arbiter_use_cmd[bank_id] = false;
+              use_cmd = false;
+              s_num_hn_switches++;
+            } else {
+              continue;  // Both empty
+            }
+          }
+
+          // ---- Determine if REQ FIFO should be treated as "effectively empty" ----
+          bool req_effectively_empty = false;
+
+          if (!req_empty && !cmd_empty) {
+            // (Original) Row-hit low cap: consecutive same-row hits exceed threshold
+            int req_front_row = req_fifo.front().addr_vec[m_row_level];
+            if (m_req_row_hit_row[bank_id] == req_front_row &&
+                m_req_row_hit_count[bank_id] >= NMA_ROW_HIT_LOW_CAP) {
+              req_effectively_empty = true;
+            }
+
+            // (C) REQ Continuous Service Cap: regardless of row-hit/miss pattern,
+            //     if REQ has been served too many times consecutively, force CMD switch.
+            //     Disabled when m_req_continuous_cap <= 0.
+            if (m_req_continuous_cap > 0 &&
+                m_req_continuous_count[bank_id] >= m_req_continuous_cap) {
+              req_effectively_empty = true;
+              s_num_req_cap_switches++;
+            }
+          }
+
+          // ---- Arbiter switch logic ----
+          if (use_cmd && cmd_empty) {
+            // CMD empty → switch to REQ if available
+            if (!req_empty && !req_effectively_empty) {
+              m_arbiter_use_cmd[bank_id] = false;
+              use_cmd = false;
+              s_num_hn_switches++;
+              m_req_continuous_count[bank_id] = 0;
+            } else {
+              continue;  // Both sides empty/capped
+            }
+          } else if (!use_cmd && (req_empty || req_effectively_empty)) {
+            if (!cmd_empty) {
+              // (A) Check if forced CMD service interval reached (disabled when interval <= 0)
+              bool force_quota = (m_cmd_service_interval > 0 &&
+                                  m_req_continuous_count[bank_id] >= m_cmd_service_interval);
+              switch_to_cmd_fifo(bank_id);
+              use_cmd = true;
+              m_req_continuous_count[bank_id] = 0;
+              if (force_quota) {
+                m_cmd_quota_remaining[bank_id] = m_cmd_service_quota;
+                s_num_forced_cmd_switches++;
+              }
+            } else if (req_empty) {
+              continue;  // Both sides truly empty
+            } else {
+              // req_effectively_empty but cmd_empty → fall through to try REQ anyway
+              req_effectively_empty = false;
+            }
+          }
+
+          // ---- Issue from selected FIFO ----
+          bool issued;
+          if (use_cmd) {
+            issued = try_issue_from_cmd_fifo(bank_id);
             if (issued) {
               // [DEBUG] m_issue_track_cmd++;
-              m_cmd_quota_remaining[bank_id]--;
-              return;
+              m_req_continuous_count[bank_id] = 0;  // Reset REQ counter on CMD service
+              if (m_cmd_quota_remaining[bank_id] > 0)
+                m_cmd_quota_remaining[bank_id]--;
             }
-            // CMD not ready this tick — try other banks (don't block)
-            continue;
-          }
-          // CMD became empty during quota — end forced service, fall through
-          m_cmd_quota_remaining[bank_id] = 0;
-          if (!req_empty) {
-            m_arbiter_use_cmd[bank_id] = false;
-            use_cmd = false;
-            s_num_hn_switches++;
           } else {
-            continue;  // Both empty
-          }
-        }
-
-        // ---- Determine if REQ FIFO should be treated as "effectively empty" ----
-        bool req_effectively_empty = false;
-
-        if (!req_empty && !cmd_empty) {
-          // (Original) Row-hit low cap: consecutive same-row hits exceed threshold
-          int req_front_row = req_fifo.front().addr_vec[m_row_level];
-          if (m_req_row_hit_row[bank_id] == req_front_row &&
-              m_req_row_hit_count[bank_id] >= NMA_ROW_HIT_LOW_CAP) {
-            req_effectively_empty = true;
-          }
-
-          // (C) REQ Continuous Service Cap: regardless of row-hit/miss pattern,
-          //     if REQ has been served too many times consecutively, force CMD switch.
-          //     Disabled when m_req_continuous_cap <= 0.
-          if (m_req_continuous_cap > 0 &&
-              m_req_continuous_count[bank_id] >= m_req_continuous_cap) {
-            req_effectively_empty = true;
-            s_num_req_cap_switches++;
-          }
-        }
-
-        // ---- Arbiter switch logic ----
-        if (use_cmd && cmd_empty) {
-          // CMD empty → switch to REQ if available
-          if (!req_empty && !req_effectively_empty) {
-            m_arbiter_use_cmd[bank_id] = false;
-            use_cmd = false;
-            s_num_hn_switches++;
-            m_req_continuous_count[bank_id] = 0;
-          } else {
-            continue;  // Both sides empty/capped
-          }
-        } else if (!use_cmd && (req_empty || req_effectively_empty)) {
-          if (!cmd_empty) {
-            // (A) Check if forced CMD service interval reached (disabled when interval <= 0)
-            bool force_quota = (m_cmd_service_interval > 0 &&
-                                m_req_continuous_count[bank_id] >= m_cmd_service_interval);
-            switch_to_cmd_fifo(bank_id);
-            use_cmd = true;
-            m_req_continuous_count[bank_id] = 0;
-            if (force_quota) {
-              m_cmd_quota_remaining[bank_id] = m_cmd_service_quota;
-              s_num_forced_cmd_switches++;
+            issued = try_issue_from_req_fifo(bank_id);
+            if (issued) {
+              // [DEBUG] m_issue_track_req++;
+              m_req_continuous_count[bank_id]++;
             }
-          } else if (req_empty) {
-            continue;  // Both sides truly empty
-          } else {
-            // req_effectively_empty but cmd_empty → fall through to try REQ anyway
-            req_effectively_empty = false;
           }
+          if (issued) return;  // One command per NMA tick
         }
-
-        // ---- Issue from selected FIFO ----
-        bool issued;
-        if (use_cmd) {
-          issued = try_issue_from_cmd_fifo(bank_id);
-          if (issued) {
-            // [DEBUG] m_issue_track_cmd++;
-            m_req_continuous_count[bank_id] = 0;  // Reset REQ counter on CMD service
-            if (m_cmd_quota_remaining[bank_id] > 0)
-              m_cmd_quota_remaining[bank_id]--;
-          }
-        } else {
-          issued = try_issue_from_req_fifo(bank_id);
-          if (issued) {
-            // [DEBUG] m_issue_track_req++;
-            m_req_continuous_count[bank_id]++;
-          }
-        }
-        if (issued) return;  // One command per NMA tick
       }
     }
 

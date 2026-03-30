@@ -86,15 +86,19 @@ struct Inst_Slot {
   int id = -1;
   int bg = -1;
   int bk = -1;
+  bool wildcard = false;  // bit[42]: 1=match by id only (ignore bg/bk), 0=exact 3-field
   int cnt = 0;
   int loop_cnt = -1;
   int jump_pc = -1;
 
-  Inst_Slot() : 
-    valid(false), opcode(-1), opsize(-1), id(-1), bg(-1), bk(-1), cnt(0), loop_cnt(-1), jump_pc(-1) {};
+  Inst_Slot() :
+    valid(false), opcode(-1), opsize(-1), id(-1), bg(-1), bk(-1), wildcard(false),
+    cnt(0), loop_cnt(-1), jump_pc(-1) {};
 
-  Inst_Slot(bool is_valid, int _opcode, int _opsize, int _id, int _bg, int _bk, int _loop, int _pc) : 
-    valid(is_valid), opcode(_opcode), opsize(_opsize), id(_id), bg(_bg), bk(_bk), cnt(0), loop_cnt(_loop), jump_pc(_pc)  {};
+  Inst_Slot(bool is_valid, int _opcode, int _opsize, int _id, int _bg, int _bk,
+            bool _wildcard, int _loop, int _pc) :
+    valid(is_valid), opcode(_opcode), opsize(_opsize), id(_id), bg(_bg), bk(_bk),
+    wildcard(_wildcard), cnt(0), loop_cnt(_loop), jump_pc(_pc) {};
 };
 
 struct AccInst_Slot {
