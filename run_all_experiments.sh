@@ -30,7 +30,8 @@ RUN_EXP=""   # empty = all
 
 BINARY="./ramulator2"
 TRACE_ROOT="./generated_traces_p"
-LOG_ROOT="./run/log_experiments_p2"
+LOG_ROOT="./run/log_experiments_p3"
+MAX_INST=5000000000   # 5 billion — enough for all traces to complete
 
 # Configs
 CFG_BASELINE="configuration/ddr5_baseline_ncore_config.yaml"
@@ -117,36 +118,40 @@ if [ "$SKIP_SIM" = false ]; then
 
         for wl in "${BLAS_WL[@]}"; do
             for sz in "${BLAS_SZ[@]}"; do
-                # Baseline (conventional DDR5)
+                # Baseline (conventional DDR5) — Frontend loads trace directly
                 trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_${wl}.txt"
                 run_one "E1_base_${wl}_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=false" &
                 job_throttle
 
-                # DBX host-only (pCH, no NDP)
+                # DBX host-only (pCH, no NDP) — Frontend loads trace directly
                 trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${sz}_${wl}.txt"
                 run_one "E1_dbx_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # DBX-N (pCH + NDP)
+                # DBX-N (pCH + NDP) — Frontend loads NDP trace directly
                 trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${sz}_${wl}.txt"
                 run_one "E1_dbxn_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbxn_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # AsyncDIMM-N (NDP Only: core0 loads NMA trace, no concurrent mode)
+                # AsyncDIMM-N (NDP Only) — Frontend loads NMA trace, no concurrent mode
                 trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${sz}_${wl}.txt"
                 run_one "E1_async_${wl}_${sz}" "$CFG_ASYNCDIMM" "$trace" "$EXP1_LOG/async_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.concurrent_mode_enable=false" \
                     -p "MemorySystem.trace_core_enable=false" &
                 job_throttle
@@ -158,6 +163,7 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_GEMV.txt"
             run_one "E1_base_GEMV_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
+                -p "Frontend.max_inst=$MAX_INST" \
                 -p "MemorySystem.trace_core_enable=false" &
             job_throttle
 
@@ -165,6 +171,7 @@ if [ "$SKIP_SIM" = false ]; then
             run_one "E1_dbx_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
                 -p "Frontend.core0_is_ndp_trace=false" \
+                -p "Frontend.max_inst=$MAX_INST" \
                 -p "MemorySystem.trace_core_enable=false" \
                 -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                 -p "MemorySystem.DRAM.org.real_dq=4" &
@@ -173,6 +180,7 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${sz}_GEMV.txt"
             run_one "E1_dbxn_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbxn_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
+                -p "Frontend.max_inst=$MAX_INST" \
                 -p "MemorySystem.trace_core_enable=false" \
                 -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                 -p "MemorySystem.DRAM.org.real_dq=4" &
@@ -181,6 +189,7 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${sz}_GEMV.txt"
             run_one "E1_async_GEMV_${sz}" "$CFG_ASYNCDIMM" "$trace" "$EXP1_LOG/async_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
+                -p "Frontend.max_inst=$MAX_INST" \
                 -p "MemorySystem.concurrent_mode_enable=false" \
                 -p "MemorySystem.trace_core_enable=false" &
             job_throttle
@@ -209,10 +218,12 @@ if [ "$SKIP_SIM" = false ]; then
         for wl in "${BLAS_WL[@]}"; do
             for sz in "${BLAS_SZ[@]}"; do
                 for sc in "${E2_SCALINGS[@]}"; do
-                    # DBX-N with scaling
+                    # DBX-N with scaling — Frontend loads NDP trace directly
                     trace="$TRACE_ROOT/exp2_scaling_dram/pch_ndp/pch_ndp_${sc}_${sz}_${wl}.txt"
                     run_one "E2_${sc}_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP2_LOG/${sc}_${wl}_${sz}.log" \
                         -p "Frontend.core0_trace=$trace" \
+                        -p "Frontend.max_inst=$MAX_INST" \
+                        -p "MemorySystem.trace_core_enable=false" \
                         -p "MemorySystem.DRAM.org.preset=${E2_PRESET[$sc]}" \
                         -p "MemorySystem.DRAM.org.real_dq=${E2_DQ[$sc]}" &
                     job_throttle
@@ -225,6 +236,8 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp2_scaling_dram/pch_ndp/pch_ndp_${sc}_${sz}_GEMV.txt"
                 run_one "E2_${sc}_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP2_LOG/${sc}_GEMV_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "Frontend.max_inst=$MAX_INST" \
+                    -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=${E2_PRESET[$sc]}" \
                     -p "MemorySystem.DRAM.org.real_dq=${E2_DQ[$sc]}" &
                 job_throttle
@@ -257,6 +270,8 @@ if [ "$SKIP_SIM" = false ]; then
                     trace="$TRACE_ROOT/exp3_scaling_dimm/pch_ndp/pch_ndp_x4${dtag}_${sz}_${wl}.txt"
                     run_one "E3_d${nd}_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP3_LOG/d${nd}_${wl}_${sz}.log" \
                         -p "Frontend.core0_trace=$trace" \
+                        -p "Frontend.max_inst=$MAX_INST" \
+                        -p "MemorySystem.trace_core_enable=false" \
                         -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                         -p "MemorySystem.DRAM.org.real_dq=4" \
                         -p "MemorySystem.DRAM.org.channel=$ch" &
@@ -272,6 +287,8 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp3_scaling_dimm/pch_ndp/pch_ndp_x4${dtag}_${sz}_GEMV.txt"
                 run_one "E3_d${nd}_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP3_LOG/d${nd}_GEMV_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "Frontend.max_inst=$MAX_INST" \
+                    -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" \
                     -p "MemorySystem.DRAM.org.channel=$ch" &
@@ -306,41 +323,43 @@ if [ "$SKIP_SIM" = false ]; then
 
             for gsz in "${E4_GEMV_SZ[@]}"; do
 
-                # --- base: Host only (baseline DDR5, no tcore) ---
+                # --- base: Host SPEC only (baseline DDR5, no tcore) ---
                 run_one "E4_base_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
                     "$EXP4_LOG/base_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000" &
+                    -p "Frontend.max_inst=$MAX_INST" \
+                    -p "MemorySystem.trace_core_enable=false" &
                 job_throttle
 
-                # --- base-T: Host + tcore GEMV (baseline DDR5, non-NDP LD/ST) ---
+                # --- base-T: Host SPEC + tcore GEMV (baseline DDR5, non-NDP LD/ST) ---
                 tcore_trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${gsz}_GEMV.txt"
                 run_one "E4_baseT_${btag}_G${gsz}" "$CFG_BASELINE" "$spec_trace" \
                     "$EXP4_LOG/baseT_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=false" \
                     -p "MemorySystem.trace_path=$tcore_trace" &
                 job_throttle
 
-                # --- dbx: Host only (DBX-DIMM pCH, no tcore) ---
+                # --- dbx: Host SPEC only (DBX-DIMM pCH, no tcore) ---
                 run_one "E4_dbx_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
                     "$EXP4_LOG/dbx_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000" \
+                    -p "Frontend.max_inst=$MAX_INST" \
+                    -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # --- dbx-T: Host + tcore GEMV non-NDP (DBX host-side LD/ST) ---
+                # --- dbx-T: Host SPEC + tcore GEMV non-NDP (DBX host-side LD/ST) ---
                 tcore_trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${gsz}_GEMV.txt"
                 run_one "E4_dbxT_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
                     "$EXP4_LOG/dbxT_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=false" \
                     -p "MemorySystem.trace_path=$tcore_trace" \
@@ -348,13 +367,13 @@ if [ "$SKIP_SIM" = false ]; then
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # --- dbx-N: Host + tcore GEMV NDP (DBX NDP concurrent) ---
+                # --- dbx-N: Host SPEC + tcore GEMV NDP (DBX NDP concurrent) ---
                 tcore_trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${gsz}_GEMV.txt"
                 run_one "E4_dbxN_${btag}_G${gsz}" "$CFG_DBX_NDP" "$spec_trace" \
                     "$EXP4_LOG/dbxN_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
-                    -p "Frontend.max_inst=500000" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_ndp_type=true" \
                     -p "MemorySystem.trace_path=$tcore_trace" \
@@ -362,12 +381,12 @@ if [ "$SKIP_SIM" = false ]; then
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # --- async-N: Host + tcore GEMV NDP (AsyncDIMM Concurrent Mode) ---
+                # --- async-N: Host SPEC + tcore GEMV NDP (AsyncDIMM Concurrent Mode) ---
                 tcore_trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${gsz}_GEMV.txt"
                 run_one "E4_asyncN_${btag}_G${gsz}" "$CFG_ASYNCDIMM" "$spec_trace" \
                     "$EXP4_LOG/asyncN_${btag}_G${gsz}.log" \
                     -p "Frontend.core0_trace=$spec_trace" \
-                    -p "Frontend.max_inst=500000" \
+                    -p "Frontend.max_inst=$MAX_INST" \
                     -p "MemorySystem.trace_core_enable=true" \
                     -p "MemorySystem.trace_nma_type=true" \
                     -p "MemorySystem.trace_path=$tcore_trace" \

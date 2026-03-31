@@ -3,10 +3,10 @@ Frontend:
   clock_ratio: 1
   num_cores: 1
   debug_mode: false
-  # max_inst: 500000000
-  max_inst: 500000
+  max_inst: 5000000000
 
-  core0_trace: "../spec_trace/470.lbm"
+  # core0_trace: "../spec_trace/470.lbm"
+  core0_trace: "./generated_traces_p/exp1_base_standalone/pch_ndp/pch_ndp_x4_64K_GEMV.txt"
   core0_mshr_size: 32
   core0_is_ndp_trace: false
   core0_repeat: 1
@@ -18,8 +18,8 @@ Frontend:
 MemorySystem:
   impl: ndpDRAM
   clock_ratio: 1
-  trace_core_enable: true
-  trace_ndp_type: true
+  trace_core_enable: false
+  trace_ndp_type: false
   trace_path: "generated_traces/exp1_base_standalone/pch_ndp/pch_ndp_x4_8K_GEMV.txt"
   trace_core_mshr_size: 32
 

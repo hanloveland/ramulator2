@@ -3,12 +3,12 @@ Frontend:
   clock_ratio: 1
   num_cores: 1
   debug_mode: false
-  # max_inst: 500000
-  max_inst: 500000000
+  max_inst: 5000000000
   
   # Core 1: NDP unit with high memory bandwidth
   # core0_trace: "./trace/baseline/baseline_8K_AXPY.txt" 
-  core0_trace: "../spec_trace/403.gcc"
+  # core0_trace: "../spec_trace/403.gcc"
+  core0_trace: "./generated_traces/sls_baseline/baseline_SLS-L.txt"
   core0_mshr_size: 32  # Large MSHR for high bandwidth
   core0_is_ndp_trace: false
   core0_repeat: 1
