@@ -1401,57 +1401,38 @@ def cal_it_v3(per_pch_bytes, scaling):
 
 # Scaling Factor: 1 (x4), 2 (x8), 4 (x16)
 def axpby_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = aX + bY
-        Scaling Factor 1 (x4)
-        row size: 8K
-        data memory: 32KB-> Max 4 Row
-        --- Iteration InputSize/8K -------
-        LOAD_MUL:  8KB
-        BARRIER 
-        SCALE_ADD: 8KB
-        BARRIER 
-        WBD: 8KB
-        ---
-        Input: 8K
-        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63
-        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63                 
-    '''
-
+    '''DBX-DIMM AXPBY: Z = aX + bY (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
-    # Max NDP Instruction 8KB/8B=1K
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
+
+    # Inst (NDP Unit) — BK-unrolled
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))       
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    # AccInst (Host DRAM access) — BK-unrolled
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1459,97 +1440,67 @@ def axpby_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (X), reg1=6000 (Y), reg2=7000 (Z)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
-            acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,1,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(2,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
+                acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,1,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,bk,undirect_row(2,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 # AXPBYPCZ  : W = aX + bB + zZ
 def axpbypcz_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = W = aX + bB + zZ
-        x4  DRAM: data memory: 32KB  -> Max 4 Row
-        x8  DRAM: data memory: 64KB  -> Max 8 Row
-        x16 DRAM: data memory: 128KB -> Max 4 Row (max bank group)
-        --- Iteration InputSize/8K -------
-        LOAD_MUL: 8KB
-        BARRIER 
-        SCALE_ADD: 8KB
-        BARRIER 
-        SCALE_ADD: 8KB
-        BARRIER 
-        WBD: 8KB
-        ---
-        Input X: 8K
-        BG0-7/ROW5000
-        Input B: 8K
-        BG0-7/ROW6000
-        Input Z: 8K
-        BG0-7/ROW7000 
-        Output W
-        BG0-7/ROW8000       
-        
-    '''
-
+    '''DBX-DIMM AXPBYPCZ: W = aX + bB + cZ (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
-    # Max NDP Instruction 8KB/8B=1K
-    # NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
+
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list) 
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))       
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))               
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,2,bg,ndp_bk_idx,0,0,0))   
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,ndp_bk_idx,0,0,0))   
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,1,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["SCALE_ADD"],opsize,2,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,3,bg,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1557,94 +1508,70 @@ def axpbypcz_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (X), reg1=6000 (B), reg2=7000 (Z), reg3=8000 (W)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
-            acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
-            acc_inst_list[idx].append(acc_inst_set_base(3, 8000))
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,1,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(2,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(3,0),0,3,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(3, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
+                acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
+                acc_inst_list[idx].append(acc_inst_set_base(3, 8000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,1,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(2,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,bk,undirect_row(3,0),0,3,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(3, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 # AXPY      : Y = aY + X
 def axpy_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = aX + Y
-        Scaling Factor 1 (x4)
-        row size: 8K
-        data memory: 32KB-> Max 4 Row
-        --- Iteration InputSize/8K -------
-        LOAD_MUL:  8KB
-        BARRIER 
-        SCALE_ADD: 8KB
-        BARRIER 
-        WBD: 8KB
-        ---
-        Input: 8K
-        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63
-        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63                 
-    '''
-
+    '''DBX-DIMM AXPY: Z = aX + Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
-    # Max NDP Instruction 8KB/8B=1K
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
+
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,ndp_bk_idx,0,0,0))
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["ADD"],opsize,1,bg,ndp_bk_idx,0,0,0))       
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD_MUL"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["ADD"],opsize,1,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1652,84 +1579,63 @@ def axpy_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (X), reg1=6000 (Y), reg2=7000 (Z)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
-            acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,1,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(2,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
+                acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,1,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,bk,undirect_row(2,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 # COPY      : Y = X
 def copy_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = X
-        Scaling Factor 1 (x4)
-        row size: 8K
-        data memory: 32KB-> Max 4 Row
-        --- Iteration InputSize/8K -------
-        LOAD_MUL:  8KB
-        BARRIER 
-        WBD: 8KB
-        ---
-        Input: 8K
-        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63
-        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63                 
-    '''
-
+    '''DBX-DIMM COPY: Z = X (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
-    # Max NDP Instruction 8KB/8B=1K
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
+
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode with SET_BASE + INC_BASE + LOOP)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1737,88 +1643,61 @@ def copy_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (src X), reg1=7000 (dst Z)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 7000))
-            # Loop body start
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # INC_BASE + LOOP
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 7000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 
 # XMY       : Y = X ⨀ Y
 def xmy_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = X ⨀ Y
-        Scaling Factor 1 (x4)
-        row size: 8K
-        data memory: 32KB-> Max 4 Row
-        --- Iteration InputSize/8K -------
-        LOAD:  8KB
-        BARRIER 
-        MAC: 8KB
-        BARRIER
-        V_REC
-        BARRIER 
-        WBD: 8KB
-        ---
-        Input: 8K
-        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63
-        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63                 
-    '''
-
+    '''DBX-DIMM XMY: Z = X ⨀ Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
-    # Max NDP Instruction 8KB/8B=1K
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
+
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["MUL"],opsize,1,bg,ndp_bk_idx,0,0,0))       
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,ndp_bk_idx,0,0,0))                      
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["MUL"],opsize,1,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize,2,bg,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1826,97 +1705,74 @@ def xmy_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (X), reg1=6000 (Y), reg2=7000 (Z)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
-            acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,1,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(2,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
+                acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,1,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize,ch,pch,bg,bk,undirect_row(2,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 # DOT       : c = X·Y
 def dot_pch(f, per_pch_bytes, scaling):
-    '''
-        per_pch_bytes: data size in bytes per PCH
-        Z = X·Y
-        Scaling Factor 1 (x4)
-        row size: 8K
-        data memory: 32KB-> Max 4 Row
-        --- Iteration -------
-        LOAD -> BARRIER -> MAC (Partial Sum; 2 x num_working_bg) -> BARRIER -> 
-        SELF_EXEC_ON -> 
-        (if num_working_bg > 1) T_V_RED x (2xnum_working_bg) -> T_ADD -> T_S_RED
-        SELF_EXEC_OFF ->
-        WBD 1 
-        ---
-        Input: 8K
-        BG0/ROW5000, BG0/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63
-        BG0-3/ROW5000, BG0-3/ROW6000 -> BG0/ROW7000
-        COL:0-127 or 0-63                 
-    '''
-
+    '''DBX-DIMM DOT: c = X·Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
-    ndp_bk_idx = NDP_TARGET_BK
-
-    # Input_size x 8 pch 
+    num_banks = int(NUM_BANK)
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"Working Bank Group: {num_working_bg}")
-    print(f"Iteration: {iteration}")
+    print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
     print(f"opsize: {opsize}")
-    # Max NDP Instruction 8KB/8B=1K
+
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
-            jump_pc = len(ndp_inst_list)
-            for bg in range(num_working_bg):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
-            for bg in range(num_working_bg):                
-                ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,1,bg,ndp_bk_idx,0,0,0))    
-            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))  
-            if num_working_bg > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["T_V_RED"],(2*num_working_bg),0,0,0,0,0,0))
-                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))  
-            ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],0,0,0,0,0,0,0))
-            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))  
-            ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],0,0,0,0,0,0,0))  
-            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))   
-            ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
-            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,ndp_bk_idx,0,0,0))                      
-            if iteration > 1:
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iteration-1),jump_pc,0))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_pc = len(ndp_inst_list)
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,bk,0,0,0))
+                for bg in range(num_working_bg):
+                    ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,1,bg,bk,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_ON"],0,0,0,0,0,0,0))
+                if num_working_bg > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["T_V_RED"],(2*num_working_bg),0,0,0,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["T_ADD"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["T_S_RED"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],0,2,0,bk,0,0,0))
+                if iters_this_bk > 1:
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(iters_this_bk-1),jump_pc,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"],0,0,0,0,0,0,0))
-            if(len(ndp_inst_list) >= 1024):
+            if len(ndp_inst_list) >= 1024:
                 print("Error: Over NDP Instruction Memory")
                 exit(1)
             dump_ndp_inst(f,ndp_inst_list,ch,pch)
 
-
-
-    # Make 2-D NDL-Launch Request Inst (Undirect Mode)
-    acc_inst_list = [[ ]]
-    acc_inst_list_num = [[ ]]
+    acc_inst_list = [[]]
+    acc_inst_list_num = [[]]
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
@@ -1924,37 +1780,31 @@ def dot_pch(f, per_pch_bytes, scaling):
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: reg0=5000 (X), reg1=6000 (Y), reg2=7000 (Z result)
-            acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
-            acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
-            acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
-            acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration - 1)))
-            jump_pc = len(acc_inst_list[idx])
-            # LOAD
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # MAC
-            for bg in range(num_working_bg):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,0),0,1,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # WAIT + WR (scalar result, opsize=0, single bg=0)
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,100))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],0,ch,pch,0,ndp_bk_idx,undirect_row(2,0),0,2,0,mode=1))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            if iteration > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
-                acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                acc_inst_list[idx].append(acc_inst_set_base(0, 5000))
+                acc_inst_list[idx].append(acc_inst_set_base(1, 6000))
+                acc_inst_list[idx].append(acc_inst_set_base(2, 7000))
+                acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iters_this_bk - 1)))
+                jump_pc = len(acc_inst_list[idx])
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                for bg in range(num_working_bg):
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,bk,undirect_row(1,0),0,1,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,100))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],0,ch,pch,0,bk,undirect_row(2,0),0,2,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
+                if iters_this_bk > 1:
+                    acc_inst_list[idx].append(acc_inst_inc_base(0, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(1, 1))
+                    acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
+                    acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
-
-    # Write AccInst per-PCH sequential streams → HSNC intercepts all writes
     desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
-
-    # NDP Start (must be LAST — after all AccInst writes)
     write_ndp_start(f, desc_counts)
-
     return
 
 # GEMV       : Z = GEMV
@@ -2147,14 +1997,14 @@ def gemv_pch(f, input_size, scaling):
     print(f"opsize_follow_s_rec:     {opsize_follow_s_rec}")    
     print(f"opsize_wbd:              {opsize_wbd}")
     
-    # Write DRAM (Vector Data)
+    # Write DRAM (Vector Data) — BK=0 (vector uses BK=0 in LOAD)
     n_wr_dram_row = int(vec_size/row_size)
     for ro in range(n_wr_dram_row):
         for co in range(int(NUM_COL)):
             for ch in range(int(NUM_CHANNEL)):
-               for pch in range(int(NUM_PSEUDOCHANNEL)):   
+               for pch in range(int(NUM_PSEUDOCHANNEL)):
                    for bg in range(n_row_p_vec):
-                       write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, ndp_bk_idx, 1000 + ro, co))           
+                       write_normal_trace(f,'ST',encode_address(ch, pch, 0, bg, 0, 1000 + ro, co))
     
     jump_pc0 = 0
     jump_pc1 = 0
@@ -2162,32 +2012,35 @@ def gemv_pch(f, input_size, scaling):
     self_after_pc = 0
     fianl_pc = 0
     # NDP Instruction: Opcode, Opsize, ID, BG, BK, OP1, OP2, OP3
+    # BK interleaving: MAC uses bk = t_tile % NUM_BANK; vector LOAD/WBD use BK=0
+    num_banks = int(NUM_BANK)
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             ndp_inst_list = []
             jump_pc0 = len(ndp_inst_list)
             # Block-level GEMV
-            # Load Partial Vector to Data Memory
+            # Load Partial Vector to Data Memory (BK=0, vector data)
             for bg in range(n_row_p_vec):
-                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
+                ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
             ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
-            # MAC Operation 
-            for _ in range(n_tile_block_row):
-                # Each Tile GEMV
-                for _ in range(n_row_p_vec): 
-                    for bg in range(n_bg):                
-                        ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,ndp_bk_idx,0,0,0))
+            # MAC Operation — BK rotates per t_tile
+            for t_tile in range(n_tile_block_row):
+                mac_bk = t_tile % num_banks
+                for _ in range(n_row_p_vec):
+                    for bg in range(n_bg):
+                        ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,mac_bk,0,0,0))
                     ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
             # Column-wise gemv ops
             if col_tile > 1:
                 jump_pc1 = len(ndp_inst_list)
                 for bg in range(n_row_p_vec):
-                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,ndp_bk_idx,0,0,0))
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"],opsize,0,bg,0,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
-                for _ in range(n_tile_block_row):
+                for t_tile in range(n_tile_block_row):
+                    mac_bk = t_tile % num_banks
                     for _ in range(n_row_p_vec):
-                        for bg in range(n_bg):                
-                            ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,ndp_bk_idx,0,0,0))                
+                        for bg in range(n_bg):
+                            ndp_inst_list.append(inst(ndp_inst_opcode["MAC"],opsize,0,bg,mac_bk,0,0,0))
                         ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 # ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0))
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,0,0,0,(col_tile - 2),jump_pc1,0))
@@ -2227,8 +2080,8 @@ def gemv_pch(f, input_size, scaling):
                     ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"],0,0,0,0,0,0,0)) 
             ndp_inst_list.append(inst(ndp_inst_opcode["SELF_EXEC_OFF"],0,0,0,0,0,0,0)) 
             self_after_pc = len(ndp_inst_list)
-            # WBD
-            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,ndp_bk_idx,0,0,0)) 
+            # WBD (BK=0, output result)
+            ndp_inst_list.append(inst(ndp_inst_opcode["WBD"],opsize_wbd,0,0,0,0,0,0))
 
             if iteration_tile_block > 1:
                 ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"],0,1,0,0,(iteration_tile_block - 1),jump_pc0,0))
@@ -2248,65 +2101,59 @@ def gemv_pch(f, input_size, scaling):
 
 
     # Make 2-D NDL-Launch Request Inst
+    # BK interleaving: vector RD uses BK=0, matrix RD uses bk=t_tile%num_banks, WR uses BK=0
     acc_inst_list = [[ ]]
     acc_inst_list_num = [[ ]]
     for ch in range(int(NUM_CHANNEL)):
-        for pch in range(int(NUM_PSEUDOCHANNEL)):    
+        for pch in range(int(NUM_PSEUDOCHANNEL)):
             acc_inst_list.append([])
             acc_inst_list_num.append(0)
-    # Start NDP ops — Undirect Mode with SET_BASE + INC_BASE + SET_LOOP + LOOP
-    # base_reg[0]: vector base (1000), stride=col_tile per outer iteration
-    # base_reg[1]: matrix base (3000), stride=n_tile_block_row*n_row_p_vec per outer iteration
-    # base_reg[2]: output base (7000), stride=1 per outer iteration
     for ch in range(int(NUM_CHANNEL)):
         for pch in range(int(NUM_PSEUDOCHANNEL)):
             idx = ch * int(NUM_PSEUDOCHANNEL) + pch
-            # SET_BASE: vector, matrix, output
             acc_inst_list[idx].append(acc_inst_set_base(0, 1000))   # vector base
             acc_inst_list[idx].append(acc_inst_set_base(1, 3000))   # matrix base
             acc_inst_list[idx].append(acc_inst_set_base(2, 7000))   # output base
-            # Outer loop: iteration_tile_block
             acc_inst_list[idx].append(acc_inst_set_loop(0, max(0, iteration_tile_block - 1)))
             jump_pc = len(acc_inst_list[idx])
-            # ① Load Partial Vector (n_row_p_vec BGs from base_reg[0])
+            # ① Load Partial Vector (BK=0)
             for bg in range(n_row_p_vec):
-                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
+                acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,undirect_row(0,0),0,0,0,mode=1))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # ② Matrix MAC (inner loops unrolled, offset from base_reg[1])
+            # ② Matrix MAC — BK rotates per t_tile
             for t_tile in range(n_tile_block_row):
+                mac_bk = t_tile % num_banks
                 for n_row in range(n_row_p_vec):
                     for bg in range(n_bg):
                         offset = t_tile * n_row_p_vec + n_row
-                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,offset),0,0,0,mode=1))
+                        acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,mac_bk,undirect_row(1,offset),0,0,0,mode=1))
                     acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # ③ col_tile > 1: additional column tile iterations (inner loop)
+            # ③ col_tile > 1
             if col_tile > 1:
-                # SET_LOOP inside outer loop body — counter consumed each outer iteration
                 if col_tile > 2:
                     acc_inst_list[idx].append(acc_inst_set_loop(1, col_tile - 2))
                 col_jump_pc = len(acc_inst_list[idx])
-                # Re-load vector (same base_reg[0])
                 for bg in range(n_row_p_vec):
-                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(0,0),0,0,0,mode=1))
+                    acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,0,undirect_row(0,0),0,0,0,mode=1))
                 acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-                # Matrix MAC (same offsets from base_reg[1])
                 for t_tile in range(n_tile_block_row):
+                    mac_bk = t_tile % num_banks
                     for n_row in range(n_row_p_vec):
                         for bg in range(n_bg):
                             offset = t_tile * n_row_p_vec + n_row
-                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,ndp_bk_idx,undirect_row(1,offset),0,0,0,mode=1))
+                            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["RD"],opsize,ch,pch,bg,mac_bk,undirect_row(1,offset),0,0,0,mode=1))
                         acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
                 if col_tile > 2:
                     acc_inst_list[idx].append(acc_inst_loop(1, col_jump_pc))
-            # ④ Wait Self Execution + Write Result + Barrier
+            # ④ Wait + WR (BK=0, output)
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WAIT"],0,0,0,0,0,0,0,0,self_exec_delay))
-            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,ndp_bk_idx,undirect_row(2,0),0,0,0,mode=1))
+            acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["WR"],opsize_wbd,ch,pch,0,0,undirect_row(2,0),0,0,0,mode=1))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["BAR"],0,0,0,0,0,0,0,0,0))
-            # ⑤ INC_BASE + LOOP (outer iteration advance)
+            # ⑤ INC_BASE + LOOP
             if iteration_tile_block > 1:
-                acc_inst_list[idx].append(acc_inst_inc_base(0, col_tile))                        # vector: +col_tile rows
-                acc_inst_list[idx].append(acc_inst_inc_base(1, n_tile_block_row * n_row_p_vec))   # matrix: +block rows
-                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))                                # output: +1 row
+                acc_inst_list[idx].append(acc_inst_inc_base(0, col_tile))
+                acc_inst_list[idx].append(acc_inst_inc_base(1, n_tile_block_row * n_row_p_vec))
+                acc_inst_list[idx].append(acc_inst_inc_base(2, 1))
                 acc_inst_list[idx].append(acc_inst_loop(0, jump_pc))
             acc_inst_list[idx].append(acc_inst(ndp_acc_inst_opcode["DONE"],0,0,0,0,0,0,0,0,0))
 
@@ -3286,7 +3133,8 @@ def gemv_asyncdimm(f, input_size):
 
     n_mac_iterations = n_tile_block_row * n_row_p_vec
 
-    # Write DRAM (Vector Data) — same as gemv_pch but without pseudo-channel
+    # Write DRAM (Vector Data) — BK=0 (vector uses BK=0 in LOAD)
+    num_banks = ASYNCDIMM_NUM_BANK
     n_wr_dram_row = int(vec_size / row_size)
     if n_wr_dram_row == 0:
         n_wr_dram_row = 1
@@ -3296,68 +3144,73 @@ def gemv_asyncdimm(f, input_size):
             for ch in range(ASYNCDIMM_NUM_CHANNEL):
                 for rk in range(ASYNCDIMM_NUM_RANK):
                     for bg in range(n_row_p_vec):
-                        addr = encode_asyncdimm_address(ch, rk, bg, ndp_bk, 1000 + ro, co)
+                        addr = encode_asyncdimm_address(ch, rk, bg, 0, 1000 + ro, co)
                         write_normal_trace(f, 'ST', addr)
+
+    # BK interleaving: split MAC iterations into BK phases
+    mac_iters_per_bk = max(1, n_mac_iterations // num_banks)
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
 
-            # Set base registers (matrix and result set once before outer loop)
             nma_inst_list.append(nma_inst_set_base(1, 3000))  # matrix base
             nma_inst_list.append(nma_inst_set_base(2, 7000))  # result base
 
-            # Outer loop start
             if col_tile > 1:
-                # Reset vector base at each outer iteration (before jump target)
                 jump_outer = len(nma_inst_list)
-                nma_inst_list.append(nma_inst_set_base(0, 1000))  # vector base reset
+                nma_inst_list.append(nma_inst_set_base(0, 1000))
             else:
-                nma_inst_list.append(nma_inst_set_base(0, 1000))  # vector base (fixed)
+                nma_inst_list.append(nma_inst_set_base(0, 1000))
                 jump_outer = len(nma_inst_list)
 
-            # Load partial vector (first or only col tile)
+            # Load partial vector (BK=0)
             for bg in range(n_row_p_vec):
                 nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, 0, 0, 0, 0))
             nma_inst_list.append(
                 nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
-            # MAC inner loop: n_tile_block_row × n_row_p_vec iterations
-            jump_mac = len(nma_inst_list)
-            for bg in range(n_bg):
+            # MAC — split into BK phases
+            for bk_phase in range(num_banks):
+                iters_this_bk = mac_iters_per_bk + (1 if bk_phase < (n_mac_iterations % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                jump_mac = len(nma_inst_list)
+                for bg in range(n_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["MAC"], opsize, bg, bk_phase, 0, 0, 1))
                 nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(
-                nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            nma_inst_list.append(nma_inst_inc_base(1, 1))  # advance matrix row
-            if n_mac_iterations > 1:
-                nma_inst_list.append(
-                    nma_inst_loop(n_mac_iterations - 1, jump_mac))
+                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                nma_inst_list.append(nma_inst_inc_base(1, 1))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(
+                        nma_inst_loop(iters_this_bk - 1, jump_mac))
 
             # Column tile inner loop (col_tile > 1)
             if col_tile > 1:
                 jump_col = len(nma_inst_list)
-                nma_inst_list.append(nma_inst_inc_base(0, n_row_p_vec))  # next vector segment
+                nma_inst_list.append(nma_inst_inc_base(0, n_row_p_vec))
 
-                # Load next partial vector segment
                 for bg in range(n_row_p_vec):
                     nma_inst_list.append(
-                        nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+                        nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, 0, 0, 0, 0))
                 nma_inst_list.append(
                     nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
-                # MAC inner loop for this col tile
-                jump_mac2 = len(nma_inst_list)
-                for bg in range(n_bg):
+                # MAC for col tile — same BK phase split
+                for bk_phase in range(num_banks):
+                    iters_this_bk = mac_iters_per_bk + (1 if bk_phase < (n_mac_iterations % num_banks) else 0)
+                    if iters_this_bk == 0: continue
+                    jump_mac2 = len(nma_inst_list)
+                    for bg in range(n_bg):
+                        nma_inst_list.append(
+                            nma_inst(ndp_inst_opcode["MAC"], opsize, bg, bk_phase, 0, 0, 1))
                     nma_inst_list.append(
-                        nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
-                nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                if n_mac_iterations > 1:
-                    nma_inst_list.append(
-                        nma_inst_loop(n_mac_iterations - 1, jump_mac2))
+                        nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    if iters_this_bk > 1:
+                        nma_inst_list.append(
+                            nma_inst_loop(iters_this_bk - 1, jump_mac2))
 
                 if col_tile > 2:
                     nma_inst_list.append(
@@ -3397,9 +3250,9 @@ def gemv_asyncdimm(f, input_size):
                 nma_inst_list.append(
                     nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
-            # WBD result (bg=0, write to base[2])
+            # WBD result (bg=0, BK=0, write to base[2])
             nma_inst_list.append(
-                nma_inst(ndp_inst_opcode["WBD"], opsize_wbd, 0, ndp_bk, 0, 0, 2))
+                nma_inst(ndp_inst_opcode["WBD"], opsize_wbd, 0, 0, 0, 0, 2))
 
             # Outer loop: advance result base + repeat
             if iteration_tile_block > 1:
@@ -3588,11 +3441,11 @@ if __name__ == '__main__':
     # =====================================================================
     #  Experiment selector — set True/False to enable/disable each
     # =====================================================================
-    GEN_EXP1_BASE_STANDALONE   = False   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
-    GEN_EXP2_SCALING_DRAM      = False   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
-    GEN_EXP3_SCALING_DIMM      = False   # x4: 1, 2, 4, 8, 16 DIMM DBX
-    GEN_SLS_BASELINE           = True   # SLS baseline (conventional DDR5)
-    GEN_SLS_DBX                = True   # SLS DBX-DIMM NDP (Wildcard + Interleaving)
+    GEN_EXP1_BASE_STANDALONE   = True   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
+    GEN_EXP2_SCALING_DRAM      = True   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
+    GEN_EXP3_SCALING_DIMM      = True   # x4: 1, 2, 4, 8, 16 DIMM DBX
+    GEN_SLS_BASELINE           = False   # SLS baseline (conventional DDR5)
+    GEN_SLS_DBX                = False   # SLS DBX-DIMM NDP (Wildcard + Interleaving)
 
     root_path = "generated_traces"
 
