@@ -1404,7 +1404,11 @@ def axpby_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM AXPBY: Z = aX + bY (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
 
@@ -1472,7 +1476,11 @@ def axpbypcz_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM AXPBYPCZ: W = aX + bB + cZ (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
 
@@ -1545,7 +1553,11 @@ def axpy_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM AXPY: Z = aX + Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
 
@@ -1611,7 +1623,11 @@ def copy_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM COPY: Z = X (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
 
@@ -1671,7 +1687,11 @@ def xmy_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM XMY: Z = X ⨀ Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
 
@@ -1737,7 +1757,11 @@ def dot_pch(f, per_pch_bytes, scaling):
     '''DBX-DIMM DOT: c = X·Y (BK interleaving)'''
     iteration, num_working_bg, opsize = cal_it_v3(per_pch_bytes, scaling)
     num_banks = int(NUM_BANK)
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"Working Bank Group: {num_working_bg}")
     print(f"Iteration: {iteration}, iter_per_bk: {iterations_per_bk}")
     print(f"opsize: {opsize}")
@@ -2783,7 +2807,11 @@ def copy_asyncdimm(f, input_size):
     '''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
 
     print(f"  AsyncDIMM COPY: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
@@ -2833,7 +2861,11 @@ def axpy_asyncdimm(f, input_size):
     '''AsyncDIMM AXPY: Z = aX + Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"  AsyncDIMM AXPY: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
@@ -2872,7 +2904,11 @@ def axpby_asyncdimm(f, input_size):
     '''AsyncDIMM AXPBY: Z = aX + bY (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"  AsyncDIMM AXPBY: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
@@ -2911,7 +2947,11 @@ def axpbypcz_asyncdimm(f, input_size):
     '''AsyncDIMM AXPBYPCZ: W = aX + bB + cZ (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"  AsyncDIMM AXPBYPCZ: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
@@ -2955,7 +2995,11 @@ def xmy_asyncdimm(f, input_size):
     '''AsyncDIMM XMY: Z = X ⊙ Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"  AsyncDIMM XMY: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
@@ -2994,7 +3038,11 @@ def dot_asyncdimm(f, input_size):
     '''AsyncDIMM DOT: c = X · Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
     num_banks = ASYNCDIMM_NUM_BANK
-    iterations_per_bk = max(1, iteration // num_banks)
+    if iteration >= num_banks:
+        iterations_per_bk = iteration // num_banks
+    else:
+        iterations_per_bk = 1
+        num_banks = iteration  # Use fewer banks when iteration < num_banks
     print(f"  AsyncDIMM DOT: size={input_size}, iteration={iteration}, "
           f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
@@ -3148,7 +3196,11 @@ def gemv_asyncdimm(f, input_size):
                         write_normal_trace(f, 'ST', addr)
 
     # BK interleaving: split MAC iterations into BK phases
-    mac_iters_per_bk = max(1, n_mac_iterations // num_banks)
+    if n_mac_iterations >= num_banks:
+        mac_iters_per_bk = n_mac_iterations // num_banks
+    else:
+        mac_iters_per_bk = 1
+        num_banks = n_mac_iterations  # Use fewer banks for MAC phase
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
