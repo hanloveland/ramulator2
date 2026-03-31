@@ -31,9 +31,10 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
       std::vector<Trace> trace;
       size_t curr_idx;
       size_t max_outstanding;
-      uint64_t m_max_trace_inst;      
+      uint64_t m_max_trace_inst;
       bool is_ndp_trace;
       bool is_ndp_done;
+      bool wait_ndp_armed = false;  // WAIT_NDP: true after NDP observed non-IDLE
       size_t repeat_trace_count;
       size_t repeat_trace;
 
@@ -188,10 +189,20 @@ class LoadStoreNCoreTrace : public IFrontEnd, public Implementation {
 
         const Trace& t = core->trace[core->curr_idx];
 
-        // WAIT_NDP: block until NDP execution completes and all outstanding reads drain
+        // WAIT_NDP: block until NDP starts (non-IDLE), then completes (IDLE again)
+        // Two-phase: (1) wait for NDP to become non-IDLE (armed), (2) wait for IDLE + drain
         if (t.is_wait_ndp) {
+          if (!core->wait_ndp_armed) {
+            // Phase 1: NDP hasn't started yet — wait until it becomes non-IDLE
+            if (core->is_ndp_done && core->outstanding_reads.empty()) {
+              break;            // NDP still IDLE (not started) — retry next cycle
+            }
+            core->wait_ndp_armed = true;  // NDP is now running (non-IDLE observed)
+          }
+          // Phase 2: NDP was running — wait for completion + drain
           if (!core->is_ndp_done || !core->outstanding_reads.empty())
-            break;              // Conditions not met — retry next cycle
+            break;              // NDP still running — retry next cycle
+          core->wait_ndp_armed = false;   // Reset for next WAIT_NDP
           core->curr_idx++;     // NDP done + drained — consume WAIT and continue
           continue;
         }
