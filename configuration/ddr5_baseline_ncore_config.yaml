@@ -3,7 +3,7 @@ Frontend:
   clock_ratio: 1
   num_cores: 1
   debug_mode: false
-  max_inst: 5000000000
+  max_inst: 500000000
   
   # Core 1: NDP unit with high memory bandwidth
   # core0_trace: "./trace/baseline/baseline_8K_AXPY.txt" 

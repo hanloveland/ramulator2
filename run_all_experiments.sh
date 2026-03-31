@@ -31,7 +31,7 @@ RUN_EXP=""   # empty = all
 BINARY="./ramulator2"
 TRACE_ROOT="./generated_traces_p"
 LOG_ROOT="./run/log_experiments_p3"
-MAX_INST=5000000000   # 5 billion — enough for all traces to complete
+MAX_INST=500000000    # 500M — param<int> max is 2^31-1, 500M covers all traces
 
 # Configs
 CFG_BASELINE="configuration/ddr5_baseline_ncore_config.yaml"

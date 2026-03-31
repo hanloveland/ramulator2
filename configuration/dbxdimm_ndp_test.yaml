@@ -3,7 +3,7 @@ Frontend:
   clock_ratio: 1
   num_cores: 1
   debug_mode: false
-  max_inst: 5000000000
+  max_inst: 500000000
 
   # core0_trace: "../spec_trace/470.lbm"
   core0_trace: "./generated_traces_p/exp1_base_standalone/pch_ndp/pch_ndp_x4_64K_GEMV.txt"
