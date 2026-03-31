@@ -53,6 +53,9 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
     size_t s_num_read_reqs = 0;
     size_t s_num_write_reqs = 0;
     size_t s_num_other_reqs = 0;
+    // Per-bank access counters
+    std::vector<size_t> s_per_bank_rd;
+    std::vector<size_t> s_per_bank_wr;
     size_t s_queue_len = 0;
     size_t s_read_queue_len = 0;
     size_t s_write_queue_len = 0;
@@ -253,6 +256,10 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       s_idle_interval_over_1000_cnt.resize(m_num_rank,0);
       #endif
 
+      // Per-bank access counters
+      s_per_bank_rd.resize(num_ranks*num_bankgroups*num_banks, 0);
+      s_per_bank_wr.resize(num_ranks*num_bankgroups*num_banks, 0);
+
       // Record Row address per bank for Adaptive Open-Page Policy
       m_open_row.resize(num_ranks*num_bankgroups*num_banks, -1);
       m_pre_open_row.resize(num_ranks*num_bankgroups*num_banks, -1);
@@ -420,8 +427,16 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
         m_dram->issue_command(req_it->command, req_it->addr_vec);
 
         
-        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) s_num_issue_reads++;
-        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) s_num_issue_writes++;
+        if(req_it->command == m_dram->m_commands("RD") || req_it->command == m_dram->m_commands("RDA")) {
+          s_num_issue_reads++;
+          int fbi = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+          if (fbi >= 0 && fbi < (int)s_per_bank_rd.size()) s_per_bank_rd[fbi]++;
+        }
+        if(req_it->command == m_dram->m_commands("WR") || req_it->command == m_dram->m_commands("WRA")) {
+          s_num_issue_writes++;
+          int fbi = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_banks + req_it->addr_vec[rank_idx] * num_bankgroups * num_banks;
+          if (fbi >= 0 && fbi < (int)s_per_bank_wr.size()) s_per_bank_wr[fbi]++;
+        }
 
         if(req_it->command == m_dram->m_commands("REFab")) {
           int nRFC_latency = m_dram->m_timing_vals("nRFC1");
@@ -750,6 +765,33 @@ class GenericDRAMController final : public IDRAMController, public Implementatio
       s_read_queue_len_avg = (float) s_read_queue_len / (float) m_clk;
       s_write_queue_len_avg = (float) s_write_queue_len / (float) m_clk;
       s_priority_queue_len_avg = (float) s_priority_queue_len / (float) m_clk;
+
+      // Per-bank access distribution
+      std::cout << "  === Per-Bank Access Distribution (Ch " << m_channel_id << ") ===" << std::endl;
+      for (int bk = 0; bk < num_banks; bk++) {
+        size_t bk_rd = 0, bk_wr = 0;
+        for (int rk = 0; rk < num_ranks; rk++)
+          for (int bg = 0; bg < num_bankgroups; bg++) {
+            int flat = bk + bg * num_banks + rk * num_bankgroups * num_banks;
+            bk_rd += s_per_bank_rd[flat];
+            bk_wr += s_per_bank_wr[flat];
+          }
+        std::cout << "  BK" << bk << ": RD=" << bk_rd << " WR=" << bk_wr
+                  << " total=" << (bk_rd + bk_wr) << std::endl;
+      }
+      // Per-bankgroup access distribution
+      std::cout << "  === Per-BankGroup Access Distribution (Ch " << m_channel_id << ") ===" << std::endl;
+      for (int bg = 0; bg < num_bankgroups; bg++) {
+        size_t bg_rd = 0, bg_wr = 0;
+        for (int rk = 0; rk < num_ranks; rk++)
+          for (int bk = 0; bk < num_banks; bk++) {
+            int flat = bk + bg * num_banks + rk * num_bankgroups * num_banks;
+            bg_rd += s_per_bank_rd[flat];
+            bg_wr += s_per_bank_wr[flat];
+          }
+        std::cout << "  BG" << bg << ": RD=" << bg_rd << " WR=" << bg_wr
+                  << " total=" << (bg_rd + bg_wr) << std::endl;
+      }
 
       // GB/s 
       // Request Bandwidth, DQ Bandwidth, Max DQ Bandwidth

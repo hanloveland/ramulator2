@@ -188,6 +188,9 @@ class AsyncDIMMNMAController {
     size_t s_num_nma_rd = 0;
     size_t s_num_nma_wr = 0;
     size_t s_num_nma_ref = 0;
+    // Per-bank access counters for BK interleaving verification
+    std::vector<size_t> s_per_bank_rd;   // [flat_bank_id] RD count
+    std::vector<size_t> s_per_bank_wr;   // [flat_bank_id] WR count
     size_t s_num_nma_instructions = 0;
     size_t s_num_nma_executions = 0;
     size_t s_num_nma_compute_only = 0;
@@ -433,6 +436,8 @@ class AsyncDIMMNMAController {
 
       // Initialize per-bank REQ FIFOs
       m_nma_req_buffer.resize(m_total_banks);
+      s_per_bank_rd.resize(m_total_banks, 0);
+      s_per_bank_wr.resize(m_total_banks, 0);
 
       // Initialize Phase 3: per-bank CMD FIFOs, H/N Arbiter, SR Unit, recovery
       m_cmd_fifo.resize(m_total_banks);
@@ -957,6 +962,30 @@ class AsyncDIMMNMAController {
       std::cout << "  WAIT:        " << s_nma_wait_cycles << std::endl;
       std::cout << "  DONE:        " << s_nma_done_cycles << std::endl;
       std::cout << "  Per-bank REQ FIFO outstanding: " << get_nma_outstanding() << std::endl;
+      // Per-bank access distribution (BK interleaving verification)
+      std::cout << "  === Per-Bank Access Distribution ===" << std::endl;
+      for (int bk = 0; bk < m_num_banks; bk++) {
+        size_t bk_rd = 0, bk_wr = 0;
+        for (int bg = 0; bg < m_num_bankgroups; bg++) {
+          int flat = bg * m_num_banks + bk;
+          bk_rd += s_per_bank_rd[flat];
+          bk_wr += s_per_bank_wr[flat];
+        }
+        std::cout << "  BK" << bk << ": RD=" << bk_rd << " WR=" << bk_wr
+                  << " total=" << (bk_rd + bk_wr) << std::endl;
+      }
+      // Per-bankgroup access distribution
+      std::cout << "  === Per-BankGroup Access Distribution ===" << std::endl;
+      for (int bg = 0; bg < m_num_bankgroups; bg++) {
+        size_t bg_rd = 0, bg_wr = 0;
+        for (int bk = 0; bk < m_num_banks; bk++) {
+          int flat = bg * m_num_banks + bk;
+          bg_rd += s_per_bank_rd[flat];
+          bg_wr += s_per_bank_wr[flat];
+        }
+        std::cout << "  BG" << bg << ": RD=" << bg_rd << " WR=" << bg_wr
+                  << " total=" << (bg_rd + bg_wr) << std::endl;
+      }
       if (m_concurrent_mode || s_num_cmd_received > 0) {
         std::cout << "  === Phase 3 Concurrent Mode ===" << std::endl;
         std::cout << "  CMD received:      " << s_num_cmd_received    << std::endl;
@@ -1480,8 +1509,8 @@ class AsyncDIMMNMAController {
       // Per-bank per-command CMD FIFO issue counters
       if      (entry.command == m_dram->m_commands("ACT_L")) { s_num_nma_act++; s_per_bank_cmd[bank_id].issue_act++; }
       else if (entry.command == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; s_per_bank_cmd[bank_id].issue_pre++; }
-      else if (entry.command == m_dram->m_commands("RD_L"))  { s_num_nma_rd++; s_num_cmd_fifo_rd++; s_per_bank_cmd[bank_id].issue_rd++; }
-      else if (entry.command == m_dram->m_commands("WR_L"))  { s_num_nma_wr++; s_num_cmd_fifo_wr++; s_per_bank_cmd[bank_id].issue_wr++; }
+      else if (entry.command == m_dram->m_commands("RD_L"))  { s_num_nma_rd++; s_num_cmd_fifo_rd++; s_per_bank_cmd[bank_id].issue_rd++; s_per_bank_rd[bank_id]++; }
+      else if (entry.command == m_dram->m_commands("WR_L"))  { s_num_nma_wr++; s_num_cmd_fifo_wr++; s_per_bank_cmd[bank_id].issue_wr++; s_per_bank_wr[bank_id]++; }
       log_cmd_fifo_issue(entry.command, bank_id);
 
       bool is_pre = (entry.command == m_dram->m_commands("PRE_L"));
@@ -1544,11 +1573,13 @@ class AsyncDIMMNMAController {
       else if (cmd == m_dram->m_commands("PRE_L")) { s_num_nma_pre++; }
       else if (cmd == m_dram->m_commands("RD_L"))  {
         s_num_nma_rd++; s_num_req_fifo_rd++;
+        s_per_bank_rd[bank_id]++;
         req.data_pending = true;
         req.data_complete_clk = m_clk + m_nCL + m_nBL;
       }
       else if (cmd == m_dram->m_commands("WR_L"))  {
         s_num_nma_wr++; s_num_req_fifo_wr++;
+        s_per_bank_wr[bank_id]++;
         req.data_pending = true;
         req.data_complete_clk = m_clk + m_nCWL + m_nBL;
       }
@@ -1841,12 +1872,14 @@ class AsyncDIMMNMAController {
           s_num_nma_pre++;
         } else if (req.command == m_dram->m_commands("RD_L")) {
           s_num_nma_rd++; s_num_req_fifo_rd++;
+          s_per_bank_rd[bank_id]++;
           // Don't pop — wait for data response (nCL + nBL)
           req.data_pending = true;
           req.data_complete_clk = m_clk + m_nCL + m_nBL;
           m_req_rr_bank_idx = (bank_id + 1) % m_total_banks;
         } else if (req.command == m_dram->m_commands("WR_L")) {
           s_num_nma_wr++; s_num_req_fifo_wr++;
+          s_per_bank_wr[bank_id]++;
           // Don't pop — wait for write data transfer (nCWL + nBL)
           req.data_pending = true;
           req.data_complete_clk = m_clk + m_nCWL + m_nBL;

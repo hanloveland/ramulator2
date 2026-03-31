@@ -29,8 +29,8 @@ SKIP_SIM=false
 RUN_EXP=""   # empty = all
 
 BINARY="./ramulator2"
-TRACE_ROOT="./generated_traces"
-LOG_ROOT="./run/log_experiments"
+TRACE_ROOT="./generated_traces_p"
+LOG_ROOT="./run/log_experiments_p2"
 
 # Configs
 CFG_BASELINE="configuration/ddr5_baseline_ncore_config.yaml"
@@ -121,7 +121,7 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_${wl}.txt"
                 run_one "E1_base_${wl}_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
-                    -p "Frontend.max_inst=500000" &
+                    -p "MemorySystem.trace_core_enable=false" &
                 job_throttle
 
                 # DBX host-only (pCH, no NDP)
@@ -129,6 +129,7 @@ if [ "$SKIP_SIM" = false ]; then
                 run_one "E1_dbx_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
                     -p "Frontend.core0_is_ndp_trace=false" \
+                    -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
@@ -137,14 +138,17 @@ if [ "$SKIP_SIM" = false ]; then
                 trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${sz}_${wl}.txt"
                 run_one "E1_dbxn_${wl}_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbxn_${wl}_${sz}.log" \
                     -p "Frontend.core0_trace=$trace" \
+                    -p "MemorySystem.trace_core_enable=false" \
                     -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                     -p "MemorySystem.DRAM.org.real_dq=4" &
                 job_throttle
 
-                # AsyncDIMM-N
+                # AsyncDIMM-N (NDP Only: core0 loads NMA trace, no concurrent mode)
                 trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${sz}_${wl}.txt"
                 run_one "E1_async_${wl}_${sz}" "$CFG_ASYNCDIMM" "$trace" "$EXP1_LOG/async_${wl}_${sz}.log" \
-                    -p "MemorySystem.trace_path=$trace" &
+                    -p "Frontend.core0_trace=$trace" \
+                    -p "MemorySystem.concurrent_mode_enable=false" \
+                    -p "MemorySystem.trace_core_enable=false" &
                 job_throttle
             done
         done
@@ -154,13 +158,14 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/baseline/baseline_${sz}_GEMV.txt"
             run_one "E1_base_GEMV_${sz}" "$CFG_BASELINE" "$trace" "$EXP1_LOG/base_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
-                -p "Frontend.max_inst=500000" &
+                -p "MemorySystem.trace_core_enable=false" &
             job_throttle
 
             trace="$TRACE_ROOT/exp1_base_standalone/pch_non_ndp/pch_non_ndp_x4_${sz}_GEMV.txt"
             run_one "E1_dbx_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbx_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
                 -p "Frontend.core0_is_ndp_trace=false" \
+                -p "MemorySystem.trace_core_enable=false" \
                 -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                 -p "MemorySystem.DRAM.org.real_dq=4" &
             job_throttle
@@ -168,13 +173,16 @@ if [ "$SKIP_SIM" = false ]; then
             trace="$TRACE_ROOT/exp1_base_standalone/pch_ndp/pch_ndp_x4_${sz}_GEMV.txt"
             run_one "E1_dbxn_GEMV_${sz}" "$CFG_DBX_NDP" "$trace" "$EXP1_LOG/dbxn_GEMV_${sz}.log" \
                 -p "Frontend.core0_trace=$trace" \
+                -p "MemorySystem.trace_core_enable=false" \
                 -p "MemorySystem.DRAM.org.preset=DDR5_16Gb_DBX_x4" \
                 -p "MemorySystem.DRAM.org.real_dq=4" &
             job_throttle
 
             trace="$TRACE_ROOT/exp1_base_standalone/asyncdimm_nma/asyncdimm_nma_${sz}_GEMV.txt"
             run_one "E1_async_GEMV_${sz}" "$CFG_ASYNCDIMM" "$trace" "$EXP1_LOG/async_GEMV_${sz}.log" \
-                -p "MemorySystem.trace_path=$trace" &
+                -p "Frontend.core0_trace=$trace" \
+                -p "MemorySystem.concurrent_mode_enable=false" \
+                -p "MemorySystem.trace_core_enable=false" &
             job_throttle
         done
 

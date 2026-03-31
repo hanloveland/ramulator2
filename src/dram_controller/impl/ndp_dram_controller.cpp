@@ -170,6 +170,9 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
     size_t s_num_read_reqs = 0;
     size_t s_num_write_reqs = 0;
     size_t s_num_other_reqs = 0;
+    // Per-bank access counters
+    std::vector<size_t> s_per_bank_rd;
+    std::vector<size_t> s_per_bank_wr;
     size_t s_queue_len = 0;
     size_t s_read_queue_len = 0;
     size_t s_write_queue_len = 0;
@@ -786,9 +789,11 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       // }
 
       // Record Row address per bank for Adaptive Open-Page Policy
-      m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank,-1);  
+      m_open_row.resize(num_pseudochannel*num_bankgroup*num_bank,-1);
       m_pre_open_row.resize(num_pseudochannel*num_bankgroup*num_bank, -1);
-      m_open_row_miss.resize(num_pseudochannel*num_bankgroup*num_bank, false);      
+      m_open_row_miss.resize(num_pseudochannel*num_bankgroup*num_bank, false);
+      s_per_bank_rd.resize(num_pseudochannel*num_bankgroup*num_bank, 0);
+      s_per_bank_wr.resize(num_pseudochannel*num_bankgroup*num_bank, 0);      
 
       m_ndp_read_latecny = m_dram->m_timing_vals("nCL") + m_dram->m_timing_vals("nBL");
       m_ndp_write_latecny = m_dram->m_timing_vals("nCWL") + m_dram->m_timing_vals("nBL");
@@ -1579,6 +1584,23 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
           update_request_stats(req_it);
         }
         m_dram->issue_command(req_it->command, req_it->addr_vec);
+
+        // Per-bank access tracking
+        {
+          int cmd = req_it->command;
+          bool is_rd = (cmd == m_cmds.RD || cmd == m_cmds.RDA ||
+                        cmd == m_cmds.NDP_DB_RD || cmd == m_cmds.NDP_DRAM_RD || cmd == m_cmds.NDP_DRAM_RDA);
+          bool is_wr = (cmd == m_cmds.WR || cmd == m_cmds.WRA ||
+                        cmd == m_cmds.NDP_DB_WR || cmd == m_cmds.NDP_DRAM_WR || cmd == m_cmds.NDP_DRAM_WRA);
+          if (is_rd || is_wr) {
+            int fbi = req_it->addr_vec[bank_idx] + req_it->addr_vec[bankgroup_idx] * num_bank
+                    + req_it->addr_vec[psuedo_ch_idx] * num_bankgroup * num_bank;
+            if (fbi >= 0 && fbi < (int)s_per_bank_rd.size()) {
+              if (is_rd) s_per_bank_rd[fbi]++;
+              else       s_per_bank_wr[fbi]++;
+            }
+          }
+        }
 
         // Issue NDP Command to DRAM
         if ((req_it->is_ndp_req && req_it->final_command == req_it->command)) {
@@ -2529,8 +2551,36 @@ class NDPDRAMController final : public IDRAMController, public Implementation {
       s_read_queue_len_avg = (float) s_read_queue_len / (float) m_clk;
       s_write_queue_len_avg = (float) s_write_queue_len / (float) m_clk;
       s_priority_queue_len_avg = (float) s_priority_queue_len / (float) m_clk;
-      s_read_prefetch_queue_len_avg = (float) s_read_prefetch_queue_len / (float) m_clk; 
-      s_write_prefetch_queue_len_avg = (float) s_write_prefetch_queue_len / (float) m_clk; 
+      s_read_prefetch_queue_len_avg = (float) s_read_prefetch_queue_len / (float) m_clk;
+      s_write_prefetch_queue_len_avg = (float) s_write_prefetch_queue_len / (float) m_clk;
+
+      // Per-bank access distribution
+      std::cout << "  === Per-Bank Access Distribution (Ch " << m_channel_id << ") ===" << std::endl;
+      for (int bk = 0; bk < num_bank; bk++) {
+        size_t bk_rd = 0, bk_wr = 0;
+        for (int pch = 0; pch < num_pseudochannel; pch++)
+          for (int bg = 0; bg < num_bankgroup; bg++) {
+            int flat = bk + bg * num_bank + pch * num_bankgroup * num_bank;
+            bk_rd += s_per_bank_rd[flat];
+            bk_wr += s_per_bank_wr[flat];
+          }
+        std::cout << "  BK" << bk << ": RD=" << bk_rd << " WR=" << bk_wr
+                  << " total=" << (bk_rd + bk_wr) << std::endl;
+      }
+      // Per-bankgroup access distribution
+      std::cout << "  === Per-BankGroup Access Distribution (Ch " << m_channel_id << ") ===" << std::endl;
+      for (int bg = 0; bg < num_bankgroup; bg++) {
+        size_t bg_rd = 0, bg_wr = 0;
+        for (int pch = 0; pch < num_pseudochannel; pch++)
+          for (int bk = 0; bk < num_bank; bk++) {
+            int flat = bk + bg * num_bank + pch * num_bankgroup * num_bank;
+            bg_rd += s_per_bank_rd[flat];
+            bg_wr += s_per_bank_wr[flat];
+          }
+        std::cout << "  BG" << bg << ": RD=" << bg_rd << " WR=" << bg_wr
+                  << " total=" << (bg_rd + bg_wr) << std::endl;
+      }
+
       // GB/s 
       // Request Bandwidth, DQ Bandwidth, Max DQ Bandwidth
       int tx_bytes = m_dram->m_internal_prefetch_size * m_dram->m_channel_width / 8;
