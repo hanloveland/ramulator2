@@ -232,9 +232,12 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     int m_nma_bk_idx   = -1;
 
     std::vector<int> m_nma_wr_send_cnt;   // [rank] NMAInst writes enqueued via send()
+    int m_nma_wr_pending_rank = -1;      // Deferred rank for send count (set before enqueue, counted after)
     std::vector<int> m_nma_wr_issue_cnt;  // [rank] NMAInst writes issued to DRAM
     std::vector<bool> m_nma_start_requested; // [rank] ctrl-reg write received, awaiting drain
     std::vector<std::optional<Request>> m_nma_start_hold; // [rank] ctrl-reg write held until NMAInst drain
+    std::vector<bool> m_nma_start_in_flight; // [rank] start flag released to write buffer, not yet issued
+    std::vector<Clk_t> m_conc_enter_clk;    // [rank] cycle when CONCURRENT mode entered (idle poll guard)
 
     // ===== Phase 3: Concurrent Mode =====
     // Per-bank Offload Table (OT): counts outstanding offloaded commands.
@@ -254,7 +257,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       bool is_read;
     };
     std::deque<ReturnUnitEntry> m_return_unit;    // Global RU (all ranks, in offload order)
-    static constexpr int RU_MAX_ENTRIES = 64;     // Paper: 64 total for 16 ranks
+    static constexpr int RU_MAX_ENTRIES = 128;
     std::vector<int> m_rt_pending_count;          // [rank] Accumulated read interrupts → RT batch size
     std::vector<std::deque<Request>> m_rt_read_pending; // [rank] Reads awaiting RT data return
 
@@ -445,6 +448,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
       m_nma_wr_issue_cnt.resize(num_ranks, 0);
       m_nma_start_requested.resize(num_ranks, false);
       m_nma_start_hold.resize(num_ranks, std::nullopt);
+      m_nma_start_in_flight.resize(num_ranks, false);
+      m_conc_enter_clk.resize(num_ranks, 0);
       m_nma_row_idx = m_dram->m_levels("row");
       m_nma_bg_idx  = m_dram->m_levels("bankgroup");
       m_nma_bk_idx  = m_dram->m_levels("bank");
@@ -504,6 +509,7 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         m_nma_wr_issue_cnt[rk] = 0;
         m_nma_start_requested[rk] = false;
         m_nma_start_hold[rk] = std::nullopt;
+        m_nma_start_in_flight[rk] = false;
       }
     }
 
@@ -706,17 +712,9 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         int req_bk  = req.addr_vec[m_nma_bk_idx];
         if (req_row == m_nma_ctrl_row) {
           if (req_bg == m_nma_buf_bg && req_bk == m_nma_buf_bk) {
-            // NMAInst write → track send count
-            m_nma_wr_send_cnt[req_rank_id]++;
-            req.is_ndp_req = true;  // Flag for issue-time tracking
-            #ifdef ASYNC_DEBUG
-            {
-              const char* mode_str = (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::CONCURRENT) ? "CONC" :
-                                     (m_mode_per_rank[req_rank_id] == AsyncDIMMMode::NMA) ? "NMA" : "HOST";
-              fprintf(stderr, "[%ld][NMA_WR] Ch%d Rk%d: NMAInst write #%d (mode=%s)\n",
-                (long)m_clk, m_channel_id, req_rank_id, m_nma_wr_send_cnt[req_rank_id], mode_str);
-            }
-            #endif
+            // NMAInst write → flag now, count after successful enqueue
+            req.is_ndp_req = true;
+            m_nma_wr_pending_rank = req_rank_id;  // Deferred count
           }
           else if (req_bg == m_nma_ctrl_bg && req_bk == m_nma_ctrl_bk) {
             // Ctrl-reg (start) write → hold in separate unit, NOT in write buffer
@@ -773,6 +771,14 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
         }
       }
 
+      // NMAInst write: increment send count only after successful enqueue
+      if ((is_success || is_success_forwarding) && m_nma_wr_pending_rank >= 0) {
+        m_nma_wr_send_cnt[m_nma_wr_pending_rank]++;
+        m_nma_wr_pending_rank = -1;
+      } else if (!is_success && !is_success_forwarding) {
+        m_nma_wr_pending_rank = -1;  // Reset on failure
+      }
+
       if (is_success || is_success_forwarding) {
         switch (req.type_id) {
           case Request::Type::Read:  s_num_read_reqs++;  break;
@@ -794,9 +800,19 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
     bool priority_send(Request& req) override {
       req.final_command = m_dram->m_request_translations(req.type_id);
 
+      int rank_id = req.addr_vec[m_rank_addr_idx];
+
+      // Skip RowPolicy cap PRE while start flag is in flight (released but not yet issued).
+      // Only REF (REFab/REFsb) is allowed through; cap PRE would become stuck as PREO
+      // after mode transition since PREO doesn't consume the request from priority buffer.
+      if (rank_id >= 0 && rank_id < m_num_rank && m_nma_start_in_flight[rank_id]) {
+        bool is_ref = (req.final_command == m_dram->m_commands("REFab") ||
+                       req.final_command == m_dram->m_commands("REFsb"));
+        if (!is_ref) return true;  // Silently drop cap PRE
+      }
+
       // All modes: enqueue refresh normally. For CONCURRENT/NMA ranks,
       // schedule_request() converts REFab → REFO (offloaded to NMA MC).
-      int rank_id = req.addr_vec[m_rank_addr_idx];
       bool is_success = m_priority_buffers[rank_id].enqueue(req);
       return is_success;
     }
@@ -813,12 +829,14 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
 
       // NMA start hold: release ctrl-reg WR to write buffer when all NMAInst WRs are issued
+      // Once released, m_nma_start_in_flight blocks RowPolicy cap PRE via priority_send()
       for (int rk_id = 0; rk_id < m_num_rank; rk_id++) {
         if (m_nma_start_hold[rk_id].has_value() &&
             m_nma_wr_send_cnt[rk_id] == m_nma_wr_issue_cnt[rk_id]) {
           auto& held_req = m_nma_start_hold[rk_id].value();
           if (m_write_buffers[rk_id].enqueue(held_req)) {
             m_nma_start_hold[rk_id] = std::nullopt;
+            m_nma_start_in_flight[rk_id] = true;
           }
         }
       }
@@ -898,9 +916,13 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
 
       // 1.7. NMA idle polling + C2H OT drain (Host MC driven)
       // Phase A: detect NMA idle → enter drain mode
+      // Guard: skip polling for ranks that just entered CONCURRENT mode.
+      // System's start_nma_execution() hasn't been called yet (runs after Host MC tick),
+      // so NMA is still IDLE → false positive. Wait at least NMA_POLL_INTERVAL cycles.
       if (m_query_nma_idle && m_clk % NMA_POLL_INTERVAL == 0) {
         for (int rk = 0; rk < m_num_rank; rk++) {
           if (m_mode_per_rank[rk] == AsyncDIMMMode::CONCURRENT && !m_offload_stopped[rk]) {
+            if (m_clk - m_conc_enter_clk[rk] < NMA_POLL_INTERVAL) continue;  // Too early
             if (m_query_nma_idle(rk)) {
               m_offload_stopped[rk] = true;   // block new offloads from rd/wr buffers
               m_c2h_draining[rk] = true;      // enable partial-offload completion mode
@@ -985,6 +1007,8 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
             m_mode_per_rank[cmd_rank_id] = m_concurrent_mode_enable
               ? AsyncDIMMMode::CONCURRENT : AsyncDIMMMode::NMA;
             m_nma_start_requested[cmd_rank_id] = false;
+            m_nma_start_in_flight[cmd_rank_id] = false;  // Start flag issued, clear in-flight
+            m_conc_enter_clk[cmd_rank_id] = m_clk;     // Record entry time for idle poll guard
             #ifdef ASYNC_DEBUG
             fprintf(stderr, "[%ld][NMA_START_ISSUED] Ch%d Rk%d: Start flag issued → mode=%s (inst_issued=%d)\n",
               (long)m_clk, m_channel_id, cmd_rank_id,
@@ -1186,10 +1210,18 @@ class AsyncDIMMHostController final : public IDRAMController, public Implementat
           buffer->remove(req_it);
         } else if (is_offload && cmd == m_dram->m_commands("ACTO")) {
           // ACTO → active_buffer (ensures RDO/WRO gets Step 1a priority)
-          req_it->is_actived = true;
-          if (!m_active_buffer.enqueue(*req_it))
-            throw std::runtime_error("Fail to enque to m_active_buffer");
-          buffer->remove(req_it);
+          // But block during C2H drain: prevent new active_buffer entries that
+          // would survive mode transition and become permanently stuck.
+          if (cmd_rank_id >= 0 && cmd_rank_id < m_num_rank &&
+              m_offload_stopped[cmd_rank_id]) {
+            // Offload stopped: do NOT move to active_buffer.
+            // Request stays in rd/wr buffer; will be served in HOST mode after C2H.
+          } else {
+            req_it->is_actived = true;
+            if (!m_active_buffer.enqueue(*req_it))
+              throw std::runtime_error("Fail to enque to m_active_buffer");
+            buffer->remove(req_it);
+          }
         }
         // PREO: request stays in buffer → next tick m_open_row closed → ACTO
       }

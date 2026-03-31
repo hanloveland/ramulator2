@@ -2553,6 +2553,250 @@ def sls_normal(f, sls_config_name):
     print(f"    Total:  {total_rd:>10,} lines (read-only, no write-back)")
 
 
+# =========================================================================
+#  SLS DBX-DIMM NDP Trace — Wildcard + Intra-Table Bank Interleaving
+# =========================================================================
+
+def sls_table_to_pch_bank(table_id):
+    """Map table_id (0~127) -> (ch, pch, bg, bk, local_t) for DBX-DIMM.
+    16 tables per PCH. Within PCH: local_t 0~7 → BK=0, 8~15 → BK=1.
+    bg = local_t % 8 for each pass."""
+    pch_idx = table_id // 16                   # 0~7
+    ch  = pch_idx // int(NUM_PSEUDOCHANNEL)
+    pch = pch_idx %  int(NUM_PSEUDOCHANNEL)
+    local_t = table_id % 16                    # 0~15 within this PCH
+    bg = local_t % 8                           # BG for table-per-bank
+    bk = local_t // 8                          # 0 or 1 (2 passes)
+    return ch, pch, bg, bk, local_t
+
+
+def sls_entry_to_row_col_interleaved(entry_idx):
+    """Convert entry index to (row_in_bg, col_start, bg) with intra-table
+    bank interleaving: entry-level round-robin across 8 BGs.
+
+    Entry-level interleaving distributes consecutive entries across BGs,
+    so Zipf hot entries (low indices) are spread evenly across all 8 BGs.
+
+    Layout: entry_idx → bg = entry_idx % 8
+            Within each BG, entries are packed sequentially:
+              logical_pos_in_bg = entry_idx // 8
+              row_in_bg = logical_pos_in_bg // vectors_per_row
+              col_start = (logical_pos_in_bg % vectors_per_row) * cols_per_vector
+    """
+    bg = entry_idx % 8
+    pos_in_bg = entry_idx // 8                          # entry's position within its BG
+    row_in_bg = pos_in_bg // SLS_VECTORS_PER_ROW        # row within this BG
+    col_start = (pos_in_bg % SLS_VECTORS_PER_ROW) * SLS_COLS_PER_VECTOR
+    return row_in_bg, col_start, bg
+
+
+def sls_pch_ndp(f, sls_config_name):
+    """Generate DBX-DIMM NDP SLS trace with V_RED Partial Vector + Wildcard.
+
+    V_RED partial vector approach:
+      - 8 ids = 2 tables × 4 partial vectors (cols)
+      - First LOAD initializes DM[id] with lookup 0's partial vector
+      - V_RED accumulates remaining (L-1) lookups per partial vector
+      - 8 V_REDs with distinct ids coexist → no BARRIER between them
+      - DRAM pipeline stays full: (L-1) × 2 tables × 4 cols = reads per pass
+
+    Pass structure: 2 tables per pass, 8 passes for 16 tables/PCH.
+    LOOP for batch repetition within a tile.
+    Batch tiling when descriptors exceed desc_store limit (1024).
+    """
+    config = sls_config_list[sls_config_name]
+    B, L = config["B"], config["L"]
+    T = SLS_NUM_TABLES
+    N = SLS_ENTRIES_PER_TABLE
+    cols_per_vec = SLS_COLS_PER_VECTOR        # 4
+
+    num_pch = int(NUM_CHANNEL) * int(NUM_PSEUDOCHANNEL)  # 8
+    tables_per_pch = T // num_pch                         # 16
+    tables_per_pass = 2                                   # 2 tables × 4 cols = 8 ids
+    passes = (tables_per_pch + tables_per_pass - 1) // tables_per_pass  # 8
+
+    # Tiling: descriptors per batch per PCH
+    # Per pass: 8 LOAD(opsize=0) + BAR + 8*(L-1) V_RED reads(opsize=0) + BAR
+    #         = 8 + 1 + 8*(L-1) + 1 = 8*L + 2
+    descs_per_pass = 8 * L + 2
+    # Max passes that fit in desc_store (1024) per tile, leaving room for DONE(1)
+    max_passes_per_tile = (1024 - 1) // descs_per_pass   # -1 for DONE
+    if max_passes_per_tile < 1:
+        print(f"  ERROR: SLS {sls_config_name} single pass descs={descs_per_pass} > 1023")
+        return
+    # If all passes fit in one tile per batch, use batch tiling
+    # Otherwise, use pass tiling (split passes across tiles within same batch)
+    if passes <= max_passes_per_tile:
+        # All passes fit → batch tiling
+        descs_per_batch = passes * descs_per_pass
+        tile_size = (1024 - 1) // descs_per_batch   # batches per tile
+        tile_size = max(tile_size, 1)
+        tile_size = min(tile_size, B)
+        num_tiles = (B + tile_size - 1) // tile_size
+        pass_tiles = False  # batch-level tiling
+    else:
+        # Need pass tiling: split passes within each batch
+        tile_size = 1  # 1 batch per tile group
+        num_tiles = B
+        pass_tiles = True  # pass-level tiling
+    passes_per_launch = min(passes, max_passes_per_tile)
+
+    num_pass_groups = (passes + passes_per_launch - 1) // passes_per_launch
+    total_launches = num_tiles * num_pass_groups
+
+    print(f"  SLS-DBX {sls_config_name}: B={B}, L={L}, T={T}, tables/PCH={tables_per_pch}")
+    print(f"    V_RED partial vector: {tables_per_pass} tables/pass, {passes} passes")
+    print(f"    descs/pass={descs_per_pass}, passes/launch={passes_per_launch}, pass_groups={num_pass_groups}")
+    print(f"    tile={tile_size} batches, num_tiles={num_tiles}, total_launches={total_launches}")
+
+    # Pre-generate Zipf indices: [T][B][L]
+    indices = sls_generate_zipf_indices(B, L, T, N, SLS_ZIPF_ALPHA, SLS_ZIPF_SEED)
+
+    # Build per-PCH table list
+    pch_tables = [[] for _ in range(num_pch)]
+    for t in range(T):
+        pch_idx = t // tables_per_pch
+        pch_tables[pch_idx].append(t)
+
+    # === Helper: build Inst_Slot for given pass range and loop_count ===
+    def build_inst_slot(pass_start, pass_end, loop_count):
+        ndp_inst_list = []
+        jump_pc = len(ndp_inst_list)
+        for p in range(pass_start, pass_end):
+            t_count = min(tables_per_pass, tables_per_pch - p * tables_per_pass)
+            # LOAD: first lookup, opsize=0 (1 col each)
+            for t in range(t_count):
+                for c in range(cols_per_vec):
+                    id_val = t * cols_per_vec + c
+                    ndp_inst_list.append(inst(ndp_inst_opcode["LOAD"], 0, id_val, 0, 0, 0, 0, 0, wildcard=1))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0, 0))
+            # V_RED: remaining (L-1) lookups, opsize=(L-2) means (L-1) reads
+            for t in range(t_count):
+                for c in range(cols_per_vec):
+                    id_val = t * cols_per_vec + c
+                    ndp_inst_list.append(inst(ndp_inst_opcode["V_RED"], L - 2, id_val, 0, 0, 0, 0, 0, wildcard=1))
+            ndp_inst_list.append(inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0, 0))
+        if loop_count > 0:
+            ndp_inst_list.append(inst(ndp_inst_opcode["LOOP"], 0, 0, 0, 0, loop_count, jump_pc, 0))
+        ndp_inst_list.append(inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0, 0))
+        return ndp_inst_list
+
+    # === Helper: build AccInst for given batch range and pass range ===
+    def build_acc_inst(b_start, b_end, pass_start, pass_end):
+        acc = [[] for _ in range(num_pch)]
+        for b in range(b_start, b_end):
+            for p in range(pass_start, pass_end):
+                t_start_local = p * tables_per_pass
+                t_count = min(tables_per_pass, tables_per_pch - t_start_local)
+
+                # LOAD phase: first lookup (l=0), opsize=0 per column
+                for t in range(t_count):
+                    for c in range(cols_per_vec):
+                        id_val = t * cols_per_vec + c
+                        for pch_idx in range(num_pch):
+                            global_t = pch_tables[pch_idx][t_start_local + t]
+                            entry_idx = indices[global_t][b][0]
+                            row_in_bg, col_start, bg = sls_entry_to_row_col_interleaved(entry_idx)
+                            ch_t, pch_t, _, _, _ = sls_table_to_pch_bank(global_t)
+                            bk = (t_start_local + t) // 8
+                            acc[pch_idx].append(
+                                acc_inst(ndp_acc_inst_opcode["RD"], 0,
+                                         ch_t, pch_t, bg, bk, row_in_bg, col_start + c,
+                                         id_val, 0, mode=0))
+                for pch_idx in range(num_pch):
+                    acc[pch_idx].append(
+                        acc_inst(ndp_acc_inst_opcode["BAR"], 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+                # V_RED phase: lookups 1~(L-1), opsize=0 per column
+                for t in range(t_count):
+                    for c in range(cols_per_vec):
+                        id_val = t * cols_per_vec + c
+                        for l in range(1, L):
+                            for pch_idx in range(num_pch):
+                                global_t = pch_tables[pch_idx][t_start_local + t]
+                                entry_idx = indices[global_t][b][l]
+                                row_in_bg, col_start, bg = sls_entry_to_row_col_interleaved(entry_idx)
+                                ch_t, pch_t, _, _, _ = sls_table_to_pch_bank(global_t)
+                                bk = (t_start_local + t) // 8
+                                acc[pch_idx].append(
+                                    acc_inst(ndp_acc_inst_opcode["RD"], 0,
+                                             ch_t, pch_t, bg, bk, row_in_bg, col_start + c,
+                                             id_val, 0, mode=0))
+                for pch_idx in range(num_pch):
+                    acc[pch_idx].append(
+                        acc_inst(ndp_acc_inst_opcode["BAR"], 0, 0, 0, 0, 0, 0, 0, 0, 0))
+
+        for pch_idx in range(num_pch):
+            acc[pch_idx].append(
+                acc_inst(ndp_acc_inst_opcode["DONE"], 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        return acc
+
+    # === Emit: iterate over batch tiles × pass groups ===
+    total_acc = 0
+    first_launch = True
+    for tile_idx in range(num_tiles):
+        b_start = tile_idx * tile_size
+        b_end = min(b_start + tile_size, B)
+        actual_tile = b_end - b_start
+
+        for pg in range(num_pass_groups):
+            p_start = pg * passes_per_launch
+            p_end = min(p_start + passes_per_launch, passes)
+            actual_passes = p_end - p_start
+
+            loop_count = actual_tile - 1
+
+            # Inst_Slot: emit for first launch, or when loop_count/pass_range differs
+            if first_launch or (pg == 0 and actual_tile != tile_size):
+                inst_list = build_inst_slot(p_start, p_end, loop_count)
+                if len(inst_list) > 1024:
+                    print(f"  ERROR: Inst_Slot overflow: {len(inst_list)} > 1024")
+                    return
+                if first_launch:
+                    print(f"    Inst_Slot count: {len(inst_list)}")
+                for ch in range(int(NUM_CHANNEL)):
+                    for pch in range(int(NUM_PSEUDOCHANNEL)):
+                        dump_ndp_inst(f, inst_list, ch, pch)
+                first_launch = False
+            elif pg > 0:
+                # Different pass range → re-emit Inst_Slot
+                inst_list = build_inst_slot(p_start, p_end, loop_count)
+                for ch in range(int(NUM_CHANNEL)):
+                    for pch in range(int(NUM_PSEUDOCHANNEL)):
+                        dump_ndp_inst(f, inst_list, ch, pch)
+
+            # AccInst
+            acc_inst_list = build_acc_inst(b_start, b_end, p_start, p_end)
+            for pch_idx in range(num_pch):
+                total_acc += len(acc_inst_list[pch_idx])
+
+            desc_counts = dump_ndp_acc_inst_per_pch(f, acc_inst_list)
+            write_ndp_start(f, desc_counts)
+
+            # Phase sync: wait for NDP to complete before next tile/pass
+            write_wait_ndp(f)
+
+    print(f"    Total AccInst (all PCH, all launches): {total_acc:,}")
+    print(f"    BARRIER per batch: {passes * 2} (LOAD + V_RED per pass)")
+
+
+def generate_sls_pch_trace(sls_config_name, output_path=''):
+    """Generate DBX-DIMM NDP SLS trace."""
+    if sls_config_name not in sls_config_list:
+        print(f"Error: Invalid SLS config '{sls_config_name}'. Available: {list(sls_config_list.keys())}")
+        return
+
+    config_scale_factor(1)  # x4
+
+    file_name = f"pch_ndp_x4_{sls_config_name}.txt"
+    file_name = output_path + "/" + file_name
+
+    with open(file_name, 'w') as f:
+        sls_pch_ndp(f, sls_config_name)
+
+    print(f"-> Generated SLS DBX-DIMM trace in '{file_name}'.")
+
+
 ###############################################################################
 # AsyncDIMM Trace Generation
 #
@@ -2686,52 +2930,46 @@ def asyncdimm_cal_it(input_size):
 
 def copy_asyncdimm(f, input_size):
     '''
-    AsyncDIMM COPY: Y = X
-    Uses base address registers + LOOP for compact program:
-      SET_BASE(id=0, row=5000)   — source base
-      SET_BASE(id=1, row=7000)   — destination base
-      LOAD(opsize, bg, bk, row=0, id=0) × num_bg  — read from base[0]+0
-      WBD(opsize, bg, bk, row=0, id=1)  × num_bg  — write to base[1]+0
-      INC_BASE(id=0, stride=1)   — base[0]++
-      INC_BASE(id=1, stride=1)   — base[1]++
-      LOOP(loop_cnt, jump_pc)    — repeat
-      EXIT
+    AsyncDIMM COPY: Y = X (BK interleaving)
+    Distributes iterations across all banks (BK0~3) for reduced bank contention.
+    Each BK phase: SET_BASE → LOAD×BG → BARRIER → WBD×BG → INC_BASE → LOOP
     '''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
 
     print(f"  AsyncDIMM COPY: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
 
-            # Set base address registers
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # src base
-            nma_inst_list.append(nma_inst_set_base(1, 7000))  # dst base
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0:
+                    continue
 
-            # Loop body start (jump_pc points here)
-            jump_pc = len(nma_inst_list)
+                # Set base address registers (same base row for all BKs — different physical banks)
+                nma_inst_list.append(nma_inst_set_base(0, 5000))  # src base
+                nma_inst_list.append(nma_inst_set_base(1, 7000))  # dst base
 
-            # LOAD from base[0] + 0 (effective_row = base_reg[0] + 0)
-            for bg in range(num_working_bg):
-                nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
+                jump_pc = len(nma_inst_list)
 
-            # BARRIER: wait for all LOADs to complete before WBD
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, bk, 0, 0, 0))
 
-            # WBD to base[1] + 0 (effective_row = base_reg[1] + 0)
-            for bg in range(num_working_bg):
-                nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
 
-            # Increment base registers
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))  # base[0] += 1
-                nma_inst_list.append(nma_inst_inc_base(1, 1))  # base[1] += 1
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["WBD"], opsize, bg, bk, 0, 0, 1))
+
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
 
             nma_inst_list.append(
                 nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
@@ -2740,52 +2978,41 @@ def copy_asyncdimm(f, input_size):
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
                 exit(1)
 
-            # Write NMAInst to inst-buffer
             dump_asyncdimm_nma_inst(f, nma_inst_list, ch, rk)
-
-            # Write ctrl-reg (start trigger)
             asyncdimm_start_nma(f, ch, rk)
 
 
 def axpy_asyncdimm(f, input_size):
-    '''
-    AsyncDIMM AXPY: Z = aX + Y
-      SET_BASE(id=0, row=5000)   — X base
-      SET_BASE(id=1, row=6000)   — Y base
-      SET_BASE(id=2, row=7000)   — Z base
-      LOAD_MUL(opsize, bg, bk, row=0, id=0) × num_bg  — Z = X * a
-      ADD(opsize, bg, bk, row=0, id=1)      × num_bg  — Z = Z + Y (Y from DRAM)
-      WBD(opsize, bg, bk, row=0, id=2)      × num_bg  — write Z
-      INC_BASE × 3, LOOP, EXIT
-    '''
+    '''AsyncDIMM AXPY: Z = aX + Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"  AsyncDIMM AXPY: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
-            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
-            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
-            jump_pc = len(nma_inst_list)
-
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["ADD"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
-
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                nma_inst_list.append(nma_inst_inc_base(2, 1))
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
-
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                nma_inst_list.append(nma_inst_set_base(0, 5000))
+                nma_inst_list.append(nma_inst_set_base(1, 6000))
+                nma_inst_list.append(nma_inst_set_base(2, 7000))
+                jump_pc = len(nma_inst_list)
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, bk, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["ADD"], opsize, bg, bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, bk, 0, 0, 2))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_inc_base(2, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
             nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
             if len(nma_inst_list) >= MAX_INST:
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
@@ -2795,40 +3022,36 @@ def axpy_asyncdimm(f, input_size):
 
 
 def axpby_asyncdimm(f, input_size):
-    '''
-    AsyncDIMM AXPBY: Z = aX + bY
-      LOAD_MUL(X, id=0)  — Z = X * a
-      SCALE_ADD(Y, id=1)  — Z = Z + b*Y
-      WBD(Z, id=2)
-    '''
+    '''AsyncDIMM AXPBY: Z = aX + bY (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"  AsyncDIMM AXPBY: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
-            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
-            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
-            jump_pc = len(nma_inst_list)
-
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
-
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                nma_inst_list.append(nma_inst_inc_base(2, 1))
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
-
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                nma_inst_list.append(nma_inst_set_base(0, 5000))
+                nma_inst_list.append(nma_inst_set_base(1, 6000))
+                nma_inst_list.append(nma_inst_set_base(2, 7000))
+                jump_pc = len(nma_inst_list)
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, bk, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, bk, 0, 0, 2))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_inc_base(2, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
             nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
             if len(nma_inst_list) >= MAX_INST:
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
@@ -2838,46 +3061,41 @@ def axpby_asyncdimm(f, input_size):
 
 
 def axpbypcz_asyncdimm(f, input_size):
-    '''
-    AsyncDIMM AXPBYPCZ: W = aX + bB + cZ
-      LOAD_MUL(X, id=0)   — W = X * a
-      SCALE_ADD(B, id=1)   — W = W + b*B
-      SCALE_ADD(Z, id=2)   — W = W + c*Z
-      WBD(W, id=3)
-    '''
+    '''AsyncDIMM AXPBYPCZ: W = aX + bB + cZ (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"  AsyncDIMM AXPBYPCZ: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
-            nma_inst_list.append(nma_inst_set_base(1, 6000))  # B
-            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
-            nma_inst_list.append(nma_inst_set_base(3, 8000))  # W
-            jump_pc = len(nma_inst_list)
-
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, ndp_bk, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, ndp_bk, 0, 0, 2))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 3))
-
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                nma_inst_list.append(nma_inst_inc_base(2, 1))
-                nma_inst_list.append(nma_inst_inc_base(3, 1))
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
-
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                nma_inst_list.append(nma_inst_set_base(0, 5000))
+                nma_inst_list.append(nma_inst_set_base(1, 6000))
+                nma_inst_list.append(nma_inst_set_base(2, 7000))
+                nma_inst_list.append(nma_inst_set_base(3, 8000))
+                jump_pc = len(nma_inst_list)
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD_MUL"], opsize, bg, bk, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["SCALE_ADD"], opsize, bg, bk, 0, 0, 2))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, bk, 0, 0, 3))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_inc_base(2, 1))
+                    nma_inst_list.append(nma_inst_inc_base(3, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
             nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
             if len(nma_inst_list) >= MAX_INST:
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
@@ -2887,40 +3105,36 @@ def axpbypcz_asyncdimm(f, input_size):
 
 
 def xmy_asyncdimm(f, input_size):
-    '''
-    AsyncDIMM XMY: Z = X ⊙ Y (element-wise multiply)
-      LOAD(X, id=0)   — Z = X
-      MUL(Y, id=1)    — Z = Z * Y (Y from DRAM)
-      WBD(Z, id=2)
-    '''
+    '''AsyncDIMM XMY: Z = X ⊙ Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"  AsyncDIMM XMY: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
-            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
-            nma_inst_list.append(nma_inst_set_base(2, 7000))  # Z
-            jump_pc = len(nma_inst_list)
-
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["MUL"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, ndp_bk, 0, 0, 2))
-
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                nma_inst_list.append(nma_inst_inc_base(2, 1))
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
-
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                nma_inst_list.append(nma_inst_set_base(0, 5000))
+                nma_inst_list.append(nma_inst_set_base(1, 6000))
+                nma_inst_list.append(nma_inst_set_base(2, 7000))
+                jump_pc = len(nma_inst_list)
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, bk, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["MUL"], opsize, bg, bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], opsize, bg, bk, 0, 0, 2))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_inc_base(2, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
             nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
             if len(nma_inst_list) >= MAX_INST:
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
@@ -2930,53 +3144,39 @@ def xmy_asyncdimm(f, input_size):
 
 
 def dot_asyncdimm(f, input_size):
-    '''
-    AsyncDIMM DOT: c = X · Y (dot product)
-      LOAD(X, id=0)    — Z = X
-      MAC(Y, id=1)     — Z += X * Y (partial sums across BGs)
-      T_V_RED(2*num_bg) — reduce partial sums across BGs
-      T_ADD              — combine
-      T_S_RED            — scalar reduction
-      WBD(c, id=2, opsize=0) — write scalar result (1 element)
-    Note: AsyncDIMM has no SELF_EXEC_ON/OFF. T_* ops are VMA-internal (NONE type).
-    '''
+    '''AsyncDIMM DOT: c = X · Y (BK interleaving)'''
     iteration, num_working_bg, opsize = asyncdimm_cal_it(input_size)
-    ndp_bk = ASYNCDIMM_NDP_TARGET_BK
+    num_banks = ASYNCDIMM_NUM_BANK
+    iterations_per_bk = max(1, iteration // num_banks)
     print(f"  AsyncDIMM DOT: size={input_size}, iteration={iteration}, "
-          f"working_bg={num_working_bg}, opsize={opsize}")
+          f"working_bg={num_working_bg}, opsize={opsize}, iter_per_bk={iterations_per_bk}")
 
     for ch in range(ASYNCDIMM_NUM_CHANNEL):
         for rk in range(ASYNCDIMM_NUM_RANK):
             nma_inst_list = []
-            nma_inst_list.append(nma_inst_set_base(0, 5000))  # X
-            nma_inst_list.append(nma_inst_set_base(1, 6000))  # Y
-            nma_inst_list.append(nma_inst_set_base(2, 7000))  # c (result)
-            jump_pc = len(nma_inst_list)
-
-            # LOAD X
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, ndp_bk, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-            # MAC: Z += X * Y (Y from DRAM)
-            for bg in range(num_working_bg):
-                nma_inst_list.append(nma_inst(ndp_inst_opcode["MAC"], opsize, bg, ndp_bk, 0, 0, 1))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
-
-            # Reduction (VMA-internal, no DRAM access)
-            if num_working_bg > 1:
-                nma_inst_list.append(
-                    nma_inst(ndp_inst_opcode["T_V_RED"], (2 * num_working_bg) - 1, 0, 0, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["T_ADD"], 0, 0, 0, 0, 0, 0))
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["T_S_RED"], 0, 0, 0, 0, 0, 0))
-
-            # WBD scalar result (opsize=0 → 1 write)
-            nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], 0, 0, ndp_bk, 0, 0, 2))
-
-            if iteration > 1:
-                nma_inst_list.append(nma_inst_inc_base(0, 1))
-                nma_inst_list.append(nma_inst_inc_base(1, 1))
-                nma_inst_list.append(nma_inst_loop(iteration - 1, jump_pc))
-
+            for bk in range(num_banks):
+                iters_this_bk = iterations_per_bk + (1 if bk < (iteration % num_banks) else 0)
+                if iters_this_bk == 0: continue
+                nma_inst_list.append(nma_inst_set_base(0, 5000))
+                nma_inst_list.append(nma_inst_set_base(1, 6000))
+                nma_inst_list.append(nma_inst_set_base(2, 7000))
+                jump_pc = len(nma_inst_list)
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["LOAD"], opsize, bg, bk, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                for bg in range(num_working_bg):
+                    nma_inst_list.append(nma_inst(ndp_inst_opcode["MAC"], opsize, bg, bk, 0, 0, 1))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["BARRIER"], 0, 0, 0, 0, 0, 0))
+                if num_working_bg > 1:
+                    nma_inst_list.append(
+                        nma_inst(ndp_inst_opcode["T_V_RED"], (2 * num_working_bg) - 1, 0, 0, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["T_ADD"], 0, 0, 0, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["T_S_RED"], 0, 0, 0, 0, 0, 0))
+                nma_inst_list.append(nma_inst(ndp_inst_opcode["WBD"], 0, 0, bk, 0, 0, 2))
+                if iters_this_bk > 1:
+                    nma_inst_list.append(nma_inst_inc_base(0, 1))
+                    nma_inst_list.append(nma_inst_inc_base(1, 1))
+                    nma_inst_list.append(nma_inst_loop(iters_this_bk - 1, jump_pc))
             nma_inst_list.append(nma_inst(ndp_inst_opcode["EXIT"], 0, 0, 0, 0, 0, 0))
             if len(nma_inst_list) >= MAX_INST:
                 print(f"Error: NMAInst count ({len(nma_inst_list)}) exceeds MAX_INST ({MAX_INST})")
@@ -3388,10 +3588,11 @@ if __name__ == '__main__':
     # =====================================================================
     #  Experiment selector — set True/False to enable/disable each
     # =====================================================================
-    GEN_EXP1_BASE_STANDALONE   = True   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
-    GEN_EXP2_SCALING_DRAM      = True   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
-    GEN_EXP3_SCALING_DIMM      = True   # x4: 1, 2, 4, 8, 16 DIMM DBX
+    GEN_EXP1_BASE_STANDALONE   = False   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
+    GEN_EXP2_SCALING_DRAM      = False   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
+    GEN_EXP3_SCALING_DIMM      = False   # x4: 1, 2, 4, 8, 16 DIMM DBX
     GEN_SLS_BASELINE           = True   # SLS baseline (conventional DDR5)
+    GEN_SLS_DBX                = True   # SLS DBX-DIMM NDP (Wildcard + Interleaving)
 
     root_path = "generated_traces"
 
@@ -3465,6 +3666,24 @@ if __name__ == '__main__':
             generate_sls_trace(sls_cfg, sls_root)
 
         print(f"[SLS] Done.")
+
+    # =================================================================
+    #  SLS DBX-DIMM NDP: Wildcard + Intra-Table Bank Interleaving
+    #    x4 DRAM, 1 DIMM, 8 PCH (2CH × 4PCH), 16 tables/PCH
+    # =================================================================
+    if GEN_SLS_DBX:
+        sls_dbx_root = root_path + "/sls_dbx"
+        setup_dir(sls_dbx_root)
+
+        print()
+        print("[SLS-DBX] DBX-DIMM NDP: Wildcard + Interleaving")
+        print(f"  Output: {sls_dbx_root}")
+        print()
+
+        for sls_cfg in sls_config_names:
+            generate_sls_pch_trace(sls_cfg, sls_dbx_root)
+
+        print(f"[SLS-DBX] Done.")
 
     # =================================================================
     #  Experiment 2: Scaling DRAM Device
