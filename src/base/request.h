@@ -169,7 +169,7 @@ struct AccInst_Slot {
  *   === CONTROL type: no DRAM access, no compute ===
  *  48  BARRIER    —                  Wait for all outstanding requests to drain
  *  49  EXIT       —                  NMA execution complete → NMA_DONE
- *  52  LOOP       —                  etc[11:6]=loop_cnt, etc[5:0]=jump_pc
+ *  52  LOOP       —                  row=loop_cnt(18b), etc=jump_pc(12b)
  *                                    In-place counter: cnt < loop_cnt → jump, else fall through
  *  53  SET_BASE   —                  base_reg[id] = row (set base address register)
  *  54  INC_BASE   —                  base_reg[id] += row (increment by stride, 18-bit)
@@ -236,7 +236,7 @@ struct NMAInst_Slot {
                        //   cnt < loop_cnt → cnt++, pc = jump_pc (loop back)
                        //   cnt >= loop_cnt → cnt = 0, pc++ (fall through)
   int loop_cnt = -1;   // LOOP: decoded from row field (18b, max 262143)
-  int jump_pc = -1;    // LOOP: decoded from col field (7b, max 127)
+  int jump_pc = -1;    // LOOP: decoded from etc field (12b, max 4095)
 
   NMAInst_Slot() : valid(false), cnt(0) {};
 
@@ -244,10 +244,10 @@ struct NMAInst_Slot {
                int _row, int _col, int _id, int _etc) :
     valid(is_valid), comp_opcode(_comp_opcode), opsize(_opsize),
     bg(_bg), bk(_bk), row(_row), col(_col), id(_id), etc(_etc), cnt(0) {
-    // Decode LOOP fields from row/col (LOOP has no memory access, reuses these fields)
+    // Decode LOOP fields (LOOP has no memory access, reuses row/etc fields)
     if (_comp_opcode == LOOP) {
       loop_cnt = _row;  // row(18b): max 262143 iterations
-      jump_pc  = _col;  // col(7b): max 127 jump target
+      jump_pc  = _etc;  // etc(12b): max 4095 jump target
     }
   };
 

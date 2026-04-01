@@ -2713,8 +2713,8 @@ def nma_inst(comp_opcode, opsize, bg, bk, row, col, id, etc=0):
     return inst_64bit
 
 def nma_inst_loop(loop_cnt, jump_pc):
-    """Encode LOOP NMAInst: row=loop_cnt(18b), col=jump_pc(7b)"""
-    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, loop_cnt, jump_pc, 0)
+    """Encode LOOP NMAInst: row=loop_cnt(18b), etc=jump_pc(12b)"""
+    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, loop_cnt, 0, 0, jump_pc)
 
 def nma_inst_set_base(reg_id, row_value):
     """SET_BASE: base_reg[reg_id] = row_value"""

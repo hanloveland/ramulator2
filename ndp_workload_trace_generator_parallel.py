@@ -2713,8 +2713,8 @@ def nma_inst(comp_opcode, opsize, bg, bk, row, col, id, etc=0):
     return inst_64bit
 
 def nma_inst_loop(loop_cnt, jump_pc):
-    """Encode LOOP NMAInst: row=loop_cnt(18b), col=jump_pc(7b)"""
-    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, loop_cnt, jump_pc, 0)
+    """Encode LOOP NMAInst: row=loop_cnt(18b), etc=jump_pc(12b)"""
+    return nma_inst(ndp_inst_opcode["LOOP"], 0, 0, 0, loop_cnt, 0, 0, jump_pc)
 
 def nma_inst_set_base(reg_id, row_value):
     """SET_BASE: base_reg[reg_id] = row_value"""
@@ -3483,159 +3483,184 @@ def crete_folder(folder_path):
     if not os.path.exists(folder_path):
         os.mkdir(folder_path)
 
-def _worker_generate_trace(args):
-    """Worker for ProcessPoolExecutor — each process has independent globals."""
-    workload, size, output_path, pch, is_ndp_ops, scaling_factor, num_dimm = args
-    generate_trace(workload, size, output_path, pch, is_ndp_ops, scaling_factor, num_dimm)
-
-def _worker_asyncdimm_trace(args):
-    """Worker for ProcessPoolExecutor — AsyncDIMM trace generation."""
-    workload, size, output_path = args
-    generate_asyncdimm_trace(workload, size, output_path)
-
-def _worker_sls_trace(args):
-    """Worker for ProcessPoolExecutor — SLS trace generation."""
-    sls_cfg, output_path = args
-    generate_sls_trace(sls_cfg, output_path)
-
-def _worker_sls_pch_trace(args):
-    """Worker for ProcessPoolExecutor — SLS DBX trace generation."""
-    sls_cfg, output_path = args
-    generate_sls_pch_trace(sls_cfg, output_path)
-
-
 if __name__ == '__main__':
-    from concurrent.futures import ProcessPoolExecutor, as_completed
-    import time
-
     print("=" * 72)
-    print(" NDP Workload Trace Generator (Parallel)")
+    print(" NDP Workload Trace Generator")
     print("=" * 72)
 
     BLAS_WORKLOADS = ["COPY", "AXPY", "AXPBY", "AXPBYPCZ", "XMY", "DOT"]
-    MAX_WORKERS = os.cpu_count() or 8
 
-    GEN_EXP1_BASE_STANDALONE   = True
-    GEN_EXP2_SCALING_DRAM      = False
-    GEN_EXP3_SCALING_DIMM      = False
-    GEN_SLS_BASELINE           = False
-    GEN_SLS_DBX                = False
+    # =====================================================================
+    #  Experiment selector — set True/False to enable/disable each
+    # =====================================================================
+    GEN_EXP1_BASE_STANDALONE   = True   # 1 DIMM, x4: Base, AsyncDIMM-N, DBX-N
+    GEN_EXP2_SCALING_DRAM      = True   # 1 DIMM: Base, DBX_x4, DBX_x8, DBX_x16
+    GEN_EXP3_SCALING_DIMM      = True   # x4: 1, 2, 4, 8, 16 DIMM DBX
+    GEN_SLS_BASELINE           = False   # SLS baseline (conventional DDR5)
+    GEN_SLS_DBX                = False   # SLS DBX-DIMM NDP (Wildcard + Interleaving)
 
     root_path = "generated_traces_p"
 
     def setup_dir(path):
+        """Create directory tree, removing existing if present."""
         p = Path(path)
         if p.exists() and p.is_dir():
             shutil.rmtree(path)
             print(f"  Removed existing: {path}")
         os.makedirs(path, exist_ok=True)
 
-    def run_parallel(task_list, worker_fn, label):
-        if not task_list:
-            return
-        t0 = time.time()
-        print(f"  [{label}] Submitting {len(task_list)} tasks (workers={MAX_WORKERS})...")
-        done_count = 0
-        with ProcessPoolExecutor(max_workers=MAX_WORKERS) as executor:
-            futures = {executor.submit(worker_fn, t): t for t in task_list}
-            for f in as_completed(futures):
-                try:
-                    f.result()
-                    done_count += 1
-                except Exception as e:
-                    print(f"  ERROR in task {futures[f]}: {e}")
-                    raise
-        elapsed = time.time() - t0
-        print(f"  [{label}] {done_count}/{len(task_list)} tasks done in {elapsed:.1f}s")
-
+    # =================================================================
+    #  Experiment 1: Base Standalone
+    #    1 DIMM, x4 DRAM
+    #    - baseline (conventional DDR5)
+    #    - pch_non_ndp (DBX host-only, no NDP)
+    #    - pch_ndp (DBX with NDP = DBX-N)
+    #    - asyncdimm_nma (AsyncDIMM-N)
+    # =================================================================
     if GEN_EXP1_BASE_STANDALONE:
         exp1_root = root_path + "/exp1_base_standalone"
         exp1_baseline     = exp1_root + "/baseline"
         exp1_pch_non_ndp  = exp1_root + "/pch_non_ndp"
         exp1_pch_ndp      = exp1_root + "/pch_ndp"
         exp1_asyncdimm    = exp1_root + "/asyncdimm_nma"
+
         setup_dir(exp1_root)
         for d in [exp1_baseline, exp1_pch_non_ndp, exp1_pch_ndp, exp1_asyncdimm]:
             os.makedirs(d, exist_ok=True)
+
         print()
         print("[Exp1] Base Standalone: 1 DIMM, x4")
-        trace_tasks = []
-        asyncdimm_tasks = []
+        print(f"  Output: {exp1_root}")
+        print()
+
+        # BLAS 1-level workloads
         for bench in BLAS_WORKLOADS:
             for size in input_size_list:
-                # trace_tasks.append((bench, size, exp1_baseline, False, False, 1, 1))
-                # trace_tasks.append((bench, size, exp1_pch_non_ndp, True, False, 1, 1))
-                trace_tasks.append((bench, size, exp1_pch_ndp, True, True, 1, 1))
-                asyncdimm_tasks.append((bench, size, exp1_asyncdimm))
+                # Baseline (conventional DDR5, no pCH)
+                generate_trace(bench, size, exp1_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+                # DBX host-only (pCH, no NDP)
+                generate_trace(bench, size, exp1_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+                # DBX-N (pCH + NDP)
+                generate_trace(bench, size, exp1_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=1)
+                # AsyncDIMM-N
+                generate_asyncdimm_trace(bench, size, exp1_asyncdimm)
+
+        # GEMV
         for size in mat_input_size_list:
-            # trace_tasks.append(("GEMV", size, exp1_baseline, False, False, 1, 1))
-            # trace_tasks.append(("GEMV", size, exp1_pch_non_ndp, True, False, 1, 1))
-            trace_tasks.append(("GEMV", size, exp1_pch_ndp, True, True, 1, 1))
-            asyncdimm_tasks.append(("GEMV", size, exp1_asyncdimm))
-        run_parallel(trace_tasks, _worker_generate_trace, "Exp1-DBX")
-        run_parallel(asyncdimm_tasks, _worker_asyncdimm_trace, "Exp1-AsyncDIMM")
+            generate_trace("GEMV", size, exp1_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+            generate_trace("GEMV", size, exp1_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
+            generate_trace("GEMV", size, exp1_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=1)
+            generate_asyncdimm_trace("GEMV", size, exp1_asyncdimm)
+
         print(f"[Exp1] Done.")
 
+    # =================================================================
+    #  SLS Baseline: Recommendation System workload
+    #    Conventional DDR5, Zipf random access to 128 embedding tables
+    # =================================================================
     if GEN_SLS_BASELINE:
         sls_root = root_path + "/sls_baseline"
         setup_dir(sls_root)
+
         print()
-        print("[SLS] Baseline")
-        sls_tasks = [(cfg, sls_root) for cfg in sls_config_names]
-        run_parallel(sls_tasks, _worker_sls_trace, "SLS")
+        print("[SLS] Baseline: conventional DDR5, Zipf(1.05)")
+        print(f"  Output: {sls_root}")
+        print()
+
+        for sls_cfg in sls_config_names:
+            generate_sls_trace(sls_cfg, sls_root)
+
         print(f"[SLS] Done.")
 
+    # =================================================================
+    #  SLS DBX-DIMM NDP: Wildcard + Intra-Table Bank Interleaving
+    #    x4 DRAM, 1 DIMM, 8 PCH (2CH × 4PCH), 16 tables/PCH
+    # =================================================================
     if GEN_SLS_DBX:
         sls_dbx_root = root_path + "/sls_dbx"
         setup_dir(sls_dbx_root)
+
         print()
-        print("[SLS-DBX] DBX-DIMM NDP")
-        sls_dbx_tasks = [(cfg, sls_dbx_root) for cfg in sls_config_names]
-        run_parallel(sls_dbx_tasks, _worker_sls_pch_trace, "SLS-DBX")
+        print("[SLS-DBX] DBX-DIMM NDP: Wildcard + Interleaving")
+        print(f"  Output: {sls_dbx_root}")
+        print()
+
+        for sls_cfg in sls_config_names:
+            generate_sls_pch_trace(sls_cfg, sls_dbx_root)
+
         print(f"[SLS-DBX] Done.")
 
+    # =================================================================
+    #  Experiment 2: Scaling DRAM Device
+    #    1 DIMM, x4 / x8 / x16
+    #    - baseline (conventional DDR5, x4 only)
+    #    - pch_non_ndp per scaling
+    #    - pch_ndp per scaling (DBX_x4, DBX_x8, DBX_x16)
+    # =================================================================
     if GEN_EXP2_SCALING_DRAM:
         exp2_root = root_path + "/exp2_scaling_dram"
         exp2_baseline    = exp2_root + "/baseline"
         exp2_pch_non_ndp = exp2_root + "/pch_non_ndp"
         exp2_pch_ndp     = exp2_root + "/pch_ndp"
+
         setup_dir(exp2_root)
         for d in [exp2_baseline, exp2_pch_non_ndp, exp2_pch_ndp]:
             os.makedirs(d, exist_ok=True)
+
         print()
         print("[Exp2] Scaling DRAM Device: 1 DIMM, x4/x8/x16")
-        trace_tasks = []
+        print(f"  Output: {exp2_root}")
+        print()
+
+        # BLAS 1-level
         for bench in BLAS_WORKLOADS:
             for size in input_size_list:
-                trace_tasks.append((bench, size, exp2_baseline, False, False, 1, 1))
+                # Baseline (x4 only, conventional)
+                generate_trace(bench, size, exp2_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
                 for scaling in [1, 2, 4]:
-                    trace_tasks.append((bench, size, exp2_pch_non_ndp, True, False, scaling, 1))
-                    trace_tasks.append((bench, size, exp2_pch_ndp, True, True, scaling, 1))
+                    generate_trace(bench, size, exp2_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=scaling, num_dimm=1)
+                    generate_trace(bench, size, exp2_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=scaling, num_dimm=1)
+
+        # GEMV
         for size in mat_input_size_list:
-            trace_tasks.append(("GEMV", size, exp2_baseline, False, False, 1, 1))
+            generate_trace("GEMV", size, exp2_baseline, pch=False, is_ndp_ops=False, scaling_factor=1, num_dimm=1)
             for scaling in [1, 2, 4]:
-                trace_tasks.append(("GEMV", size, exp2_pch_non_ndp, True, False, scaling, 1))
-                trace_tasks.append(("GEMV", size, exp2_pch_ndp, True, True, scaling, 1))
-        run_parallel(trace_tasks, _worker_generate_trace, "Exp2")
+                generate_trace("GEMV", size, exp2_pch_non_ndp, pch=True, is_ndp_ops=False, scaling_factor=scaling, num_dimm=1)
+                generate_trace("GEMV", size, exp2_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=scaling, num_dimm=1)
+
         print(f"[Exp2] Done.")
 
+    # =================================================================
+    #  Experiment 3: Scaling DIMMs
+    #    x4 DRAM, 1 / 2 / 4 / 8 / 16 DIMM
+    #    - pch_ndp per DIMM count (DBX-N)
+    #    Fixed total data: input_size × 8 PCH (1 DIMM baseline)
+    # =================================================================
     if GEN_EXP3_SCALING_DIMM:
         exp3_root    = root_path + "/exp3_scaling_dimm"
         exp3_pch_ndp = exp3_root + "/pch_ndp"
+
         setup_dir(exp3_root)
         os.makedirs(exp3_pch_ndp, exist_ok=True)
+
         print()
         print("[Exp3] Scaling DIMMs: x4, 1/2/4/8/16 DIMM")
+        print(f"  Output: {exp3_root}")
+        print()
+
         dimm_counts = [1, 2, 4, 8, 16]
-        trace_tasks = []
+
+        # BLAS 1-level
         for bench in BLAS_WORKLOADS:
             for size in input_size_list:
                 for nd in dimm_counts:
-                    trace_tasks.append((bench, size, exp3_pch_ndp, True, True, 1, nd))
+                    generate_trace(bench, size, exp3_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=nd)
+
+        # GEMV
         for size in mat_input_size_list:
             for nd in dimm_counts:
-                trace_tasks.append(("GEMV", size, exp3_pch_ndp, True, True, 1, nd))
-        run_parallel(trace_tasks, _worker_generate_trace, "Exp3")
+                generate_trace("GEMV", size, exp3_pch_ndp, pch=True, is_ndp_ops=True, scaling_factor=1, num_dimm=nd)
+
         print(f"[Exp3] Done.")
 
     print()
