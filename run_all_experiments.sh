@@ -40,8 +40,8 @@ CFG_ASYNCDIMM="configuration/asyncdimm_nma_test.yaml"
 
 # Workload / size definitions
 BLAS_WL=("COPY" "AXPY" "AXPBY" "AXPBYPCZ" "XMY" "DOT")
-BLAS_SZ=("8K" "32K" "128K" "512K" "2M" "8M")
-GEMV_SZ=("8K" "16K" "32K" "64K" "128K")
+BLAS_SZ=("8K" "128K" "2M")
+GEMV_SZ=("8K" "32K" "128K")
 
 # Exp4: Concurrent mode — SPEC host + tcore GEMV
 SPEC_TRACE_ROOT="../spec_trace"
